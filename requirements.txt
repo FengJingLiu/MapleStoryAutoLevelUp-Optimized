@@ -1,0 +1,6 @@
+opencv-python
+pydirectinput
+pywin32
+numpy
+Pillow
+windows-capture
