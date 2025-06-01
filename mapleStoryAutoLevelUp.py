@@ -1,17 +1,17 @@
 import time
-import sys
 import cv2
 import numpy as np
 import pydirectinput
-from collections import Counter
 import threading
 from windows_capture import WindowsCapture, Frame, InternalCaptureControl
 import keyboard
 import pygetwindow as gw
 import random
+import argparse
 
 # local import
 from config import Config
+from logger import logger
 
 # Do not modify the following parameters
 # color code for patrol route
@@ -23,6 +23,7 @@ COLOR_CODE = {
     (0,255,255): "jump right", # sky blue
     (255,0,255): "jump", # purple
     (127,127,127): "up", # gray
+    (0,255,0): "stop", # green
     (255,255,0): "goal", # yellow
 }
 GAME_WINDOW_TITLE = 'MapleStory Worlds-Artale (繁體中文版)'
@@ -30,12 +31,14 @@ GAME_WINDOW_TITLE = 'MapleStory Worlds-Artale (繁體中文版)'
 # Global Variables
 IS_RUN = True
 FAKE_KEYBOARD_COMMAND = ""
-WIN_LIST = []
 FRAME_BUFFER = None
-CFG = Config
+CFG = Config # Custumized configuration
 LOCK_FRAME_BUFFER = threading.Lock()
+STATUS = "hunting" # 'resting', 'finding_rune', 'near_rune', 'solving_rune'
+T_LAST_SWITCH_STATUS = time.time() # timestamp when status switches last time
+IS_DEBUG_MONSTER = False # option to enable output monster debuging window
 
-# Create the capture session
+# Create game screen capture session 
 capture = WindowsCapture(window_name=GAME_WINDOW_TITLE)
 
 @capture.event
@@ -54,15 +57,42 @@ def on_closed():
     '''
     on_closed
     '''
-    print("Capture session closed.")
+    logger.info("Capture session closed.")
     cv2.destroyAllWindows()
 
 def is_game_window_active():
+    '''
+    Check if the game window is currently the active (foreground) window.
+
+    Returns:
+    - True
+    - False
+    '''
     active_window = gw.getActiveWindow()
     return active_window is not None and GAME_WINDOW_TITLE in active_window.title
 
 def find_nearest_color_code(player_loc, img_route):
+    '''
+    Search for the nearest valid color code around the player's location.
 
+    The function searches within a square window (defined by COLOR_CODE_SEARCH_RANGE)
+    around the given player location, and finds the nearest pixel whose color matches
+    any of the predefined COLOR_CODE keys.
+
+    Parameters:
+    - player_loc: tuple (x, y), the current player position.
+    - img_route: image (numpy array, shape HxWx3), the full route map image.
+
+    Returns:
+    - nearest: dict containing information of the nearest color code found:
+        {
+            "pixel": (x, y),        # pixel coordinate
+            "color": (R, G, B),     # matched color
+            "action": COLOR_CODE[], # corresponding action
+            "distance": dist        # Manhattan distance to player
+        }
+      or None if no matching color code is found.
+    '''
     x0, y0 = player_loc
     h, w = img_route.shape[:2]  # Get image height and width
 
@@ -205,6 +235,7 @@ def find_pattern(
         img,
         img_pattern,
         last_result=None,
+        mask=None,
         local_search_radius=50,
         global_threshold=0.6):
     '''
@@ -224,6 +255,9 @@ def find_pattern(
     Returns:
     - top_left: (x, y) top-left corner coordinate of the best matching.
     '''
+    # Get mask
+    # _, mask_pattern = cv2.threshold(img_pattern, 1, 255, cv2.THRESH_BINARY)
+
     h, w = img_pattern.shape[:2]
 
     if last_result is not None:
@@ -235,7 +269,11 @@ def find_pattern(
 
         # Local search
         img_local = img[y1:y2, x1:x2]
-        res_local = cv2.matchTemplate(img_local, img_pattern, cv2.TM_CCOEFF_NORMED)
+        # res_local = cv2.matchTemplate(img_local, img_pattern, cv2.TM_CCOEFF_NORMED, mask=mask_pattern)
+        if  mask is None:
+            res_local = cv2.matchTemplate(img_local, img_pattern, cv2.TM_CCOEFF_NORMED)
+        else:
+            res_local = cv2.matchTemplate(img_local, img_pattern, cv2.TM_CCOEFF_NORMED, mask=mask)
         min_val, max_val, min_loc, max_loc = cv2.minMaxLoc(res_local)
 
         if max_val >= global_threshold:
@@ -243,10 +281,29 @@ def find_pattern(
             return top_left, max_val
 
     # Global fallback
+    # res = cv2.matchTemplate(img, img_pattern, cv2.TM_CCOEFF_NORMED, mask=mask_pattern)
     res = cv2.matchTemplate(img, img_pattern, cv2.TM_CCOEFF_NORMED)
+    if mask is None:
+        res = cv2.matchTemplate(img, img_pattern, cv2.TM_CCOEFF_NORMED)
+    else:
+        res = cv2.matchTemplate(img, img_pattern, cv2.TM_CCOEFF_NORMED, mask=mask)
     min_val, max_val, min_loc, top_left = cv2.minMaxLoc(res)
 
     return top_left, max_val
+
+def screenshot(img):
+    '''
+    Save the given image as a screenshot file.
+
+    Parameters:
+    - img: numpy array (image to save).
+
+    Behavior:
+    - Saves the image to the "screenshot/" directory with the current timestamp as filename.
+    '''
+    filename = f"screenshot/screenshot_{int(time.time())}.png"
+    cv2.imwrite(filename, img)
+    logger.info(f"Screenshot saved: {filename}")
 
 loc_last = (0, 0)
 t_last_move = time.time()
@@ -298,6 +355,11 @@ def fake_keyboard_input_worker():
             time.sleep(0.001)
             continue
 
+        # If solving rune, skip all keyboard command
+        if STATUS == "solving_rune":
+            time.sleep(0.001)
+            continue
+
         # check if is needed to release 'Up' key
         if time.time() - t_last_up > CFG.UP_DRAG_DURATION:
             keyboard.release("up")
@@ -343,10 +405,19 @@ def fake_keyboard_input_worker():
             press_key(CFG.ATTACK_KEY, 0.02)
             keyboard.release("right")
 
+        elif FAKE_KEYBOARD_COMMAND == "stop":
+            keyboard.release("left")
+            keyboard.release("right")
+            keyboard.release("up")
+
         else:
             # Release all keys, stop the character
             keyboard.release("left")
             keyboard.release("right")
+
+        if STATUS == "near_rune":
+            # keep smashing 'up' key
+            press_key("up", 0.02)
 
         time.sleep(0.001)
 
@@ -355,7 +426,7 @@ def draw_rectangle(img, top_left, size, color, text):
     Draws a rectangle with an text label.
 
     Parameters:
-    - img: The image on which to draw (numpy array).
+    - img: The image on which to draw (numpy array).logger
     - top_left: Tuple (x, y), the top-left corner of the rectangle.
     - size: Tuple (height, width) of the rectangle.
     - color: Tuple (B, G, R), color of the rectangle and text.
@@ -367,64 +438,215 @@ def draw_rectangle(img, top_left, size, color, text):
     cv2.putText(img, text, (top_left[0], top_left[1] - 10),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
 
-def main():
+def switch_status(new_status):
+    '''
+    Switch to new status and log the transition.
+
+    Parameters:
+    - new_status: string, the new status to switch to.
+    '''
+    global STATUS, T_LAST_SWITCH_STATUS
+
+    t_elapsed = round(time.time() - T_LAST_SWITCH_STATUS)
+    logger.info(f"[switch_status] From {STATUS}({t_elapsed} sec) to {new_status}.")
+    STATUS = new_status
+    T_LAST_SWITCH_STATUS = time.time()
+
+def solve_rune(img, img_arrows):
+    '''
+    Solve the rune puzzle by detecting the arrow directions and pressing corresponding keys.
+
+    Parameters:
+    - img: The full game screen image (numpy array).
+    - img_arrows: Dictionary containing arrow templates for each direction, 
+                  formatted as {direction: [list of template images]}.
+
+    Behavior:
+    - For each arrow box position, extract the region of interest.
+    - Match the ROI against all arrow templates using template matching (SQDIFF).
+    - Select the arrow direction with the best (lowest) score.
+    - Log the detected direction and score.
+    - Press the corresponding direction key.
+    - Take a screenshot after each solved arrow.
+    - Wait 2 seconds between key presses.
+    - Logs when all arrows have been solved.
+    '''
+    for arrow_idx in [0,1,2,3]:
+        # Crop arrow detection box
+        x = CFG.ARROW_BOX_START_POINT[0] + CFG.ARROW_BOX_INTERVAL*arrow_idx
+        y = CFG.ARROW_BOX_START_POINT[1]
+        size = CFG.ARROW_BOX_SIZE
+        img_roi = img[y:y+size, x:x+size]
+
+        # Loop through all possible arrows template and choose the most possible one
+        best_score = float('inf')
+        best_direction = ""
+        for direction, arrow_list in img_arrows.items():
+            for img_arrow in arrow_list:
+                _, score = find_pattern_sqdiff(img_roi, img_arrow)
+                if score < best_score:
+                    best_score = score
+                    best_direction = direction
+        logger.info(f"[solve_rune] Arrow({arrow_idx}) is {best_direction} with score({best_score})")
+
+        # Press the key
+        press_key(best_direction, 0.5)
+        time.sleep(2)
+
+    logger.info(f"[solve_rune] Solved all arrows")
+
+def find_pattern_sqdiff(img, img_pattern):
+    '''
+    Perform masked template matching using SQDIFF_NORMED method.
+
+    The function searches for the best matching location of img_pattern inside img.
+    It automatically converts the pattern to grayscale and generates a mask to ignore
+    pure white (or near-white) pixels in the template, treating them as transparent background.
+
+    Parameters:
+    - img: Target search image (numpy array), can be grayscale or BGR.
+    - img_pattern: Template image to search for (numpy array, BGR).
+
+    Returns:
+    - min_loc: The top-left coordinate (x, y) of the best match position.
+    - min_val: The matching score (lower = better for SQDIFF_NORMED).
+    '''
+    # Convert template to grayscale
+    img_pattern_gray = cv2.cvtColor(img_pattern, cv2.COLOR_BGR2GRAY)
+
+    # Create mask: ignore pure white pixels (treat near-white as background)
+    _, mask_pattern = cv2.threshold(img_pattern_gray, 254, 255, cv2.THRESH_BINARY_INV)
+
+    # Perform template matching
+    res = cv2.matchTemplate(img, img_pattern, cv2.TM_SQDIFF_NORMED, mask=mask_pattern)
+
+    # Extract best match (min_val is better for SQDIFF)
+    min_val, max_val, min_loc, max_loc = cv2.minMaxLoc(res)
+
+    return min_loc, min_val
+
+def main(args):
     '''
     Main function
     '''
-    global SCREENS_CAP, FAKE_KEYBOARD_COMMAND
+    global FAKE_KEYBOARD_COMMAND, STATUS
 
     # Load images
     img_nametag = cv2.imread("nameTag.png", cv2.IMREAD_GRAYSCALE)
-    img_map     = cv2.imread("maps/north_forest_training_ground_2/map.png", cv2.IMREAD_GRAYSCALE)
+    img_map     = cv2.imread(f"maps/{args.map}/map.png", cv2.IMREAD_GRAYSCALE)
     img_routes = [
-        cv2.cvtColor(cv2.imread("maps/north_forest_training_ground_2/route1.png"), cv2.COLOR_BGR2RGB),
-        cv2.cvtColor(cv2.imread("maps/north_forest_training_ground_2/route2.png"), cv2.COLOR_BGR2RGB)
+        cv2.cvtColor(cv2.imread(f"maps/{args.map}/route1.png"), cv2.COLOR_BGR2RGB),
+        cv2.cvtColor(cv2.imread(f"maps/{args.map}/route2.png"), cv2.COLOR_BGR2RGB)
     ]
-    monster_dict = {
-        'Green Mushroom':
-            cv2.imread("monster/green_mushroom.png", cv2.IMREAD_GRAYSCALE),
-        'Spike Mushroom':
-            cv2.imread("monster/spike_mushroom.png", cv2.IMREAD_GRAYSCALE),
+    img_please_remove_runes = cv2.imread("please_remove_runes.png", cv2.IMREAD_GRAYSCALE)
+    img_rune = cv2.imread("rune/rune.png")
+    img_arrows = {
+        "left":
+            [cv2.imread("rune/arrow_left_1.png"),
+             cv2.imread("rune/arrow_left_2.png"),
+             cv2.imread("rune/arrow_left_3.png"),],
+        "right":
+            [cv2.imread("rune/arrow_right_1.png"),
+             cv2.imread("rune/arrow_right_2.png"),
+             cv2.imread("rune/arrow_right_3.png"),],
+        "up":
+            [cv2.imread("rune/arrow_up_1.png"),
+             cv2.imread("rune/arrow_up_2.png"),
+             cv2.imread("rune/arrow_up_3.png")],
+        "down":
+            [cv2.imread("rune/arrow_down_1.png"),
+             cv2.imread("rune/arrow_down_2.png"),
+             cv2.imread("rune/arrow_down_3.png"),],
     }
 
-    # Start fake keyboard input thread
-    threading.Thread(target=fake_keyboard_input_worker, daemon=True).start()
+    ALL_MONSTER_DICT = {
+        'green_mushroom':
+            [cv2.imread("monster/green_mushroom.png")],
+        'spike_mushroom':
+            [cv2.imread("monster/spike_mushroom.png")],
+        'zombie_mushroom':
+            [cv2.imread("monster/zombie_mushroom_1.png"),
+             cv2.imread("monster/zombie_mushroom_2.png"),
+             cv2.imread("monster/zombie_mushroom_3.png"),],
+        'fire_pig':
+            [cv2.imread("monster/fire_pig_1.png"),
+             cv2.imread("monster/fire_pig_2.png"),
+             cv2.imread("monster/fire_pig_3.png")],
+        'black_axe_stump':
+            [cv2.imread("monster/black_axe_stump_1.png"),
+             cv2.imread("monster/black_axe_stump_2.png")],
+    }
 
-    # Start screen capture thread
+    # Add flipped monster image to ALL_MONSTER_DICT
+    for monster_name, img_list in ALL_MONSTER_DICT.items():
+        imgs = []
+        for img in img_list:
+            imgs.append(img)  # original
+            imgs.append(cv2.flip(img, 1))  # flipped
+        ALL_MONSTER_DICT[monster_name] = imgs
+
+    # Select monsters based on args
+    if args.monsters == "all":
+        monster_dict = ALL_MONSTER_DICT
+    else:
+        selected = args.monsters.split(",")
+        monster_dict = {k: v for k, v in ALL_MONSTER_DICT.items() if k in selected}
+    logger.info(f"Loaded monsters: {list(monster_dict.keys())}")
+
+    # Start fake keyboard input thread
+    if not args.disable_control:
+        threading.Thread(target=fake_keyboard_input_worker, daemon=True).start()
+
+    # Start game screen capture thread
     threading.Thread(target=capture.start, daemon=True).start()
 
-    route_idx = 0
-    t_last_frame = time.time()
-    last_nametag_top_left = (0, 0)
-    last_camera = None
+    route_idx = 0 # Index of route
+    t_last_frame = time.time() # Last frame timestamp, for fps calculation
+    last_nametag_top_left = (0, 0) # Last position of nametag, for caching
+    last_camera = None # Last position of camera, for caching
+    switch_status("hunting")
 
     while IS_RUN:
         if FRAME_BUFFER is None:
-            print(f"Cannot find window:'{GAME_WINDOW_TITLE}'.")
-            print("Please start up maple story!")
+            logger.warning(f"Cannot find window:'{GAME_WINDOW_TITLE}'.")
+            logger.warning("Please start up maple story!")
             continue
 
-        # Get lastest frame buffer
+        # Get lastest game screen frame buffer
         with LOCK_FRAME_BUFFER:
-            img_window = FRAME_BUFFER.copy() # (R, B, G)
+            img_window = FRAME_BUFFER[..., :3].copy() # (B,G,R,A) -> (B,G,R)
 
         # Resize game screen to 1296x759
         img_window = cv2.resize(img_window, (1296, 759), interpolation=cv2.INTER_NEAREST)
         # print(f"img_window.shape = {img_window.shape}") # (759, 1296, 3)
 
-        img_window_gray = cv2.cvtColor(img_window, cv2.COLOR_RGB2GRAY)
+        img_window_gray = cv2.cvtColor(img_window, cv2.COLOR_BGR2GRAY)
+        
+        # Copy window image for debugging use
+        img_debug = img_window.copy()
+
+        ##############################
+        ### Rune Warning Detection ###
+        ##############################
+        # Check whether "PLease remove runes" appear on screen
+        x0, y0 = CFG.PLEASE_REMOVE_RUNES_TOP_LEFT
+        x1, y1 = CFG.PLEASE_REMOVE_RUNES_BOTTOM_RIGHT
+        img_roi = img_window_gray[y0:y1, x0:x1]
+        _, score = find_pattern(img_roi, img_please_remove_runes)
+        if STATUS == "hunting" and score > CFG.PLEASE_REMOVE_RUNES_SIM_THRES:
+            logger.info(f"[Rune Warning] Detect rune warning on screen with score({score})")
+            switch_status("finding_rune")
 
         ########################
         ### Player Detection ###
         ########################
-        NAMETAG_SIM_THRES = 0.5
         # Find player location by searching player's name tag
         name_tag_top_left, score = find_pattern(
                                     img_window_gray,
                                     img_nametag,
                                     last_result=last_nametag_top_left
                                 )
-        if score > NAMETAG_SIM_THRES:
+        if score > CFG.NAMETAG_SIM_THRES:
             # Update last detection
             last_nametag_top_left = name_tag_top_left
         else:
@@ -447,39 +669,124 @@ def main():
         map_loc_player = (camera_top_left[0] + loc_player[0],
                           camera_top_left[1] + loc_player[1] - CFG.CAMERA_CEILING,)
 
+        #######################
+        ### Runes Detection ###
+        #######################
+        # Calculate rune detection box around player
+        h, w = img_window.shape[:2]
+        # Calculate bounding box
+        x0 = max(0, loc_player[0] - CFG.RUNE_DETECT_BOX_WIDTH // 2)
+        y0 = max(0, loc_player[1] - CFG.RUNE_DETECT_BOX_HEIGHT // 2)
+        x1 = min(w, loc_player[0] + CFG.RUNE_DETECT_BOX_WIDTH // 2)
+        y1 = min(h, loc_player[1] + CFG.RUNE_DETECT_BOX_HEIGHT // 2)
+        # Check runes
+        if (x1 - x0) < img_rune.shape[1] or (y1 - y0) < img_rune.shape[0] or \
+            STATUS == "near_rune":
+            # ROI too small for matching, skipping
+            pass
+        else:
+            _, score = find_pattern(img_window[y0:y1, x0:x1], img_rune)
+            if score > CFG.RUNE_DETECT_SIM_THRES:
+                logger.info(f"[Rune Detect]Found rune near player with score({score})")
+                switch_status("near_rune")
+        draw_rectangle(
+            img_debug, (x0, y0), (y1-y0, x1-x0),
+            (255, 0, 0), "Rune Detection Range"
+        )
+
+        #######################
+        ### Arrow Detection ###
+        #######################
+        if STATUS == "finding_rune" or STATUS == "near_rune":
+            # Crop arrow detection box
+            x, y = CFG.ARROW_BOX_START_POINT
+            size = CFG.ARROW_BOX_SIZE
+            img_roi = img_window[y:y+size, x:x+size]
+
+            # Loop through all arrow
+            for direction, arrow_list in img_arrows.items():
+                for img_arrow in arrow_list:
+                    _, score = find_pattern_sqdiff(img_roi, img_arrow)
+                    if score < CFG.ARROW_BOX_DIF_THRES:
+                        logger.info(f"Arrow screen detected with score({score})")
+                        screenshot(img_window) # for debugging
+                        FAKE_KEYBOARD_COMMAND = "stop"
+                        time.sleep(1) # Wait for character to stop
+                        switch_status("solving_rune")
+
+            # draw_rectangle(
+            #     img_debug, (x, y), (size, size),
+            #     (255, 0, 0), "arrow detection box"
+            # )
+
         #########################
         ### Monster Detection ###
         #########################
         # Search monster nearby magic claw range
-        x_min = max(0, loc_player[0] - CFG.MAGIC_CLAW_RANGE_X - CFG.MONSTER_SEARCH_MARGIN)
-        y_min = max(0, loc_player[1] - CFG.MAGIC_CLAW_RANGE_Y - CFG.MONSTER_SEARCH_MARGIN)
-        x_max = min(img_window.shape[1], loc_player[0] + CFG.MAGIC_CLAW_RANGE_X + CFG.MONSTER_SEARCH_MARGIN)
-        y_max = min(img_window.shape[0], loc_player[1] + CFG.MAGIC_CLAW_RANGE_Y + CFG.MONSTER_SEARCH_MARGIN)
+        dx = CFG.MAGIC_CLAW_RANGE_X + CFG.MONSTER_SEARCH_MARGIN
+        dy = CFG.MAGIC_CLAW_RANGE_Y + CFG.MONSTER_SEARCH_MARGIN
+        x0 = max(0, loc_player[0] - dx)
+        x1 = min(img_window.shape[1], loc_player[0] + dx)
+        y0 = max(0, loc_player[1] - dy)
+        y1 = min(img_window.shape[0], loc_player[1] + dy)
 
         # Crop the region of interest (ROI)
-        img_roi = img_window_gray[y_min:y_max, x_min:x_max]
+        img_roi = img_window[y0:y1, x0:x1]
 
         monster_info = []
-        for monster_name, monster_img in monster_dict.items():
-            for flipped in [False, True]:
-                img = cv2.flip(monster_img, 1) if flipped else monster_img
-                res = cv2.matchTemplate(img_roi, img, cv2.TM_CCOEFF_NORMED)
-                match_locations = np.where(res >= CFG.MONSTER_SIM_THRES)
-                h, w = img.shape[:2]
-
+        for monster_name, monster_imgs in monster_dict.items():
+            for img_monster in monster_imgs:
+                img_monster_gray = cv2.cvtColor(img_monster, cv2.COLOR_BGR2GRAY)
+                _, mask_pattern = cv2.threshold(img_monster_gray, 254, 255, cv2.THRESH_BINARY_INV)
+                # DEBUG: Show mask
+                # cv2.imshow(f"Mask for {monster_name}", mask_pattern)
+                # cv2.waitKey(0)  # wait for key press before continuing (for debug)
+                res = cv2.matchTemplate(img_roi, img_monster, cv2.TM_SQDIFF_NORMED, mask=mask_pattern)
+                match_locations = np.where(res <= CFG.MONSTER_DIF_THRES)
+                h, w = img_monster.shape[:2]
                 for pt in zip(*match_locations[::-1]):
                     monster_info.append({
                         "name": monster_name,
-                        "position": (pt[0] + x_min, pt[1] + y_min),
-                        "size": (w, h),
-                        "flipped": flipped,
+                        "position": (pt[0] + x0, pt[1] + y0),
+                        "size": (h, w),
                         "score": res[pt[1], pt[0]],
                     })
 
+            if IS_DEBUG_MONSTER:
+                # Normalize and convert to BGR
+                res_norm = cv2.normalize(res, None, 0, 255, cv2.NORM_MINMAX)
+                res_norm = np.uint8(res_norm)
+                res_bgr = cv2.cvtColor(res_norm, cv2.COLOR_GRAY2BGR)
+                # Get image sizes
+                h_debug, w_debug = img_window.shape[:2]
+                h_res, w_res = res_bgr.shape[:2]
+                # Calculate padding needed
+                pad_left = (w_debug - w_res) // 2
+                pad_right = w_debug - w_res - pad_left
+                # Apply horizontal padding to match img_debug width
+                res_monster = cv2.copyMakeBorder(
+                    res_bgr,
+                    top=0, bottom=0,
+                    left=pad_left, right=pad_right,
+                    borderType=cv2.BORDER_CONSTANT,
+                    value=(0, 0, 0)  # black padding
+                )
+
         # Apply Non-Maximum Suppression to monster detection
         monster_info = nms(monster_info, iou_threshold=0.4)
-        # monster_count = Counter([m["name"] for m in monster_info])
-        # print(monster_count)  # e.g., {'GreenMushroom': 3, 'Slime': 2}
+
+        # Draw attack detection range
+        draw_rectangle(
+            img_debug, (x0, y0), (dy*2, dx*2),
+            (255, 0, 0), "Detection Range"
+        )
+
+        # Draw monsters bounding box
+        for monster in monster_info:
+            draw_rectangle(
+                img_debug, monster["position"], monster["size"],
+                (0, 255, 0), monster["name"]
+            )
 
         ###############################
         ### Magic Claw Attack Range ###
@@ -494,35 +801,51 @@ def main():
         #############################
         ### Fake Keyboard Command ###
         #############################
-        if is_monster_in_range(monster_info, attack_left_top_left):
-            FAKE_KEYBOARD_COMMAND = "attack left"
-        elif is_monster_in_range(monster_info, attack_right_top_left):
-            FAKE_KEYBOARD_COMMAND = "attack right"
-        elif is_stuck(map_loc_player):
-            FAKE_KEYBOARD_COMMAND = random.choice(list(COLOR_CODE.values()))
+        # Get fake keyboard command from color code route map
+        color_code = find_nearest_color_code(
+                        map_loc_player,
+                        img_routes[route_idx]
+        )
+        if color_code:
+            FAKE_KEYBOARD_COMMAND = color_code["action"]
+            # Check if reach goal
+            if color_code["action"] == "goal":
+                route_idx = (route_idx+1)%len(img_routes)
         else:
-            color_code = find_nearest_color_code(
-                            map_loc_player,
-                            img_routes[route_idx]
-            )
-            if color_code:
-                FAKE_KEYBOARD_COMMAND = color_code["action"]
-                # Check if reach goal
-                if color_code["action"] == "goal":
-                    route_idx = (route_idx+1)%len(img_routes)
-            else:
-                FAKE_KEYBOARD_COMMAND = ""
+            FAKE_KEYBOARD_COMMAND = ""
+
+        # Special logic for each status
+        if STATUS == "hunting":
+            if is_monster_in_range(monster_info, attack_left_top_left):
+                # Attack monster on the left
+                FAKE_KEYBOARD_COMMAND = "attack left"
+            elif is_monster_in_range(monster_info, attack_right_top_left):
+                # Attack monster on the right
+                FAKE_KEYBOARD_COMMAND = "attack right"
+            elif is_stuck(map_loc_player):
+                # Perform a random action
+                FAKE_KEYBOARD_COMMAND = random.choice(list(COLOR_CODE.values()))
+        elif STATUS == "finding_rune":
+            # Check if finding rune timeout
+            if time.time() - T_LAST_SWITCH_STATUS > CFG.RUNE_FINDING_TIMEOUT:
+                switch_status("resting")
+        elif STATUS == "near_rune":
+            # Stay in near_rune status for only a few seconds
+            if time.time() - T_LAST_SWITCH_STATUS > CFG.NEAR_RUNE_DURATION:
+                switch_status("hunting")
+        elif STATUS == "solving_rune":
+            solve_rune(img_window, img_arrows)
+            switch_status("hunting")
+        elif STATUS == "resting":
+            # Set up resting route
+            img_routes = [cv2.cvtColor(cv2.imread(f"maps/{args.map}/route_rest.png"), cv2.COLOR_BGR2RGB)]
+            route_idx = 0
+        else:
+            logger.error(f"Unknown status: {STATUS}")
 
         ####################
         ### Window Debug ###
         ####################
-        if not CFG.ENABLE_DEBUG_WINDOWS:
-            continue
-
-        # Copy window image for debugging use
-        # img_debug = cv2.cvtColor(img_window.copy(), cv2.COLOR_BGR2RGB)
-        img_debug = img_window.copy()
-
         # Draw name tag detection box
         draw_rectangle(
             img_debug, name_tag_top_left, img_nametag.shape,
@@ -531,13 +854,6 @@ def main():
 
         # Draw player center
         cv2.circle(img_debug, loc_player, radius=3, color=(0, 0, 255), thickness=-1)
-
-        # Draw monsters bounding box
-        for monster in monster_info:
-            draw_rectangle(
-                img_debug, monster["position"], monster["size"],
-                (0, 255, 0), monster["name"]
-            )
 
         # Draw magic claw right bounding box
         draw_rectangle(
@@ -553,7 +869,7 @@ def main():
             (0, 0, 255), "Attack Left Range"
         )
 
-        # Draw FPS
+        # Draw FPS text on top left corner
         fps = round(1.0 / (time.time() - t_last_frame))
         t_last_frame = time.time()
         cv2.putText(
@@ -561,6 +877,10 @@ def main():
             (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 255), 
             2, cv2.LINE_AA
         )
+
+        # Vertically concatenate
+        if IS_DEBUG_MONSTER:
+            img_debug = cv2.vconcat([img_debug, res_monster])
 
         # Show debug image
         cv2.imshow("Screen Debug", img_debug)
@@ -609,13 +929,35 @@ def main():
         # Exit if 'q' is pressed
         key = cv2.waitKey(1) & 0xFF  # Get the pressed key (8-bit)
         if key == ord('s'):
-            filename = f"screenshot/screenshot_{int(time.time())}.png"
-            cv2.imwrite(filename, img_window)
-            print(f"Screenshot saved: {filename}")
+            screenshot(img_window)
         elif key == ord('q'):
             break
 
     cv2.destroyAllWindows()
 
 if __name__ == '__main__':
-    main()
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        '--disable_control',
+        action='store_true',
+        help='Disable fake keyboard input'
+    )
+
+    # Argument to specify map name
+    parser.add_argument(
+        '--map',
+        type=str,
+        default='ant_cave_2',
+        help='Specify the map name'
+    )
+
+    parser.add_argument(
+        "--monsters",
+        type=str,
+        default="all",
+        help="Specify which monsters to load, comma-separated (e.g., --monsters green_mushroom,zombie_mushroom)"
+    )
+
+    args = parser.parse_args()
+
+    main(args)

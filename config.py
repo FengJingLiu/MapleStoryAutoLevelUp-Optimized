@@ -16,6 +16,7 @@ class Config:
     # Offset from the nametag's top-left corner to the player's center
     NAMETAG_OFFSET_X = -38 # pixel
     NAMETAG_OFFSET_Y = 40  # pixel
+    NAMETAG_SIM_THRES = 0.5
 
     # ────────────────
     # Camera Localization
@@ -34,7 +35,8 @@ class Config:
     # ────────────────
     # Monster Detection
     # ────────────────
-    MONSTER_SIM_THRES = 0.7   # Template match similarity threshold
+    # MONSTER_SIM_THRES = 0.7   # Template match similarity threshold, this was for TM_CCOEFF_NORMED
+    MONSTER_DIF_THRES = 0.3   # Template match similarity threshold
     MONSTER_SEARCH_MARGIN = 50  # Extra margin around attack box for monster search
 
     # ────────────────
@@ -53,3 +55,24 @@ class Config:
     # Debug Options
     # ────────────────
     ENABLE_DEBUG_WINDOWS = True   # Show debug window (False = better performance)
+
+    # ────────────────
+    # Please Remove Runes Warning
+    # ────────────────
+    PLEASE_REMOVE_RUNES_TOP_LEFT     = (513, 196)
+    PLEASE_REMOVE_RUNES_BOTTOM_RIGHT = (768, 236)
+    PLEASE_REMOVE_RUNES_SIM_THRES = 0.8
+
+    # ────────────────
+    # Rune Test
+    # ────────────────
+    RUNE_DETECT_BOX_WIDTH = 140
+    RUNE_DETECT_BOX_HEIGHT = 140
+    RUNE_DETECT_SIM_THRES = 0.7
+    ARROW_BOX_SIZE = 80 # pixel, 75x75 box
+    ARROW_BOX_INTERVAL = 170 # pixel width
+    ARROW_BOX_START_POINT = (355, 355)
+    ARROW_BOX_DIF_THRES = 0.2
+
+    RUNE_FINDING_TIMEOUT = 600 # second
+    NEAR_RUNE_DURATION = 5 # second
