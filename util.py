@@ -1,0 +1,164 @@
+# Standard import
+import time
+import cv2
+# Local import
+from logger import logger
+
+def nms(monsters, iou_threshold=0.3):
+    '''
+    Apply Non-Maximum Suppression (NMS) to remove overlapping detections.
+
+    Parameters:
+    - monsters: List of dictionaries, each representing a detected monster with:
+        - "position": (x, y) top-left corner
+        - "size": (width, height)
+        - "score": similarity/confidence score from template matching
+    - iou_threshold: Float, intersection-over-union threshold to suppress overlapping boxes
+
+    Returns:
+    - List of filtered monster dictionaries after applying NMS
+    '''
+    boxes = []
+    for m in monsters:
+        x, y = m["position"]
+        w, h = m["size"]
+        # [x1, y1, x2, y2, score, original_data]
+        boxes.append([x, y, x + w, y + h, m["score"], m])
+
+    # Sort by score descending
+    boxes.sort(key=lambda x: x[4], reverse=True)
+
+    keep = []
+    while boxes:
+        best = boxes.pop(0)
+        keep.append(best[5])  # original monster_info
+
+        boxes = [b for b in boxes if get_iou(best, b) < iou_threshold]
+
+    return keep
+
+def get_iou(box1, box2):
+    '''
+    Calculate the Intersection over Union (IoU) between two bounding boxes.
+
+    Each box is expected to be a tuple or list with at least 4 values:
+    (x1, y1, x2, y2), where:
+        - (x1, y1) is the top-left corner
+        - (x2, y2) is the bottom-right corner
+
+    Returns:
+        A float representing the IoU value (0.0 ~ 1.0).
+        If there is no overlap, returns 0.0.
+    '''
+    x1, y1, x2, y2 = box1[:4]
+    x1_p, y1_p, x2_p, y2_p = box2[:4]
+
+    inter_x1 = max(x1, x1_p)
+    inter_y1 = max(y1, y1_p)
+    inter_x2 = min(x2, x2_p)
+    inter_y2 = min(y2, y2_p)
+
+    if inter_x2 <= inter_x1 or inter_y2 <= inter_y1:
+        return 0.0
+
+    inter_area = (inter_x2 - inter_x1) * (inter_y2 - inter_y1)
+    area1 = (x2 - x1) * (y2 - y1)
+    area2 = (x2_p - x1_p) * (y2_p - y1_p)
+    union = area1 + area2 - inter_area
+
+    return inter_area / union
+
+def screenshot(img):
+    '''
+    Save the given image as a screenshot file.
+
+    Parameters:
+    - img: numpy array (image to save).
+
+    Behavior:
+    - Saves the image to the "screenshot/" directory with the current timestamp as filename.
+    '''
+    filename = f"screenshot/screenshot_{int(time.time())}.png"
+    cv2.imwrite(filename, img)
+    logger.info(f"Screenshot saved: {filename}")
+
+
+def draw_rectangle(img, top_left, size, color, text):
+    '''
+    Draws a rectangle with an text label.
+
+    Parameters:
+    - img: The image on which to draw (numpy array).
+    - top_left: Tuple (x, y), the top-left corner of the rectangle.
+    - size: Tuple (height, width) of the rectangle.
+    - color: Tuple (B, G, R), color of the rectangle and text.
+    - text: String to display above the rectangle.
+    '''
+    bottom_right = (top_left[0] + size[1],
+                    top_left[1] + size[0])
+    cv2.rectangle(img, top_left, bottom_right, color, 2)
+    cv2.putText(img, text, (top_left[0], top_left[1] - 10),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
+
+def find_pattern_sqdiff(
+        img, img_pattern,
+        last_result=None,
+        local_search_radius=50,
+        global_threshold=0.4
+    ):
+    '''
+    Perform masked template matching using SQDIFF_NORMED method.
+
+    The function searches for the best matching location of img_pattern inside img.
+    It automatically converts the pattern to grayscale and generates a mask to ignore
+    pure white (or near-white) pixels in the template, treating them as transparent background.
+
+    Parameters:
+    - img: Target search image (numpy array), can be grayscale or BGR.
+    - img_pattern: Template image to search for (numpy array, BGR).
+
+    Returns:
+    - min_loc: The top-left coordinate (x, y) of the best match position.
+    - min_val: The matching score (lower = better for SQDIFF_NORMED).
+    - bool: local search success or not
+    '''
+    # If img_pattern already grayscale, skip conversion
+    if len(img_pattern.shape) == 3:
+        img_pattern_gray = cv2.cvtColor(img_pattern, cv2.COLOR_BGR2GRAY)
+    else:
+        img_pattern_gray = img_pattern
+
+    # Create mask: ignore pure white pixels
+    _, mask_pattern = cv2.threshold(img_pattern_gray, 254, 255, cv2.THRESH_BINARY_INV)
+
+    # search last result location first to speedup
+    h, w = img_pattern.shape[:2]
+    if last_result is not None:
+        lx, ly = last_result
+        x0 = max(0, lx - local_search_radius)
+        y0 = max(0, ly - local_search_radius)
+        x1 = min(img.shape[1], lx + local_search_radius + w)
+        y1 = min(img.shape[0], ly + local_search_radius + h)
+
+        img_roi = img[y0:y1, x0:x1]
+        if img_roi.shape[0] >= h and img_roi.shape[1] >= w:
+            res = cv2.matchTemplate(
+                    img_roi,
+                    img_pattern,
+                    cv2.TM_SQDIFF_NORMED,
+                    mask=mask_pattern
+            )
+            min_val, max_val, min_loc, max_loc = cv2.minMaxLoc(res)
+            if min_val < global_threshold:
+                return (x0 + min_loc[0], y0 + min_loc[1]), min_val, True
+
+    # Global fallback
+    res = cv2.matchTemplate(
+            img,
+            img_pattern,
+            cv2.TM_SQDIFF_NORMED,
+            mask=mask_pattern
+    )
+    min_val, max_val, min_loc, max_loc = cv2.minMaxLoc(res)
+
+    return min_loc, min_val, False
