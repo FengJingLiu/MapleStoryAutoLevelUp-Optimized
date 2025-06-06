@@ -62,4 +62,3 @@ class GameWindowCapturor:
             if self.frame is None:
                 return None
             return cv2.cvtColor(self.frame, cv2.COLOR_BGRA2BGR)
-

@@ -5,9 +5,25 @@ class Config:
     --------------------------------------
     '''
     # ────────────────
+    # Perference
+    # ────────────────
+    is_use_aoe = True # use aoe skill to attack instead of magic claw
+    is_use_teleport_to_walk = False # use teleport to walk
+    teleport_cooldown = 1 # second
+    is_edge_teleport = True
+
+    # ────────────────
+    # Edge Teleport
+    # ────────────────
+    edge_teleport_box_width  = 120
+    edge_teleport_box_height = 70
+    edge_teleport_color_code = (255,127,127) # (R,G,B)
+
+    # ────────────────
     # Keyboard Mapping
     # ────────────────
-    attack_key = "w" # assume it is magic claw
+    aoe_skill_key = "q" # It can be monk's healing skill
+    magic_claw_key = "w"
     jump_key = "space"
     heal_key = "q"
     add_mp_key = "2"
@@ -17,8 +33,8 @@ class Config:
     # Player Localization
     # ────────────────
     # offset from the nametag's top-left corner to the player's center
-    nametag_offset = (-38, 40) # pixel
-    nametag_diff_thres = 1.0
+    nametag_offset = (-50, 30) # pixel
+    nametag_diff_thres = 0.4
 
     # ────────────────
     # Camera Localization
@@ -27,11 +43,14 @@ class Config:
     camera_ceiling = 60  # pixel (top)
     camera_floor = 665   # pixel (bottom)
     localize_diff_thres = 0.5
-    localize_downscale_factor = 0.25 # ratio = 1/4
+    localize_downscale_factor = 1.0 #0.25 # ratio = 1/4
 
     # ────────────────
     # Attack Settings
     # ────────────────
+    # aoe skill attack range relative to player position
+    aoe_skill_range_x = 400 # pixels (horizontal range)
+    aoe_skill_range_y = 150  # pixels (vertical range)
     # magic claw skill attack range relative to player position
     magic_claw_range_x = 350 # pixels (horizontal range)
     magic_claw_range_y = 70  # pixels (vertical range)
@@ -52,7 +71,7 @@ class Config:
     # Movement Behavior
     # ────────────────
     up_drag_duration = 0.1 # hold duration for 'up' key to prevent rope-sticking (in seconds)
-    watch_dog_timeout = 3 # seconds, if player doesn't move for 3 second, random perform an action
+    watch_dog_timeout = 10 # seconds, if player doesn't move for 3 second, random perform an action
     watch_dog_range = 10 # pixel, if player location is smaller than watch_dog_range, consider it doesn't move
 
     # ────────────────
@@ -72,7 +91,7 @@ class Config:
     # ────────────────
     rune_detect_box_width = 120
     rune_detect_box_height = 150
-    rune_detect_diff_thres = 0.05
+    rune_detect_diff_thres = 0.1
     rune_finding_timeout = 600 # second
     near_rune_duration = 5 # second
 
@@ -82,7 +101,7 @@ class Config:
     arrow_box_size = 80 # pixel, 75x75 box
     arrow_box_interval = 170 # pixel width
     arrow_box_start_point = (355, 355)
-    arrow_box_dif_thres = 0.2
+    arrow_box_diff_thres = 0.2
 
     # ────────────────
     # HP Bar and HP bar
@@ -110,6 +129,7 @@ class Config:
         (0, 0, 255): "walk right", # blue
         (255,127,0): "jump left", # orange
         (0,255,255): "jump right", # sky blue
+        (127,255,0): "jump down", # light_green
         (255,0,255): "jump", # purple
         (127,127,127): "up", # gray
         (0,255,0): "stop", # green

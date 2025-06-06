@@ -1,8 +1,30 @@
+'''
+Utility functions
+'''
+
 # Standard import
 import time
 import cv2
+import os
 # Local import
 from logger import logger
+
+def load_image(path, mode=cv2.IMREAD_COLOR):
+    '''
+    Load image from disk and verify existence.
+    '''
+    if not os.path.exists(path):
+        logger.error(f"Image not found: {path}")
+        raise FileNotFoundError(f"Image not found: {path}")
+
+    img = cv2.imread(path, mode)
+    if img is None:
+        logger.error(f"Failed to load image file: {path}")
+        raise ValueError(f"Failed to load image: {path}")
+
+    logger.info(f"Loaded image: {path}")
+
+    return img
 
 def nms(monsters, iou_threshold=0.3):
     '''

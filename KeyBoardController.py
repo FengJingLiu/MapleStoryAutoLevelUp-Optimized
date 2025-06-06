@@ -13,13 +13,33 @@ class KeyBoardController():
         self.t_last_up = 0.0
         self.is_enable = True
         self.window_title = cfg.game_window_title
+        self.attack_key = ""
+
+        # set up attack key
+        if cfg.is_use_aoe:
+            self.attack_key = cfg.aoe_skill_key
+        else:
+            self.attack_key = cfg.magic_claw_key
+
+        # Register F1 hotkey to toggle enable/disable
+        keyboard.add_hotkey('F1', self.toggle_enable)
 
         # Start keyboard control thread
         threading.Thread(target=self.run, daemon=True).start()
 
+    def toggle_enable(self):
+        '''
+        toggle_enable
+        '''
+        self.is_enable = not self.is_enable
+        print(f"Player pressed F1, is_enable:{self.is_enable}")
+
+        # Make sure all key are released
+        self.release_all_key()
+
     def press_key(self, key, duration):
         '''
-        Simulates a key press for a specified duration using pydirectinput.
+        Simulates a key press for a specified duration
         '''
         keyboard.press(key)
         time.sleep(duration)
@@ -53,6 +73,15 @@ class KeyBoardController():
         '''
         active_window = gw.getActiveWindow()
         return active_window is not None and self.window_title in active_window.title
+
+    def release_all_key(self):
+        '''
+        Release all key
+        '''
+        keyboard.release("left")
+        keyboard.release("right")
+        keyboard.release("up")
+        keyboard.release("down")
 
     def run(self):
         '''
@@ -88,6 +117,13 @@ class KeyBoardController():
                 self.press_key(self.cfg.jump_key, 0.02)
                 keyboard.release("right")
 
+            elif self.command == "jump down":
+                keyboard.release("right")
+                keyboard.release("left")
+                keyboard.press("down")
+                self.press_key(self.cfg.jump_key, 0.02)
+                keyboard.release("down")
+
             elif self.command == "jump":
                 keyboard.release("left")
                 keyboard.release("right")
@@ -96,6 +132,16 @@ class KeyBoardController():
             elif self.command == "up":
                 keyboard.press("up")
                 self.t_last_up = time.time()
+
+            if self.command == "teleport left":
+                keyboard.release("right")
+                keyboard.press("left")
+                self.press_key(self.cfg.teleport_key, 0.02)
+
+            elif self.command == "teleport right":
+                keyboard.release("left")
+                keyboard.press("right")
+                self.press_key(self.cfg.teleport_key, 0.02)
 
             elif self.command == "teleport up":
                 keyboard.press("up")
@@ -107,22 +153,23 @@ class KeyBoardController():
                 self.press_key(self.cfg.teleport_key, 0.02)
                 keyboard.release("down")
 
+            elif self.command == "attack":
+                self.press_key(self.attack_key, 0.02)
+
             elif self.command == "attack left":
                 keyboard.release("right")
                 keyboard.press("left")
-                self.press_key(self.cfg.attack_key, 0.02)
+                self.press_key(self.attack_key, 0.02)
                 keyboard.release("left")
 
             elif self.command == "attack right":
                 keyboard.release("left")
                 keyboard.press("right")
-                self.press_key(self.cfg.attack_key, 0.02)
+                self.press_key(self.attack_key, 0.02)
                 keyboard.release("right")
 
             elif self.command == "stop":
-                keyboard.release("left")
-                keyboard.release("right")
-                keyboard.release("up")
+                self.release_all_key()
 
             elif self.command == "heal":
                 self.press_key(self.cfg.heal_key, 0.02)
@@ -133,8 +180,6 @@ class KeyBoardController():
                 self.command = ""
 
             else:
-                # Release all keys, stop the character
-                keyboard.release("left")
-                keyboard.release("right")
+                pass
 
             time.sleep(0.001)
