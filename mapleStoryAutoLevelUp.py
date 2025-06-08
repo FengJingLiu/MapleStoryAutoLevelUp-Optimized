@@ -9,13 +9,14 @@ import argparse
 import glob
 import sys
 
+#
 import numpy as np
 import cv2
 
 # local import
 from config import Config
 from logger import logger
-from util import find_pattern_sqdiff, draw_rectangle, screenshot, nms, load_image
+from util import find_pattern_sqdiff, draw_rectangle, screenshot, nms, load_image, get_mask
 from KeyBoardController import KeyBoardController
 from GameWindowCapturor import GameWindowCapturor
 
@@ -30,7 +31,8 @@ class MapleStoryBot:
         self.idx_routes = 0 # Index of route
         self.hp_ratio = 1.0 # HP bar ratio
         self.mp_ratio = 1.0 # MP bar ratio
-        self.monster_info = []
+        self.exp_ratio = 1.0 # EXP bar ratio
+        self.monster_info = [] # monster information
         # Coordinate (top-left coordinate)
         self.loc_nametag = (0, 0) # nametag location on window
         self.loc_camera = (0, 0) # camera location on map
@@ -45,33 +47,38 @@ class MapleStoryBot:
         self.img_route = None # route map
         self.img_route_debug = None
         # Timers
-        self.t_last_frame = time.time() # Last frame timestamp, for fps calculation
-        self.t_last_switch_status = time.time() # timestamp when status switches last time
-        self.t_watch_dog = time.time()
-        self.t_last_teleport = time.time()
+        self.t_last_frame = time.time() # Last frame timer, for fps calculation
+        self.t_last_switch_status = time.time() # Last status switches timer
+        self.t_watch_dog = time.time() # Last movement timer
+        self.t_last_teleport = time.time() # Last teleport timer
 
-        # Set status to hunting
+        # Set status to hunting for start
         self.switch_status("hunting")
 
-        # Load map (GrayScale)
+        # Load map for camera localization
         self.img_map = load_image(f"maps/{args.map}/map.png",
                                   cv2.IMREAD_GRAYSCALE)
+        self.img_map_resized = cv2.resize(
+            self.img_map, (0, 0),
+            fx=self.cfg.localize_downscale_factor,
+            fy=self.cfg.localize_downscale_factor)
 
-        # Load rest route (RGB)
-        self.img_route_rest = cv2.cvtColor(
-            load_image(f"maps/{args.map}/route_rest.png"), cv2.COLOR_BGR2RGB)
-
-        # Auto load all route*.png files
+        # Load route*.png images
         route_files = sorted(glob.glob(f"maps/{args.map}/route*.png"))
         route_files = [p for p in route_files if not p.endswith("route_rest.png")]
         self.img_routes = [
             cv2.cvtColor(load_image(p), cv2.COLOR_BGR2RGB) for p in route_files
         ]
+        # Load rest route
+        self.img_route_rest = cv2.cvtColor(
+            load_image(f"maps/{args.map}/route_rest.png"), cv2.COLOR_BGR2RGB)
 
-        # Load images
-        self.img_nametag = load_image("name_tag.png", cv2.IMREAD_GRAYSCALE)
+        # Load other images
+        self.img_nametag = load_image("name_tag.png")
+        self.img_nametag_gray = load_image("name_tag.png", cv2.IMREAD_GRAYSCALE)
         self.img_rune_warning = load_image("rune/rune_warning.png", cv2.IMREAD_GRAYSCALE)
         self.img_rune = load_image("rune/rune.png")
+        self.img_rune_gray = load_image("rune/rune.png", cv2.IMREAD_GRAYSCALE)
         self.img_arrows = {
             "left":
                 [load_image("rune/arrow_left_1.png"),
@@ -91,22 +98,17 @@ class MapleStoryBot:
                 load_image("rune/arrow_down_3.png"),],
         }
 
-        # Convert nametag image to make mask work
-        self.img_nametag[self.img_nametag == 255] = 254
-
-        # Create boolean mask for pure white pixels
-        mask_white = np.all(self.img_rune == [255, 255, 255], axis=2)
-        self.img_rune[mask_white] = [254, 254, 254]
-        mask_green = np.all(self.img_rune == [0, 255, 0], axis=2)
-        self.img_rune[mask_green] = [255, 255, 255]
-
         # Load monsters images
         self.monsters = {}
         for monster_name in args.monsters.split(","):
             imgs = []
             for file in glob.glob(f"monster/{monster_name}*.png"):
-                imgs.append(load_image(file)) # Add original image
-                imgs.append(cv2.flip(load_image(file), 1))  # Add flipped image
+                # Add original image
+                img = load_image(file)
+                imgs.append((img, get_mask(img, (0, 255, 0))))
+                # Add flipped image
+                img_flip = cv2.flip(img, 1)
+                imgs.append((img_flip, get_mask(img_flip, (0, 255, 0))))
             if imgs:
                 self.monsters[monster_name] = imgs
             else:
@@ -119,6 +121,7 @@ class MapleStoryBot:
         if args.disable_control:
             self.kb.disable()
 
+        # Start game window capturing thread
         logger.info("Waiting for game window to activate, please click on game window")
         self.capture = GameWindowCapturor(self.cfg)
 
@@ -198,6 +201,12 @@ class MapleStoryBot:
         '''
         while self.is_in_rune_game():
             for arrow_idx in [0,1,2,3]:
+                # Get lastest game screen frame buffer
+                self.frame = self.capture.get_frame()
+                # Resize game screen to 1296x759
+                self.img_frame = cv2.resize(self.frame, (1296, 759),
+                                            interpolation=cv2.INTER_NEAREST)
+
                 # Crop arrow detection box
                 x = self.cfg.arrow_box_start_point[0] + self.cfg.arrow_box_interval*arrow_idx
                 y = self.cfg.arrow_box_start_point[1]
@@ -209,22 +218,32 @@ class MapleStoryBot:
                 best_direction = ""
                 for direction, arrow_list in self.img_arrows.items():
                     for img_arrow in arrow_list:
-                        _, score, _ = find_pattern_sqdiff(img_roi, img_arrow)
+                        _, score, _ = find_pattern_sqdiff(
+                                        img_roi, img_arrow,
+                                        mask=get_mask(img_arrow, (0, 255, 0)))
                         if score < best_score:
                             best_score = score
                             best_direction = direction
                 logger.info(f"[solve_rune] Arrow({arrow_idx}) is {best_direction} with score({best_score})")
+
+                # Update img_frame_debug
+                self.img_frame_debug = self.img_frame.copy()
+                draw_rectangle(
+                    self.img_frame_debug, (x, y), (size, size),
+                    (0, 0, 255), str(round(best_score, 2))
+                )
+                # Update debug window
+                self.update_img_frame_debug()
+                cv2.waitKey(1)
+
+                # For logging
+                screenshot(self.img_frame_debug, f"solve_rune")
 
                 # Press the key for 0.5 second
                 if not self.args.disable_control:
                     self.kb.press_key(best_direction, 0.5)
                 time.sleep(1)
 
-            # Check if solved
-            # Get lastest game screen frame buffer
-            self.frame = self.capture.get_frame()
-            # Resize game screen to 1296x759
-            self.img_frame = cv2.resize(self.frame, (1296, 759), interpolation=cv2.INTER_NEAREST)
 
         logger.info(f"[solve_rune] Solved all arrows")
 
@@ -284,7 +303,7 @@ class MapleStoryBot:
             self.img_route_debug,
             (x_min, y_min),
             (self.cfg.color_code_search_range*2, self.cfg.color_code_search_range*2),
-            (0, 0, 255), "Color Code Search Range"
+            (0, 0, 255), "Color Search Range"
         )
         # Draw a straigt line from map_loc_player to color_code["pixel"]
         if nearest is not None:
@@ -294,6 +313,20 @@ class MapleStoryBot:
                 nearest["pixel"],       # end point
                 (0, 255, 0),            # green line
                 1                       # thickness
+            )
+
+            # Print color code on debug image
+            cv2.putText(
+                self.img_frame_debug, f"Route Action: {nearest["action"]}",
+                (720, 90),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255),
+                2, cv2.LINE_AA
+            )
+            cv2.putText(
+                self.img_frame_debug, f"Route Index: {self.idx_routes}",
+                (720, 120),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255),
+                2, cv2.LINE_AA
             )
 
         return nearest  # if not found return none
@@ -308,7 +341,9 @@ class MapleStoryBot:
         # MP crop
         mp_bar = self.img_frame[self.cfg.mp_bar_top_left[1]:self.cfg.mp_bar_bottom_right[1]+1,
                                 self.cfg.mp_bar_top_left[0]:self.cfg.mp_bar_bottom_right[0]+1]
-
+        # EXP crop
+        exp_bar = self.img_frame[self.cfg.exp_bar_top_left[1]:self.cfg.exp_bar_bottom_right[1]+1,
+                                self.cfg.exp_bar_top_left[0]:self.cfg.exp_bar_bottom_right[0]+1]
         # HP Detection (detect empty part)
         empty_mask_hp = (hp_bar[:,:,0] == hp_bar[:,:,1]) & (hp_bar[:,:,0] == hp_bar[:,:,2])
         empty_pixels_hp = np.count_nonzero(empty_mask_hp)-6 # 6 pixel always be white
@@ -321,23 +356,35 @@ class MapleStoryBot:
         total_pixels_mp = mp_bar.shape[0] * mp_bar.shape[1] - 6
         mp_ratio = 1 - (empty_pixels_mp / total_pixels_mp)
 
+        # EXP Detection (detect eexpty part)
+        empty_mask_exp = (exp_bar[:,:,0] == exp_bar[:,:,1]) & (exp_bar[:,:,0] == exp_bar[:,:,2])
+        eexpty_pixels_exp = np.count_nonzero(empty_mask_exp)-6 # 6 pixel always be white
+        total_pixels_exp = exp_bar.shape[0] * exp_bar.shape[1] - 6
+        exp_ratio = 1 - (eexpty_pixels_exp / total_pixels_exp)
+
         # Compute original bar dimensions
         hp_h, hp_w = hp_bar.shape[:2]
         mp_h, mp_w = mp_bar.shape[:2]
+        exp_h, exp_w = exp_bar.shape[:2]
 
         # Paste HP bar directly at top-left
-        self.img_frame_debug[45:45+hp_h, 180:180+hp_w] = hp_bar
+        self.img_frame_debug[75:75+hp_h, 180:180+hp_w] = hp_bar
 
         # Paste MP bar below HP bar
-        self.img_frame_debug[75:75+mp_h, 180:180+mp_w] = mp_bar
+        self.img_frame_debug[105:105+mp_h, 180:180+mp_w] = mp_bar
 
-        # Overlay HP/MP text
-        cv2.putText(self.img_frame_debug, f"HP: {hp_ratio*100:.1f}%", (10, 60),
+        # Paste EXP bar below MP bar
+        self.img_frame_debug[135:135+exp_h, 180:180+exp_w] = exp_bar
+
+        # Overlay HP/MP/EXP text
+        cv2.putText(self.img_frame_debug, f"HP: {hp_ratio*100:.1f}%", (10, 90),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0,0,255), 2)
-        cv2.putText(self.img_frame_debug, f"MP: {mp_ratio*100:.1f}%", (10, 90),
+        cv2.putText(self.img_frame_debug, f"MP: {mp_ratio*100:.1f}%", (10, 120),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0,0,255), 2)
-    
-        return hp_ratio, mp_ratio
+        cv2.putText(self.img_frame_debug, f"EXP: {exp_ratio*100:.1f}%", (10, 150),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0,0,255), 2)
+
+        return hp_ratio, mp_ratio, exp_ratio
 
     def is_rune_warning(self):
         '''
@@ -352,7 +399,7 @@ class MapleStoryBot:
             logger.info(f"[is_rune_warning] Detect rune warning on screen with score({score})")
             return True
         else:
-            False
+            return False
 
     def is_rune_near_player(self):
         '''
@@ -379,7 +426,8 @@ class MapleStoryBot:
             img_roi = self.img_frame[y0:y1, x0:x1]
             loc_rune, score, _ = find_pattern_sqdiff(
                             img_roi,
-                            self.img_rune)
+                            self.img_rune,
+                            mask=get_mask(self.img_rune, (0, 255, 0)))
             if score < self.cfg.rune_detect_diff_thres:
                 logger.info(f"[Rune Detect]Found rune near player with score({score})")
                 # Draw rectangle for debug
@@ -390,7 +438,7 @@ class MapleStoryBot:
                     (255, 0, 255),  # purple in BGR
                     "Rune"
                 )
-                screenshot(self.img_frame_debug)
+                screenshot(self.img_frame_debug, "rune_detected")
 
                 return True
             else:
@@ -400,6 +448,11 @@ class MapleStoryBot:
         '''
         is_in_rune_game
         '''
+        # Get lastest game screen frame buffer
+        self.frame = self.capture.get_frame()
+        # Resize game screen to 1296x759
+        self.img_frame = cv2.resize(self.frame, (1296, 759), interpolation=cv2.INTER_NEAREST)
+
         # Crop arrow detection box
         x, y = self.cfg.arrow_box_start_point
         size = self.cfg.arrow_box_size
@@ -409,7 +462,9 @@ class MapleStoryBot:
         best_score = float('inf')
         for direc, arrow_list in self.img_arrows.items():
             for img_arrow in arrow_list:
-                _, score, _ = find_pattern_sqdiff(img_roi, img_arrow)
+                _, score, _ = find_pattern_sqdiff(
+                                img_roi, img_arrow,
+                                mask=get_mask(img_arrow, (0, 255, 0)))
                 if score < best_score:
                     best_score = score
 
@@ -421,8 +476,6 @@ class MapleStoryBot:
         if best_score < self.cfg.arrow_box_diff_thres:
             logger.info(f"Arrow screen detected with score({score})")
             return True
-
-
         return False
 
     def get_monsters_in_range(self, top_left, bottom_right):
@@ -436,77 +489,108 @@ class MapleStoryBot:
 
         monster_info = []
         for monster_name, monster_imgs in self.monsters.items():
-            for img_monster in monster_imgs:
-                #  Use black lines to detect monsters
-                # Create masks (already grayscale)
-                mask_pattern = np.all(img_monster == [0, 0, 0], axis=2).astype(np.uint8) * 255
-                mask_roi = np.all(img_roi == [0, 0, 0], axis=2).astype(np.uint8) * 255
+            for img_monster, mask_monster in monster_imgs:
+                if self.cfg.monster_detect_mode == "contour_only":
+                    # Use only black lines contour to detect monsters
+                    # Create masks (already grayscale)
+                    mask_pattern = np.all(img_monster == [0, 0, 0], axis=2).astype(np.uint8) * 255
+                    mask_roi = np.all(img_roi == [0, 0, 0], axis=2).astype(np.uint8) * 255
 
-                # Apply Gaussian blur (soften the masks)
-                img_monster_blur = cv2.GaussianBlur(mask_pattern, (self.cfg.blur_range, self.cfg.blur_range), 0)
-                img_roi_blur = cv2.GaussianBlur(mask_roi, (self.cfg.blur_range, self.cfg.blur_range), 0)
+                    # Apply Gaussian blur (soften the masks)
+                    img_monster_blur = cv2.GaussianBlur(mask_pattern, (self.cfg.blur_range, self.cfg.blur_range), 0)
+                    img_roi_blur = cv2.GaussianBlur(mask_roi, (self.cfg.blur_range, self.cfg.blur_range), 0)
 
-                # Check template vs ROI size before matching
-                h_roi, w_roi = img_roi_blur.shape[:2]
-                h_temp, w_temp = img_monster_blur.shape[:2]
+                    # Check template vs ROI size before matching
+                    h_roi, w_roi = img_roi_blur.shape[:2]
+                    h_temp, w_temp = img_monster_blur.shape[:2]
 
-                if h_temp > h_roi or w_temp > w_roi:
-                    return []  # template bigger than roi, skip this matching
+                    if h_temp > h_roi or w_temp > w_roi:
+                        return []  # template bigger than roi, skip this matching
 
-                # Perform template matching
-                res = cv2.matchTemplate(img_roi_blur, img_monster_blur, cv2.TM_SQDIFF_NORMED)
+                    # Perform template matching
+                    res = cv2.matchTemplate(img_roi_blur, img_monster_blur, cv2.TM_SQDIFF_NORMED)
 
-                # Apply soft threshold
-                match_locations = np.where(res <= self.cfg.monster_diff_thres)
+                    # Apply soft threshold
+                    match_locations = np.where(res <= self.cfg.monster_diff_thres)
 
-                h, w = img_monster.shape[:2]
-                for pt in zip(*match_locations[::-1]):
-                    monster_info.append({
-                        "name": monster_name,
-                        "position": (pt[0] + x0, pt[1] + y0),
-                        "size": (h, w),
-                        "score": res[pt[1], pt[0]],
+                    h, w = img_monster.shape[:2]
+                    for pt in zip(*match_locations[::-1]):
+                        monster_info.append({
+                            "name": monster_name,
+                            "position": (pt[0] + x0, pt[1] + y0),
+                            "size": (h, w),
+                            "score": res[pt[1], pt[0]],
+                        })
+                elif self.cfg.monster_detect_mode == "grayscale":
+                    img_monster_gray = cv2.cvtColor(img_monster, cv2.COLOR_BGR2GRAY)
+                    img_roi_gray = cv2.cvtColor(img_roi, cv2.COLOR_BGR2GRAY)
+                    res = cv2.matchTemplate(
+                            img_roi_gray,
+                            img_monster_gray,
+                            cv2.TM_SQDIFF_NORMED,
+                            mask=mask_monster)
+                    match_locations = np.where(res <= self.cfg.monster_diff_thres)
+                    h, w = img_monster.shape[:2]
+                    for pt in zip(*match_locations[::-1]):
+                        monster_info.append({
+                            "name": monster_name,
+                            "position": (pt[0] + x0, pt[1] + y0),
+                            "size": (h, w),
+                            "score": res[pt[1], pt[0]],
                     })
-
-                # img_monster_gray = cv2.cvtColor(img_monster, cv2.COLOR_BGR2GRAY)
-                # _, mask_pattern = cv2.threshold(img_monster_gray, 254, 255, cv2.THRESH_BINARY_INV)
-                # res = cv2.matchTemplate(
-                #         img_roi,
-                #         img_monster,
-                #         cv2.TM_SQDIFF_NORMED,
-                #         mask=mask_pattern)
-                # match_locations = np.where(res <= self.cfg.monster_diff_thres)
-                # h, w = img_monster.shape[:2]
-                # for pt in zip(*match_locations[::-1]):
-                #     monster_info.append({
-                #         "name": monster_name,
-                #         "position": (pt[0] + x0, pt[1] + y0),
-                #         "size": (h, w),
-                #         "score": res[pt[1], pt[0]],
-                #     })
-
-            # # TODO:
-            # # Normalize and convert to BGR
-            # res_norm = cv2.normalize(res, None, 0, 255, cv2.NORM_MINMAX)
-            # res_norm = np.uint8(res_norm)
-            # res_bgr = cv2.cvtColor(res_norm, cv2.COLOR_GRAY2BGR)
-            # # Get image sizes
-            # h_debug, w_debug = self.img_frame.shape[:2]
-            # h_res, w_res = res_bgr.shape[:2]
-            # # Calculate padding needed
-            # pad_left = (w_debug - w_res) // 2
-            # pad_right = w_debug - w_res - pad_left
-            # # Apply horizontal padding to match img_debug width
-            # res_monster = cv2.copyMakeBorder(
-            #     res_bgr,
-            #     top=0, bottom=0,
-            #     left=pad_left, right=pad_right,
-            #     borderType=cv2.BORDER_CONSTANT,
-            #     value=(0, 0, 0)  # black padding
-            # )
+                elif self.cfg.monster_detect_mode == "color":
+                    res = cv2.matchTemplate(
+                            img_roi,
+                            img_monster,
+                            cv2.TM_SQDIFF_NORMED,
+                            mask=mask_monster)
+                    match_locations = np.where(res <= self.cfg.monster_diff_thres)
+                    h, w = img_monster.shape[:2]
+                    for pt in zip(*match_locations[::-1]):
+                        monster_info.append({
+                            "name": monster_name,
+                            "position": (pt[0] + x0, pt[1] + y0),
+                            "size": (h, w),
+                            "score": res[pt[1], pt[0]],
+                    })
+                else:
+                    logger.error(f"Unexpected camera localization mode: {self.cfg.monster_detect_mode}")
+                    return []
 
         # Apply Non-Maximum Suppression to monster detection
         monster_info = nms(monster_info, iou_threshold=0.4)
+
+        # Detect monster via health bar
+        if self.cfg.monster_detect_with_health_bar:
+            # Create color mask for Monsters' HP bar
+            mask = cv2.inRange(img_roi,
+                               np.array(self.cfg.monster_health_bar_color),
+                               np.array(self.cfg.monster_health_bar_color))
+
+            # Find connected components (each cluster of green pixels)
+            num_labels, labels, stats, centroids = \
+                cv2.connectedComponentsWithStats(mask, connectivity=8)
+
+            for i in range(1, num_labels):  # skip background (label 0)
+                x, y, w, h, area = stats[i]
+                if area < 3:  # small noise filter
+                    continue
+
+                # Add padding  to make viz prettier
+                pad_x = 5
+                pad_y = 5
+                x = max(0, x - pad_x)
+                y = max(0, y - pad_y)
+                w = min(img_roi.shape[1] - x, w + 2 * pad_x)
+                h = min(img_roi.shape[0] - y, h + 2 * pad_y)
+
+                # Append new monster to list
+                monster_info.append({
+                    "name": "Unknown",
+                    "position": (x0 + x, y0 + y),
+                    "size": (h, w),
+                    "score": 1.0,
+                })
 
         # Debug
         # Draw attack detection range
@@ -547,8 +631,9 @@ class MapleStoryBot:
         # Perform template matching
         loc_nametag, score, is_cached = find_pattern_sqdiff(
             img_roi_padded,
-            self.img_nametag,
+            self.img_nametag_gray,
             last_result=last_result,
+            mask=get_mask(self.img_nametag, (0, 255, 0)),
             global_threshold=0.3
         )
 
@@ -569,38 +654,16 @@ class MapleStoryBot:
         # Draw name tag detection box for debug
         draw_rectangle(
             self.img_frame_debug, self.loc_nametag, self.img_nametag.shape,
-            (0, 255, 0),
-            f"NameTag ({round(score, 2)}, {'cached' if is_cached else 'missed'})"
-        )
+            (0, 255, 0), "")
+        text = f"NameTag, {round(score, 2)}, {'cached' if is_cached else 'missed'}"
+        cv2.putText(self.img_frame_debug, text,
+                    (self.loc_nametag[0], self.loc_nametag[1] + self.img_nametag.shape[0] + 30),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+
         # Draw player center
         cv2.circle(self.img_frame_debug,
                 loc_player, radius=3,
                 color=(0, 0, 255), thickness=-1)
-        # Draw camera ceiling line
-        cv2.putText(
-            self.img_frame_debug, "Camera Ceiling",
-            (10, self.cfg.camera_ceiling - 5),
-            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 1
-        )
-        cv2.line(
-            self.img_frame_debug,
-            (0, self.cfg.camera_ceiling),
-            (self.img_frame_debug.shape[1], self.cfg.camera_ceiling),
-            (255, 0, 0), 1
-        )
-
-        # Draw camera floor line
-        cv2.putText(
-            self.img_frame_debug, "Camera Floor",
-            (10, self.cfg.camera_floor - 5),
-            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 1
-        )
-        cv2.line(
-            self.img_frame_debug,
-            (0, self.cfg.camera_floor),
-            (self.img_frame_debug.shape[1], self.cfg.camera_floor),
-            (255, 0, 0), 1
-        )
 
         return loc_player
 
@@ -610,7 +673,6 @@ class MapleStoryBot:
         '''
         scale_factor = self.cfg.localize_downscale_factor
         # Downscale both template and search image
-        img_map = cv2.resize(self.img_map, (0, 0), fx=scale_factor, fy=scale_factor)
         img_roi = self.img_frame_gray[self.cfg.camera_ceiling:self.cfg.camera_floor, :]
         img_query = cv2.resize(img_roi, (0, 0), fx=scale_factor, fy=scale_factor)
         last_result = (
@@ -619,7 +681,7 @@ class MapleStoryBot:
         )
 
         loc_camera, score, is_cached = find_pattern_sqdiff(
-            img_map,
+            self.img_map_resized,
             img_query,
             last_result=last_result,
             local_search_radius=20,
@@ -653,8 +715,8 @@ class MapleStoryBot:
                    loc_player_global, radius=3,
                    color=(0, 0, 255), thickness=-1)
         cv2.putText(self.img_route_debug, "Player",
-                    (loc_player_global[0], loc_player_global[1] - 10),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+                    (loc_player_global[0] - 30, loc_player_global[1] - 10),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
 
         return loc_player_global
 
@@ -695,12 +757,78 @@ class MapleStoryBot:
         else:
             return "edge on right"
 
+    def get_random_action(self):
+        '''
+        get_random_action
+        '''
+        action = random.choice(list(self.cfg.color_code.values()))
+        logger.warning(f"Perform random action: {action}")
+        return action
 
+    def update_info_on_img_frame_debug(self):
+        '''
+        update_info_on_img_frame_debug
+        '''
+        # Print text at bottom left corner
+        fps = round(1.0 / (time.time() - self.t_last_frame))
+        text_y_interval = 23
+        text_y_start = 550
+        dt_screenshot = time.time() - self.kb.t_last_screenshot
+        text_list = [
+            f"FPS: {fps}",
+            f"Status: {self.status}",
+            f"Press 'F1' to {"pause" if self.kb.is_enable else "start"} Bot",
+            f"Press 'F2' to save screenshot{" : Saved" if dt_screenshot < 0.7 else ""}"]
+        for idx, text in enumerate(text_list):
+            cv2.putText(
+                self.img_frame_debug, text,
+                (10, text_y_start + text_y_interval*idx),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255),
+                2, cv2.LINE_AA
+            )
 
+        # mini-map on debug image
+        # Compute crop region with boundary check
+        crop_w, crop_h = 400, 400
+        x0 = max(0, self.loc_player_global[0] - crop_w // 2)
+        y0 = max(0, self.loc_player_global[1] - crop_h // 2)
+        x1 = min(self.img_route_debug.shape[1], x0 + crop_w)
+        y1 = min(self.img_route_debug.shape[0], y0 + crop_h)
+
+        # Crop region
+        mini_map_crop = self.img_route_debug[y0:y1, x0:x1]
+        mini_map_crop = cv2.resize(mini_map_crop,
+                                (mini_map_crop.shape[1] // 2, mini_map_crop.shape[0] // 2),
+                                interpolation=cv2.INTER_NEAREST)
+        # Paste into top-right corner of self.img_frame_debug
+        h_crop, w_crop = mini_map_crop.shape[:2]
+        h_frame, w_frame = self.img_frame_debug.shape[:2]
+        x_paste = w_frame - w_crop - 10  # 10px margin from right
+        y_paste = 70
+        self.img_frame_debug[y_paste:y_paste + h_crop, x_paste:x_paste + w_crop] = mini_map_crop
+
+        # Draw border around minimap
+        cv2.rectangle(
+            self.img_frame_debug,
+            (x_paste, y_paste),
+            (x_paste + w_crop, y_paste + h_crop),
+            color=(255, 255, 255),   # White border
+            thickness=2
+        )
+
+    def update_img_frame_debug(self):
+
+        '''
+        update_img_frame_debug
+        '''
+        cv2.imshow("Game Window Debug",
+                   self.img_frame_debug[self.cfg.camera_ceiling:self.cfg.camera_floor, :])
+        # Update FPS timer
+        self.t_last_frame = time.time()
 
     def run_once(self):
         '''
-        Deal with one frame
+        Process with one game window frame
         '''
         # Get lastest game screen frame buffer
         self.frame = self.capture.get_frame()
@@ -714,15 +842,12 @@ class MapleStoryBot:
         # Grayscale game window
         self.img_frame_gray = cv2.cvtColor(self.img_frame, cv2.COLOR_BGR2GRAY)
 
-        # image for debug use
+        # Image for debug use
         self.img_frame_debug = self.img_frame.copy()
         self.img_route_debug = cv2.cvtColor(self.img_route, cv2.COLOR_RGB2BGR)
 
-        # # TODO TMP
-        # self.img_route_debug = cv2.cvtColor(self.img_map, cv2.COLOR_GRAY2BGR)
-
-        # Detect HP and MP ratio by detecting bars
-        self.hp_ratio, self.mp_ratio = self.get_hp_mp()
+        # Detect HP/MP/EXP bar on UI
+        self.hp_ratio, self.mp_ratio, self.exp_ratio = self.get_hp_mp()
 
         # Check whether "PLease remove runes" warning appears on screen
         if self.is_rune_warning():
@@ -737,16 +862,26 @@ class MapleStoryBot:
         # Check whether a rune icon is near player
         if self.is_rune_near_player():
             self.switch_status("near_rune")
-            if not self.args.disable_control:
-                self.kb.press_key("up", 0.02) # Attempt to trigger rune
 
         # Check whether we entered the rune mini-game
-        if self.status in ["finding_rune", "near_rune"] and self.is_in_rune_game():
+        if self.status == "near_rune":
+            # stop character
             self.kb.set_command("stop")
-            time.sleep(0.5) # Wait for character to stop
+            time.sleep(0.1) # Wait for character to stop
             self.kb.disable() # Disable kb thread during rune solving
-            self.switch_status("solving_rune")
-            screenshot(self.img_frame) # for debugging
+
+            # Attempt to trigger rune
+            if not self.args.disable_control:
+                self.kb.press_key("up", 0.02)
+            time.sleep(1) # Wait rune game to pop up
+
+            # If entered the game, start solving rune
+            if self.is_in_rune_game():
+                self.solve_rune() # Blocking until runes solved
+                self.switch_status("hunting")
+
+            # Restore kb thread
+            self.kb.enable()
 
         # Get all monster near player
         if self.cfg.is_use_aoe:
@@ -809,20 +944,23 @@ class MapleStoryBot:
             if color_code["action"] == "goal":
                 # Switch to next route map
                 self.idx_routes = (self.idx_routes+1)%len(self.img_routes)
+                logger.debug(f"Change to new route:{self.idx_routes}")
             command = color_code["action"]
 
-            # Don't attack on rope
-            if color_code["action"] == "climb":
-                attack_direction = None
-
+        # teleport away from edge to avoid fall off
         if self.is_near_edge() and \
             time.time() - self.t_last_teleport > self.cfg.teleport_cooldown:
             command = command.replace("walk", "teleport")
             self.t_last_teleport = time.time() # update timer
 
-        # Special logic for each status, overwrite color code
+        # Special logic for each status, overwrite color code action
         if self.status == "hunting":
-            if self.hp_ratio <= self.cfg.heal_ratio:
+            if self.is_player_stuck():
+                # Perform a random action when player stuck
+                command = self.get_random_action()
+            elif command in ["up", "down"]:
+                pass # Don't attack or heal while character is on rope
+            elif self.hp_ratio <= self.cfg.heal_ratio:
                 command = "heal"
             elif self.mp_ratio <= self.cfg.add_mp_ratio:
                 command = "add mp"
@@ -832,32 +970,29 @@ class MapleStoryBot:
                 command = "attack left"
             elif attack_direction == "right":
                 command = "attack right"
-            elif command[:4] == "walk":
-                if self.cfg.is_use_teleport_to_walk and \
-                    time.time() - self.t_last_teleport > self.cfg.teleport_cooldown:
-                    command = command.replace("walk", "teleport")
-                    self.t_last_teleport = time.time() # update timer
+            # WIP: teleport while walking is unstable 
+            # elif command[:4] == "walk":
+            #     if self.cfg.is_use_teleport_to_walk and \
+            #         time.time() - self.t_last_teleport > self.cfg.teleport_cooldown:
+            #         command = command.replace("walk", "teleport")
+            #         self.t_last_teleport = time.time() # update timer
 
-            elif self.is_player_stuck():
-                # Perform a random action
-                command = random.choice(list(self.cfg.color_code.values()))
         elif self.status == "finding_rune":
+            if self.is_player_stuck():
+                command = self.get_random_action()
             # Check if finding rune timeout
             if time.time() - self.t_last_switch_status > self.cfg.rune_finding_timeout:
                 self.switch_status("resting")
+
         elif self.status == "near_rune":
-            if not self.args.disable_control:
-                self.kb.press_key("up", 0.02) # Attempt to trigger rune 
             # Stay in near_rune status for only a few seconds
             if time.time() - self.t_last_switch_status > self.cfg.near_rune_duration:
                 self.switch_status("hunting")
-        elif self.status == "solving_rune":
-            self.solve_rune() # Blocking function
-            self.switch_status("hunting")
-            self.kb.enable()
+
         elif self.status == "resting":
             self.img_routes = [self.img_route_rest] # Set up resting route
             self.idx_routes = 0
+
         else:
             logger.error(f"Unknown status: {self.status}")
 
@@ -867,25 +1002,22 @@ class MapleStoryBot:
         #############
         ### Debug ###
         #############
-        # Draw FPS text on top left corner
-        fps = round(1.0 / (time.time() - self.t_last_frame))
-        self.t_last_frame = time.time()
-        cv2.putText(
-            self.img_frame_debug, f"FPS: {fps}, Press 's' to save screenshot",
-            (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 255), 
-            2, cv2.LINE_AA
-        )
+        # Print text on debug image 
+        self.update_info_on_img_frame_debug()
 
-        # Vertically concatenate
-        # self.img_frame_debug = cv2.vconcat([self.img_frame_debug, res_monster])
+        # Show debug image on window
+        self.update_img_frame_debug()
+
+        # Check if need to save screenshot 
+        if self.kb.is_need_screen_shot:
+            screenshot(mapleStoryBot.img_frame)
+            self.kb.is_need_screen_shot = False
 
         # Resize img_route_debug for better visualization
         h, w = self.img_route_debug.shape[:2]
         self.img_route_debug = cv2.resize(self.img_route_debug, (w // 2, h // 2),
                                 interpolation=cv2.INTER_NEAREST)
 
-        # Show debug image
-        cv2.imshow("Game Window Debug", self.img_frame_debug)
         cv2.imshow("Route Map Debug", self.img_route_debug)
 
 if __name__ == '__main__':
@@ -896,6 +1028,7 @@ if __name__ == '__main__':
         help='Disable fake keyboard input'
     )
 
+    # TODO: WIP
     parser.add_argument(
         '--patrol',
         action='store_true',
@@ -929,9 +1062,7 @@ if __name__ == '__main__':
 
             # Exit if 'q' is pressed
             key = cv2.waitKey(1) & 0xFF  # Get the pressed key (8-bit)
-            if key == ord('s'):
-                screenshot(mapleStoryBot.img_frame)
-            elif key == ord('q'):
+            if key == ord('q'):
                 break
 
         cv2.destroyAllWindows()

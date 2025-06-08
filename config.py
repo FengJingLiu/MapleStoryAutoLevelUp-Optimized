@@ -11,13 +11,7 @@ class Config:
     is_use_teleport_to_walk = False # use teleport to walk
     teleport_cooldown = 1 # second
     is_edge_teleport = True
-
-    # ────────────────
-    # Edge Teleport
-    # ────────────────
-    edge_teleport_box_width  = 120
-    edge_teleport_box_height = 70
-    edge_teleport_color_code = (255,127,127) # (R,G,B)
+    
 
     # ────────────────
     # Keyboard Mapping
@@ -26,8 +20,15 @@ class Config:
     magic_claw_key = "w"
     jump_key = "space"
     heal_key = "q"
-    add_mp_key = "2"
-    teleport_key = "e"
+    add_mp_key = "2" # Drink potion
+    teleport_key = "e" # Mage's teleport skill
+
+    # ────────────────
+    # Edge Teleport
+    # ────────────────
+    edge_teleport_box_width  = 150
+    edge_teleport_box_height = 70
+    edge_teleport_color_code = (255,127,127) # (R,G,B)
 
     # ────────────────
     # Player Localization
@@ -58,9 +59,12 @@ class Config:
     # ────────────────
     # Monster Detection
     # ────────────────
-    monster_diff_thres = 0.8   # template match similarity threshold
+    monster_diff_thres = 0.8 # 0.8   # template match similarity threshold
     monster_search_margin = 50  # extra margin around attack box for monster search
     blur_range = 5
+    monster_detect_mode = "contour_only" # "contour_only" "color", "grayscale"
+    monster_detect_with_health_bar = True
+    monster_health_bar_color = (71,204,64) # (B,G,R)
 
     # ────────────────
     # Route Detection (color code)
@@ -71,6 +75,7 @@ class Config:
     # Movement Behavior
     # ────────────────
     up_drag_duration = 0.1 # hold duration for 'up' key to prevent rope-sticking (in seconds)
+    down_drag_duration = 0.1 # seconds
     watch_dog_timeout = 10 # seconds, if player doesn't move for 3 second, random perform an action
     watch_dog_range = 10 # pixel, if player location is smaller than watch_dog_range, consider it doesn't move
 
@@ -92,7 +97,7 @@ class Config:
     rune_detect_box_width = 120
     rune_detect_box_height = 150
     rune_detect_diff_thres = 0.1
-    rune_finding_timeout = 600 # second
+    rune_finding_timeout = 1200 # second
     near_rune_duration = 5 # second
 
     # ────────────────
@@ -110,6 +115,8 @@ class Config:
     hp_bar_bottom_right = (509, 749)
     mp_bar_top_left = (517, 732)
     mp_bar_bottom_right = (678, 749)
+    exp_bar_top_left = (699, 732)
+    exp_bar_bottom_right = (860, 749)
     heal_ratio = 0.5 # heal when hp is below 50%
     add_mp_ratio = 0.5 # drink potion when mp is below 50%
 
@@ -132,10 +139,12 @@ class Config:
         (127,255,0): "jump down", # light_green
         (255,0,255): "jump", # purple
         (127,127,127): "up", # gray
+        (255,255,127): "down", # light_yellow
         (0,255,0): "stop", # green
         (255,255,0): "goal", # yellow
         (255,0,127): "teleport up", # pink
         (127,0,255): "teleport down", # light_purple
+
     }
 
     window_size = (752, 1282)

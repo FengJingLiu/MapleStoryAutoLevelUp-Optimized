@@ -11,18 +11,20 @@ class KeyBoardController():
         self.cfg = cfg
         self.command = ""
         self.t_last_up = 0.0
+        self.t_last_down = 0.0
+        self.t_last_toggle = 0.0
+        self.t_last_screenshot = 0.0
         self.is_enable = True
         self.window_title = cfg.game_window_title
         self.attack_key = ""
+        self.debounce_interval = 1 # second
+        self.is_need_screen_shot = False
 
         # set up attack key
         if cfg.is_use_aoe:
             self.attack_key = cfg.aoe_skill_key
         else:
             self.attack_key = cfg.magic_claw_key
-
-        # Register F1 hotkey to toggle enable/disable
-        keyboard.add_hotkey('F1', self.toggle_enable)
 
         # Start keyboard control thread
         threading.Thread(target=self.run, daemon=True).start()
@@ -88,14 +90,30 @@ class KeyBoardController():
         run
         '''
         while True:
+            # Check if F1 key is pressed
+            if  keyboard.is_pressed("F1") and \
+                time.time() - self.t_last_toggle > self.debounce_interval:
+                self.toggle_enable()
+                self.t_last_toggle = time.time()
+
+            # Check if F2 key is pressed
+            if  keyboard.is_pressed("F2") and \
+                time.time() - self.t_last_screenshot > self.debounce_interval:
+                self.is_need_screen_shot = True
+                self.t_last_screenshot = time.time()
+
             # Check if game window is active
             if not self.is_enable or not self.is_game_window_active():
-                time.sleep(0.001)
+                time.sleep(0.033)
                 continue
 
             # check if is needed to release 'Up' key
             if time.time() - self.t_last_up > self.cfg.up_drag_duration:
                 keyboard.release("up")
+
+            # check if is needed to release 'Down' key
+            if time.time() - self.t_last_down > self.cfg.down_drag_duration:
+                keyboard.release("down")
 
             if self.command == "walk left":
                 keyboard.release("right")
@@ -130,8 +148,14 @@ class KeyBoardController():
                 self.press_key(self.cfg.jump_key, 0.02)
 
             elif self.command == "up":
+                keyboard.release("down")
                 keyboard.press("up")
                 self.t_last_up = time.time()
+
+            elif self.command == "down":
+                keyboard.release("up")
+                keyboard.press("down")
+                self.t_last_down = time.time()
 
             if self.command == "teleport left":
                 keyboard.release("right")
@@ -182,4 +206,4 @@ class KeyBoardController():
             else:
                 pass
 
-            time.sleep(0.001)
+            time.sleep(0.033) # Cap at 30 fps

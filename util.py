@@ -3,9 +3,13 @@ Utility functions
 '''
 
 # Standard import
-import time
 import cv2
+import datetime
 import os
+
+#
+import numpy as np
+
 # Local import
 from logger import logger
 
@@ -90,7 +94,7 @@ def get_iou(box1, box2):
 
     return inter_area / union
 
-def screenshot(img):
+def screenshot(img, prefix="screenshot"):
     '''
     Save the given image as a screenshot file.
 
@@ -100,10 +104,12 @@ def screenshot(img):
     Behavior:
     - Saves the image to the "screenshot/" directory with the current timestamp as filename.
     '''
-    filename = f"screenshot/screenshot_{int(time.time())}.png"
+
+    # Generate timestamp string
+    timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    filename = f"screenshot/{prefix}_{timestamp}.png"
     cv2.imwrite(filename, img)
     logger.info(f"Screenshot saved: {filename}")
-
 
 def draw_rectangle(img, top_left, size, color, text):
     '''
@@ -120,11 +126,12 @@ def draw_rectangle(img, top_left, size, color, text):
                     top_left[1] + size[0])
     cv2.rectangle(img, top_left, bottom_right, color, 2)
     cv2.putText(img, text, (top_left[0], top_left[1] - 10),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
+                cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
 
 def find_pattern_sqdiff(
         img, img_pattern,
         last_result=None,
+        mask=None,
         local_search_radius=50,
         global_threshold=0.4
     ):
@@ -144,14 +151,14 @@ def find_pattern_sqdiff(
     - min_val: The matching score (lower = better for SQDIFF_NORMED).
     - bool: local search success or not
     '''
-    # If img_pattern already grayscale, skip conversion
-    if len(img_pattern.shape) == 3:
-        img_pattern_gray = cv2.cvtColor(img_pattern, cv2.COLOR_BGR2GRAY)
-    else:
-        img_pattern_gray = img_pattern
+    # # If img_pattern is grayscale, don't use mask
+    # if len(img_pattern.shape) == 3:
+    #     img_pattern_gray = cv2.cvtColor(img_pattern, cv2.COLOR_BGR2GRAY)
+    # else:
+    #     img_pattern_gray = img_pattern
 
-    # Create mask: ignore pure white pixels
-    _, mask_pattern = cv2.threshold(img_pattern_gray, 254, 255, cv2.THRESH_BINARY_INV)
+    # # Create mask: ignore pure white pixels
+    # _, mask_pattern = cv2.threshold(img_pattern_gray, 254, 255, cv2.THRESH_BINARY_INV)
 
     # search last result location first to speedup
     h, w = img_pattern.shape[:2]
@@ -168,7 +175,7 @@ def find_pattern_sqdiff(
                     img_roi,
                     img_pattern,
                     cv2.TM_SQDIFF_NORMED,
-                    mask=mask_pattern
+                    mask=mask
             )
             min_val, max_val, min_loc, max_loc = cv2.minMaxLoc(res)
             if min_val < global_threshold:
@@ -179,8 +186,16 @@ def find_pattern_sqdiff(
             img,
             img_pattern,
             cv2.TM_SQDIFF_NORMED,
-            mask=mask_pattern
+            mask=mask
     )
     min_val, max_val, min_loc, max_loc = cv2.minMaxLoc(res)
 
     return min_loc, min_val, False
+
+def get_mask(img, ignore_pixel_color):
+    '''
+    get_mask
+    '''
+    mask = np.all(img == ignore_pixel_color, axis=2).astype(np.uint8) * 255
+    mask = cv2.bitwise_not(mask)
+    return mask

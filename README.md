@@ -4,6 +4,8 @@ An auto leveling up script for Maple Story Artale
 
 ![Intro Animation](media/intro.gif)
 
+[▶ Watch demo on YouTube](https://www.youtube.com/watch?v=QeEXLHO8KN4)
+
 This work purely-based on Computer Vision technique, it doesn't required access game's memory. Instead, it detects image pattern(i.e., player nametag and monsters) on game window screen and send simulated keyboard command to the game to control player's character.
 
 ## Environment
@@ -69,5 +71,3 @@ python mapleStoryAutoLevelUp.py --map lost_time_1 --monsters evolved_ghost
 8. evolved ghost(進化妖魔)
 
 If you want to try this script on other map/monster, you need to add new map to maps/ and add monsters icon to monster/
-
-
