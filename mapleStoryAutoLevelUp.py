@@ -14,7 +14,7 @@ import numpy as np
 import cv2
 
 # local import
-from config import Config
+from config.config import Config
 from logger import logger
 from util import find_pattern_sqdiff, draw_rectangle, screenshot, nms, load_image, get_mask
 from KeyBoardController import KeyBoardController
@@ -33,6 +33,7 @@ class MapleStoryBot:
         self.mp_ratio = 1.0 # MP bar ratio
         self.exp_ratio = 1.0 # EXP bar ratio
         self.monster_info = [] # monster information
+        self.fps = 0 # Frame per second
         # Coordinate (top-left coordinate)
         self.loc_nametag = (0, 0) # nametag location on window
         self.loc_camera = (0, 0) # camera location on map
@@ -51,27 +52,38 @@ class MapleStoryBot:
         self.t_last_switch_status = time.time() # Last status switches timer
         self.t_watch_dog = time.time() # Last movement timer
         self.t_last_teleport = time.time() # Last teleport timer
+        self.t_patrol_last_attack = time.time() # Last patrol attack timer
+        # Patrol mode
+        self.is_patrol_to_left = True
+        self.patrol_turn_point_cnt = 0
+        self.img_frame_gray_last = None
 
         # Set status to hunting for start
         self.switch_status("hunting")
 
-        # Load map for camera localization
-        self.img_map = load_image(f"maps/{args.map}/map.png",
-                                  cv2.IMREAD_GRAYSCALE)
-        self.img_map_resized = cv2.resize(
-            self.img_map, (0, 0),
-            fx=self.cfg.localize_downscale_factor,
-            fy=self.cfg.localize_downscale_factor)
+        if args.patrol:
+            # Patrol mode doesn't need map or route
+            self.img_map = None
+            self.img_routes = []
+            self.img_route_rest = None
+        else:
+            # Load map for camera localization
+            self.img_map = load_image(f"maps/{args.map}/map.png",
+                                    cv2.IMREAD_GRAYSCALE)
+            self.img_map_resized = cv2.resize(
+                self.img_map, (0, 0),
+                fx=self.cfg.localize_downscale_factor,
+                fy=self.cfg.localize_downscale_factor)
 
-        # Load route*.png images
-        route_files = sorted(glob.glob(f"maps/{args.map}/route*.png"))
-        route_files = [p for p in route_files if not p.endswith("route_rest.png")]
-        self.img_routes = [
-            cv2.cvtColor(load_image(p), cv2.COLOR_BGR2RGB) for p in route_files
-        ]
-        # Load rest route
-        self.img_route_rest = cv2.cvtColor(
-            load_image(f"maps/{args.map}/route_rest.png"), cv2.COLOR_BGR2RGB)
+            # Load route*.png images
+            route_files = sorted(glob.glob(f"maps/{args.map}/route*.png"))
+            route_files = [p for p in route_files if not p.endswith("route_rest.png")]
+            self.img_routes = [
+                cv2.cvtColor(load_image(p), cv2.COLOR_BGR2RGB) for p in route_files
+            ]
+            # Load rest route
+            self.img_route_rest = cv2.cvtColor(
+                load_image(f"maps/{args.map}/route_rest.png"), cv2.COLOR_BGR2RGB)
 
         # Load other images
         self.img_nametag = load_image("name_tag.png")
@@ -117,7 +129,7 @@ class MapleStoryBot:
         logger.info(f"Loaded monsters: {list(self.monsters.keys())}")
 
         # Start keyboard controller thread
-        self.kb = KeyBoardController(self.cfg)
+        self.kb = KeyBoardController(self.cfg, args)
         if args.disable_control:
             self.kb.disable()
 
@@ -490,7 +502,53 @@ class MapleStoryBot:
         monster_info = []
         for monster_name, monster_imgs in self.monsters.items():
             for img_monster, mask_monster in monster_imgs:
-                if self.cfg.monster_detect_mode == "contour_only":
+                if self.args.patrol:
+                    pass # Don't detect monster using template in patrol mode
+                elif self.cfg.monster_detect_mode == "template_free":
+                    # Generate mask where pixel is exactly (0,0,0)
+                    black_mask = np.all(img_roi == [0, 0, 0], axis=2).astype(np.uint8) * 255
+                    cv2.imshow("Black Pixel Mask", black_mask)
+
+                    # Shift player's location into ROI coordinate system
+                    px, py = self.loc_player
+                    px_in_roi = px - x0
+                    py_in_roi = py - y0
+
+                    # Define rectangle range around player (in ROI coordinate)
+                    char_x_min = max(0, px_in_roi - self.cfg.character_width // 2)
+                    char_x_max = min(img_roi.shape[1], px_in_roi + self.cfg.character_width // 2)
+                    char_y_min = max(0, py_in_roi - self.cfg.character_height // 2)
+                    char_y_max = min(img_roi.shape[0], py_in_roi + self.cfg.character_height // 2)
+
+                    # Zero out mask inside this region (ignore player's own character)
+                    black_mask[char_y_min:char_y_max, char_x_min:char_x_max] = 0
+
+                    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (20, 20))
+                    closed_mask = cv2.morphologyEx(black_mask, cv2.MORPH_CLOSE, kernel)
+                    # cv2.imshow("Black Mask", closed_mask)
+
+                    # draw player character bounding box
+
+                    draw_rectangle(
+                        self.img_frame_debug, (char_x_min+x0, char_y_min+y0),
+                        (self.cfg.character_height, self.cfg.character_width),
+                        (255, 0, 0), "Character Box"
+                    )
+
+                    num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(closed_mask, connectivity=8)
+
+                    monster_info = []
+                    min_area = 1000
+                    for i in range(1, num_labels):
+                        x, y, w, h, area = stats[i]
+                        if area > min_area:
+                            monster_info.append({
+                                "name": "",
+                                "position": (x0+x, y0+y),
+                                "size": (h, w),
+                                "score": 1.0,
+                            })
+                elif self.cfg.monster_detect_mode == "contour_only":
                     # Use only black lines contour to detect monsters
                     # Create masks (already grayscale)
                     mask_pattern = np.all(img_monster == [0, 0, 0], axis=2).astype(np.uint8) * 255
@@ -576,17 +634,15 @@ class MapleStoryBot:
                 if area < 3:  # small noise filter
                     continue
 
-                # Add padding  to make viz prettier
-                pad_x = 5
-                pad_y = 5
-                x = max(0, x - pad_x)
-                y = max(0, y - pad_y)
-                w = min(img_roi.shape[1] - x, w + 2 * pad_x)
-                h = min(img_roi.shape[0] - y, h + 2 * pad_y)
+                # Guess a monster bounding box
+                y += 10
+                x = max(0, x)
+                y = max(0, y)
+                w = 70
+                h = 70
 
-                # Append new monster to list
                 monster_info.append({
-                    "name": "Unknown",
+                    "name": "Health Bar",
                     "position": (x0 + x, y0 + y),
                     "size": (h, w),
                     "score": 1.0,
@@ -601,9 +657,14 @@ class MapleStoryBot:
 
         # Draw monsters bounding box
         for monster in monster_info:
+            if monster["name"] == "Health Bar":
+                color = (0, 255, 255)
+            else:
+                color = (0, 255, 0)
+
             draw_rectangle(
                 self.img_frame_debug, monster["position"], monster["size"],
-                (0, 255, 0), str(round(monster['score'], 2))
+                color, str(round(monster['score'], 2))
             )
 
         return monster_info
@@ -770,12 +831,12 @@ class MapleStoryBot:
         update_info_on_img_frame_debug
         '''
         # Print text at bottom left corner
-        fps = round(1.0 / (time.time() - self.t_last_frame))
+        self.fps = round(1.0 / (time.time() - self.t_last_frame))
         text_y_interval = 23
         text_y_start = 550
         dt_screenshot = time.time() - self.kb.t_last_screenshot
         text_list = [
-            f"FPS: {fps}",
+            f"FPS: {self.fps}",
             f"Status: {self.status}",
             f"Press 'F1' to {"pause" if self.kb.is_enable else "start"} Bot",
             f"Press 'F2' to save screenshot{" : Saved" if dt_screenshot < 0.7 else ""}"]
@@ -786,6 +847,10 @@ class MapleStoryBot:
                 cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255),
                 2, cv2.LINE_AA
             )
+
+        # Don't draw minimap in patrol mode
+        if self.args.patrol:
+            return
 
         # mini-map on debug image
         # Compute crop region with boundary check
@@ -833,9 +898,6 @@ class MapleStoryBot:
         # Get lastest game screen frame buffer
         self.frame = self.capture.get_frame()
 
-        # Get current route image
-        self.img_route = self.img_routes[self.idx_routes]
-
         # Resize game screen to 1296x759
         self.img_frame = cv2.resize(self.frame, (1296, 759), interpolation=cv2.INTER_NEAREST)
 
@@ -844,7 +906,14 @@ class MapleStoryBot:
 
         # Image for debug use
         self.img_frame_debug = self.img_frame.copy()
-        self.img_route_debug = cv2.cvtColor(self.img_route, cv2.COLOR_RGB2BGR)
+
+        # Get current route image
+        if not self.args.patrol:
+            self.img_route = self.img_routes[self.idx_routes]
+            self.img_route_debug = cv2.cvtColor(self.img_route, cv2.COLOR_RGB2BGR)
+
+        if self.img_frame_gray_last is None:
+            self.img_frame_gray_last = self.img_frame_gray
 
         # Detect HP/MP/EXP bar on UI
         self.hp_ratio, self.mp_ratio, self.exp_ratio = self.get_hp_mp()
@@ -857,7 +926,8 @@ class MapleStoryBot:
         self.loc_player = self.get_player_location()
 
         # Get player location on map
-        self.loc_player_global = self.get_player_location_global()
+        if not self.args.patrol:
+            self.loc_player_global = self.get_player_location_global()
 
         # Check whether a rune icon is near player
         if self.is_rune_near_player():
@@ -884,13 +954,13 @@ class MapleStoryBot:
             self.kb.enable()
 
         # Get all monster near player
-        if self.cfg.is_use_aoe:
+        if self.args.attack == "aoe_skill":
             # Search monster near player
             x0 = max(0, self.loc_player[0] - self.cfg.aoe_skill_range_x//2)
             x1 = min(self.img_frame.shape[1], self.loc_player[0] + self.cfg.aoe_skill_range_x//2)
             y0 = max(0, self.loc_player[1] - self.cfg.aoe_skill_range_y//2)
             y1 = min(self.img_frame.shape[0], self.loc_player[1] + self.cfg.aoe_skill_range_y//2)
-        else:
+        elif self.args.attack == "magic_claw":
             # Search monster nearby magic claw range
             dx = self.cfg.magic_claw_range_x + self.cfg.monster_search_margin
             dy = self.cfg.magic_claw_range_y + self.cfg.monster_search_margin
@@ -902,12 +972,12 @@ class MapleStoryBot:
         # Get monster in skill range
         self.monster_info = self.get_monsters_in_range((x0, y0), (x1, y1))
 
-        if self.cfg.is_use_aoe:
+        if self.args.attack == "aoe_skill":
             if len(self.monster_info) == 0:
                 attack_direction = None
             else:
                 attack_direction = "I don't care"
-        else:
+        elif self.args.attack == "magic_claw":
             # Get nearest monster to player
             monster_left  = self.get_nearest_monster(is_left = True)
             monster_right = self.get_nearest_monster(is_left = False)
@@ -937,25 +1007,87 @@ class MapleStoryBot:
             elif distance_right < distance_left:
                 attack_direction = "right"
 
-        # get color code from img_route
         command = ""
-        color_code = self.get_nearest_color_code()
-        if color_code:
-            if color_code["action"] == "goal":
-                # Switch to next route map
-                self.idx_routes = (self.idx_routes+1)%len(self.img_routes)
-                logger.debug(f"Change to new route:{self.idx_routes}")
-            command = color_code["action"]
 
-        # teleport away from edge to avoid fall off
-        if self.is_near_edge() and \
-            time.time() - self.t_last_teleport > self.cfg.teleport_cooldown:
-            command = command.replace("walk", "teleport")
-            self.t_last_teleport = time.time() # update timer
+        if self.args.patrol:
+            # # Optical flow
+            # flow = cv2.calcOpticalFlowFarneback(self.img_frame_gray_last, self.img_frame_gray,
+            #                                     None,
+            #                                     pyr_scale=0.5, levels=3, winsize=15,
+            #                                     iterations=3, poly_n=5, poly_sigma=1.2, flags=0)
+            # self.img_frame_gray_last = self.img_frame_gray
+            # # magnitude, angle = cv2.cartToPolar(flow[..., 0], flow[..., 1])
+            # # Optical flow debug
+            # # cv2.imshow("flow magnitude", magnitude)
+            # # cv2.imshow("flow angle", angle)
+
+            # # Reshape flow into list of motion vectors
+            # flow_vectors = flow.reshape(-1, 2)
+
+            # # Estimate dominant translation (mean, median, or RANSAC)
+            # global_shift = np.median(flow_vectors, axis=0)
+
+            # # print(f"global_shift = {global_shift}")
+
+            # # Draw the global shift arrow
+            # start_point = (self.img_frame.shape[1] // 2,
+            #                self.img_frame.shape[0] // 2)  # center of image
+            # end_point = (int(start_point[0] + global_shift[0]*10),  # scaled for visibility
+            #             int(start_point[1] + global_shift[1]*10))
+
+            # cv2.arrowedLine(self.img_frame_debug, start_point, end_point, (0, 255, 0), 2, tipLength=0.3)
+
+            # threshold = 10
+            # deviation = np.linalg.norm(flow_vectors - global_shift, axis=1)
+            # dynamic_mask = (deviation > threshold).reshape(self.img_frame.shape[0], self.img_frame.shape[1])
+            # # Convert mask to uint8 for display
+            # dynamic_mask_vis = (dynamic_mask.astype(np.uint8)) * 255
+
+            # cv2.imshow("Dynamic Object Mask", dynamic_mask_vis)
+
+            x, y = self.loc_player
+            h, w = self.img_frame.shape[:2]
+            loc_player_ratio = float(x)/float(w)
+            left_ratio, right_ratio = self.cfg.patrol_range
+
+            # Check if we need to change patrol direction
+            if self.is_patrol_to_left and loc_player_ratio < left_ratio:
+                self.patrol_turn_point_cnt += 1
+            elif (not self.is_patrol_to_left) and loc_player_ratio > right_ratio:
+                self.patrol_turn_point_cnt += 1
+
+            if self.patrol_turn_point_cnt > self.cfg.turn_point_thres:
+                self.is_patrol_to_left = not self.is_patrol_to_left
+                self.patrol_turn_point_cnt = 0
+
+            # Set command for patrol mode
+            if time.time() - self.t_patrol_last_attack > self.cfg.patrol_attack_interval:
+                command = "attack"
+                self.t_patrol_last_attack = time.time()
+            elif self.is_patrol_to_left:
+                command = "walk left"
+            else:
+                command = "walk right"
+
+        else:
+            # get color code from img_route
+            color_code = self.get_nearest_color_code()
+            if color_code:
+                if color_code["action"] == "goal":
+                    # Switch to next route map
+                    self.idx_routes = (self.idx_routes+1)%len(self.img_routes)
+                    logger.debug(f"Change to new route:{self.idx_routes}")
+                command = color_code["action"]
+
+            # teleport away from edge to avoid fall off
+            if self.is_near_edge() and \
+                time.time() - self.t_last_teleport > self.cfg.teleport_cooldown:
+                command = command.replace("walk", "teleport")
+                self.t_last_teleport = time.time() # update timer
 
         # Special logic for each status, overwrite color code action
         if self.status == "hunting":
-            if self.is_player_stuck():
+            if not self.args.patrol and self.is_player_stuck():
                 # Perform a random action when player stuck
                 command = self.get_random_action()
             elif command in ["up", "down"]:
@@ -970,7 +1102,7 @@ class MapleStoryBot:
                 command = "attack left"
             elif attack_direction == "right":
                 command = "attack right"
-            # WIP: teleport while walking is unstable 
+            # WIP: teleport while walking is unstable
             # elif command[:4] == "walk":
             #     if self.cfg.is_use_teleport_to_walk and \
             #         time.time() - self.t_last_teleport > self.cfg.teleport_cooldown:
@@ -1002,33 +1134,32 @@ class MapleStoryBot:
         #############
         ### Debug ###
         #############
-        # Print text on debug image 
+        # Print text on debug image
         self.update_info_on_img_frame_debug()
 
         # Show debug image on window
         self.update_img_frame_debug()
 
-        # Check if need to save screenshot 
+        # Check if need to save screenshot
         if self.kb.is_need_screen_shot:
             screenshot(mapleStoryBot.img_frame)
             self.kb.is_need_screen_shot = False
 
         # Resize img_route_debug for better visualization
-        h, w = self.img_route_debug.shape[:2]
-        self.img_route_debug = cv2.resize(self.img_route_debug, (w // 2, h // 2),
-                                interpolation=cv2.INTER_NEAREST)
-
-        cv2.imshow("Route Map Debug", self.img_route_debug)
+        if not self.args.patrol:
+            h, w = self.img_route_debug.shape[:2]
+            self.img_route_debug = cv2.resize(self.img_route_debug, (w // 2, h // 2),
+                                    interpolation=cv2.INTER_NEAREST)
+            cv2.imshow("Route Map Debug", self.img_route_debug)
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument(
         '--disable_control',
         action='store_true',
-        help='Disable fake keyboard input'
+        help='Disable simulated keyboard input'
     )
 
-    # TODO: WIP
     parser.add_argument(
         '--patrol',
         action='store_true',
@@ -1039,16 +1170,23 @@ if __name__ == '__main__':
     parser.add_argument(
         '--map',
         type=str,
-        default='ant_cave_2',
+        default='lost_time_1',
         help='Specify the map name'
     )
 
     parser.add_argument(
         "--monsters",
         type=str,
-        default="all",
+        default="evolved_ghost",
         help="Specify which monsters to load, comma-separated"
              "(e.g., --monsters green_mushroom,zombie_mushroom)"
+    )
+
+    parser.add_argument(
+        '--attack',
+        type=str,
+        default='magic_claw',
+        help='Choose attack method, "magic_claw", "aoe_skill"'
     )
 
     try:
@@ -1058,11 +1196,20 @@ if __name__ == '__main__':
         sys.exit(1)
     else:
         while True:
+            t_start = time.time()
+
+            # Process one game window frame
             mapleStoryBot.run_once()
 
             # Exit if 'q' is pressed
-            key = cv2.waitKey(1) & 0xFF  # Get the pressed key (8-bit)
+            key = cv2.waitKey(1) & 0xFF
             if key == ord('q'):
                 break
+
+            # Cap FPS to save system resource
+            frame_duration = time.time() - t_start
+            target_duration = 1.0 / mapleStoryBot.cfg.fps_limit
+            if frame_duration < target_duration:
+                time.sleep(target_duration - frame_duration)
 
         cv2.destroyAllWindows()

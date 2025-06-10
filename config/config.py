@@ -7,11 +7,10 @@ class Config:
     # ────────────────
     # Perference
     # ────────────────
-    is_use_aoe = True # use aoe skill to attack instead of magic claw
     is_use_teleport_to_walk = False # use teleport to walk
     teleport_cooldown = 1 # second
     is_edge_teleport = True
-    
+    fps_limit = 10
 
     # ────────────────
     # Keyboard Mapping
@@ -62,9 +61,12 @@ class Config:
     monster_diff_thres = 0.8 # 0.8   # template match similarity threshold
     monster_search_margin = 50  # extra margin around attack box for monster search
     blur_range = 5
-    monster_detect_mode = "contour_only" # "contour_only" "color", "grayscale"
+    monster_detect_mode = "contour_only" # "contour_only" "color", "grayscale" "template_free"
     monster_detect_with_health_bar = True
     monster_health_bar_color = (71,204,64) # (B,G,R)
+
+    character_width = 100
+    character_height = 150
 
     # ────────────────
     # Route Detection (color code)
@@ -74,8 +76,8 @@ class Config:
     # ────────────────
     # Movement Behavior
     # ────────────────
-    up_drag_duration = 0.1 # hold duration for 'up' key to prevent rope-sticking (in seconds)
-    down_drag_duration = 0.1 # seconds
+    up_drag_duration = 0.5 # hold duration for 'up' key to prevent rope-sticking (in seconds)
+    down_drag_duration = 0.5 # seconds
     watch_dog_timeout = 10 # seconds, if player doesn't move for 3 second, random perform an action
     watch_dog_range = 10 # pixel, if player location is smaller than watch_dog_range, consider it doesn't move
 
@@ -123,7 +125,10 @@ class Config:
     # ────────────────
     # Patrol
     # ────────────────
-    monster_patrol_dif_thres = 0.8
+    patrol_range = [0.2, 0.8] # 0.0 - 1.0, 0.0 means the left boarder of game window
+                              # 1.0 means the right boarder of game window
+    turn_point_thres = 10 # 10 frames
+    patrol_attack_interval = 2.5 # sec, attack every 1 second
 
     # ────────────────
     # Don't modify the following parameter unless you know what you are doing

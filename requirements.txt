@@ -3,3 +3,5 @@ pywin32
 numpy
 windows-capture
 pygetwindow
+pyautogui
+pynput
