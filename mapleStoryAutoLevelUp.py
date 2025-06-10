@@ -34,6 +34,7 @@ class MapleStoryBot:
         self.exp_ratio = 1.0 # EXP bar ratio
         self.monster_info = [] # monster information
         self.fps = 0 # Frame per second
+        self.is_first_frame = True # Disable cached location for first frame
         # Coordinate (top-left coordinate)
         self.loc_nametag = (0, 0) # nametag location on window
         self.loc_camera = (0, 0) # camera location on map
@@ -684,10 +685,13 @@ class MapleStoryBot:
         )
 
         # Adjust previous location
-        last_result = (
-            self.loc_nametag[0] + pad_x,
-            self.loc_nametag[1] - self.cfg.camera_ceiling + pad_y
-        )
+        if self.is_first_frame:
+            last_result = None
+        else:
+            last_result = (
+                self.loc_nametag[0] + pad_x,
+                self.loc_nametag[1] - self.cfg.camera_ceiling + pad_y
+            )
 
         # Perform template matching
         loc_nametag, score, is_cached = find_pattern_sqdiff(
@@ -736,10 +740,15 @@ class MapleStoryBot:
         # Downscale both template and search image
         img_roi = self.img_frame_gray[self.cfg.camera_ceiling:self.cfg.camera_floor, :]
         img_query = cv2.resize(img_roi, (0, 0), fx=scale_factor, fy=scale_factor)
-        last_result = (
-            int(self.loc_camera[0] * scale_factor),
-            int(self.loc_camera[1] * scale_factor)
-        )
+
+        # Get previous frame result
+        if self.is_first_frame:
+            last_result = None
+        else:
+            last_result = (
+                int(self.loc_camera[0] * scale_factor),
+                int(self.loc_camera[1] * scale_factor)
+            )
 
         loc_camera, score, is_cached = find_pattern_sqdiff(
             self.img_map_resized,
@@ -747,7 +756,6 @@ class MapleStoryBot:
             last_result=last_result,
             local_search_radius=20,
             global_threshold = 0.8)
-        # if score < self.cfg.localize_diff_thres:
         self.loc_camera = (
             int(loc_camera[0] / scale_factor),
             int(loc_camera[1] / scale_factor)
@@ -1151,6 +1159,9 @@ class MapleStoryBot:
             self.img_route_debug = cv2.resize(self.img_route_debug, (w // 2, h // 2),
                                     interpolation=cv2.INTER_NEAREST)
             cv2.imshow("Route Map Debug", self.img_route_debug)
+
+        # Enable cached location since second frame
+        self.is_first_frame = False
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
