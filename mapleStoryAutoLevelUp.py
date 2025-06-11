@@ -54,6 +54,7 @@ class MapleStoryBot:
         self.t_watch_dog = time.time() # Last movement timer
         self.t_last_teleport = time.time() # Last teleport timer
         self.t_patrol_last_attack = time.time() # Last patrol attack timer
+        self.t_last_camera_missed = time.time() # Last camera loc missed
         # Patrol mode
         self.is_patrol_to_left = True
         self.patrol_turn_point_cnt = 0
@@ -693,14 +694,45 @@ class MapleStoryBot:
                 self.loc_nametag[1] - self.cfg.camera_ceiling + pad_y
             )
 
-        # Perform template matching
-        loc_nametag, score, is_cached = find_pattern_sqdiff(
-            img_roi_padded,
-            self.img_nametag_gray,
-            last_result=last_result,
-            mask=get_mask(self.img_nametag, (0, 255, 0)),
-            global_threshold=0.3
-        )
+        # Split nametag into left and right half, detect seperately and pick highest socre
+        # This localization method is more robust for occluded nametag
+        h, w = self.img_nametag_gray.shape
+        mask_full = get_mask(self.img_nametag, (0, 255, 0))
+        nametag_variants = {
+            "left": {
+                "img_pattern": self.img_nametag_gray[:, :w // 2],
+                "mask": mask_full[:, :w // 2],
+                "last_result": last_result,
+                "score_penalty": 0.0
+            },
+            "right": {
+                "img_pattern": self.img_nametag_gray[:, w // 2:],
+                "mask": mask_full[:, w // 2:],
+                "last_result": (last_result[0] + w // 2, last_result[1]) if last_result else None,
+                "score_penalty": 0.0
+            }
+        }
+
+        # Match template for each split nametag
+        matches = []
+        for tag_type, data in nametag_variants.items():
+            loc, score, is_cached = find_pattern_sqdiff(
+                img_roi_padded,
+                data["img_pattern"],
+                last_result=data["last_result"],
+                mask=data["mask"],
+                global_threshold=0.3
+            )
+            w_match = data["img_pattern"].shape[1]
+            h_match = data["img_pattern"].shape[0]
+            score += data["score_penalty"]
+            matches.append((tag_type, loc, score, w_match, h_match, is_cached))
+
+        # Choose the best match
+        matches.sort(key=lambda x: (not x[5], x[2]))
+        tag_type, loc_nametag, score, w_match, h_match, is_cached = matches[0]
+        if tag_type == "right":
+            loc_nametag = (loc_nametag[0] - w_match, loc_nametag[1])
 
         # Convert back to original (unpadded) coordinates
         loc_nametag = (
@@ -720,7 +752,9 @@ class MapleStoryBot:
         draw_rectangle(
             self.img_frame_debug, self.loc_nametag, self.img_nametag.shape,
             (0, 255, 0), "")
-        text = f"NameTag, {round(score, 2)}, {'cached' if is_cached else 'missed'}"
+        text = f"NameTag,{round(score, 2)}," + \
+                f"{'cached' if is_cached else 'missed'}," + \
+                f"{tag_type}"
         cv2.putText(self.img_frame_debug, text,
                     (self.loc_nametag[0], self.loc_nametag[1] + self.img_nametag.shape[0] + 30),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
@@ -742,8 +776,10 @@ class MapleStoryBot:
         img_query = cv2.resize(img_roi, (0, 0), fx=scale_factor, fy=scale_factor)
 
         # Get previous frame result
-        if self.is_first_frame:
+        if self.is_first_frame or \
+            time.time() - self.t_last_camera_missed > self.cfg.localize_cached_interval:
             last_result = None
+            self.t_last_camera_missed = time.time()
         else:
             last_result = (
                 int(self.loc_camera[0] * scale_factor),

@@ -44,6 +44,7 @@ class Config:
     camera_floor = 665   # pixel (bottom)
     localize_diff_thres = 0.5
     localize_downscale_factor = 1.0 #0.25 # ratio = 1/4
+    localize_cached_interval = 3 # second, how long to use cached camera location until full search
 
     # ────────────────
     # Attack Settings
@@ -128,7 +129,7 @@ class Config:
     patrol_range = [0.2, 0.8] # 0.0 - 1.0, 0.0 means the left boarder of game window
                               # 1.0 means the right boarder of game window
     turn_point_thres = 10 # 10 frames
-    patrol_attack_interval = 2.5 # sec, attack every 1 second
+    patrol_attack_interval = 2.5 # sec, attack every 2.5 second
 
     # ────────────────
     # Don't modify the following parameter unless you know what you are doing
