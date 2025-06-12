@@ -111,7 +111,7 @@ def screenshot(img, prefix="screenshot"):
     cv2.imwrite(filename, img)
     logger.info(f"Screenshot saved: {filename}")
 
-def draw_rectangle(img, top_left, size, color, text):
+def draw_rectangle(img, top_left, size, color, text, thickness=2):
     '''
     Draws a rectangle with an text label.
 
@@ -124,9 +124,9 @@ def draw_rectangle(img, top_left, size, color, text):
     '''
     bottom_right = (top_left[0] + size[1],
                     top_left[1] + size[0])
-    cv2.rectangle(img, top_left, bottom_right, color, 2)
+    cv2.rectangle(img, top_left, bottom_right, color, thickness)
     cv2.putText(img, text, (top_left[0], top_left[1] - 10),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
+                cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, thickness)
 
 def find_pattern_sqdiff(
         img, img_pattern,

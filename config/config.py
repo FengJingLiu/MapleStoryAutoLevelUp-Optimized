@@ -27,6 +27,8 @@ class Config:
     # ────────────────
     edge_teleport_box_width  = 150
     edge_teleport_box_height = 70
+    edge_teleport_minimap_box_width  = 50
+    edge_teleport_minimap_box_height = 20
     edge_teleport_color_code = (255,127,127) # (R,G,B)
 
     # ────────────────
@@ -77,8 +79,8 @@ class Config:
     # ────────────────
     # Movement Behavior
     # ────────────────
-    up_drag_duration = 0.5 # hold duration for 'up' key to prevent rope-sticking (in seconds)
-    down_drag_duration = 0.5 # seconds
+    up_drag_duration = 1.0 # hold duration for 'up' key to prevent rope-sticking (in seconds)
+    down_drag_duration = 1.0 # seconds
     watch_dog_timeout = 10 # seconds, if player doesn't move for 3 second, random perform an action
     watch_dog_range = 10 # pixel, if player location is smaller than watch_dog_range, consider it doesn't move
 
@@ -101,6 +103,8 @@ class Config:
     rune_detect_box_height = 150
     rune_detect_diff_thres = 0.1
     rune_finding_timeout = 1200 # second
+    rune_detect_level_coef = 0.1 # raise threshold for each level
+    rune_detect_level_raise_interval = 60 # second
     near_rune_duration = 5 # second
 
     # ────────────────
@@ -122,6 +126,15 @@ class Config:
     exp_bar_bottom_right = (860, 749)
     heal_ratio = 0.5 # heal when hp is below 50%
     add_mp_ratio = 0.5 # drink potion when mp is below 50%
+
+    # ────────────────
+    # Mini-Map
+    # ────────────────
+    is_use_minimap = False # True, False
+    # minimap_top_left = (8, 118)
+    minimap_player_color = (136, 255, 255) # yellow dot, (B, G, R)
+    minimap_color_code_search_range = 30 # pixel
+    minimap_upscale_factor = 4 # upscale 4 time for debug route image
 
     # ────────────────
     # Patrol
@@ -146,11 +159,10 @@ class Config:
         (255,0,255): "jump", # purple
         (127,127,127): "up", # gray
         (255,255,127): "down", # light_yellow
-        (0,255,0): "stop", # green
+        (0,255,127): "stop", # pink_green
         (255,255,0): "goal", # yellow
         (255,0,127): "teleport up", # pink
         (127,0,255): "teleport down", # light_purple
-
     }
 
     window_size = (752, 1282)
