@@ -9,7 +9,7 @@ import argparse
 import glob
 import sys
 
-#
+# CV import
 import numpy as np
 import cv2
 
@@ -25,48 +25,48 @@ class MapleStoryBot:
     MapleStoryBot
     '''
     def __init__(self, args):
+        '''
+        Init MapleStoryBot
+        '''
         self.cfg = Config # Configuration
-        self.args = args
-        self.status = "hunting" # 'resting', 'finding_rune', 'near_rune', 'solving_rune'
-        self.idx_routes = 0 # Index of route
-        self.hp_ratio = 1.0 # HP bar ratio
-        self.mp_ratio = 1.0 # MP bar ratio
-        self.exp_ratio = 1.0 # EXP bar ratio
+        self.args = args # User arguments
+        self.status = "hunting" # 'resting', 'finding_rune', 'near_rune'
+        self.idx_routes = 0 # Index of route map
+        self.hp_ratio = 1.0 # HP bar ratio, [0.0 ~ 1.0]
+        self.mp_ratio = 1.0 # MP bar ratio, [0.0 ~ 1.0]
+        self.exp_ratio = 1.0 # EXP bar ratio, [0.0 ~ 1.0]
         self.monster_info = [] # monster information
         self.fps = 0 # Frame per second
-        self.is_first_frame = True # Disable cached location for first frame
-        self.rune_detect_level = 0
+        self.is_first_frame = True # first frame flag
+        self.rune_detect_level = 0 # higher the level, lower the rune detect threshold
         # Coordinate (top-left coordinate)
-        self.loc_nametag = (0, 0) # nametag location on window
-        self.loc_camera = (0, 0) # camera location on map
-        self.loc_watch_dog = (0, 0) # watch dog
-        self.loc_player_global = (0, 0) # player location on map
-        self.loc_player = (0, 0) # player location on window
-        self.loc_player_minimap = (0, 0) # Player's location on minimap
-        self.loc_minimap = (0, 0)
+        self.loc_nametag = (0, 0) # nametag location on game screen
+        self.loc_minimap = (0, 0) # minimap location on game screen
+        self.loc_player = (0, 0) # player location on game screen
+        self.loc_player_minimap = (0, 0) # player location on minimap
+        self.loc_minimap_global = (0, 0) # minimap location on global map
+        self.loc_player_global = (0, 0) # player location on global map
+        self.loc_watch_dog = (0, 0) # watch dog location on global map
         # Images
         self.frame = None # raw image
         self.img_frame = None # game window frame
         self.img_frame_gray = None # game window frame graysale
-        self.img_frame_debug = None
+        self.img_frame_debug = None # game window frame for visualization
         self.img_route = None # route map
-        self.img_route_debug = None
+        self.img_route_debug = None # route map for visualization
+        self.img_minimap = None # minimap on game screen
         # Timers
         self.t_last_frame = time.time() # Last frame timer, for fps calculation
         self.t_last_switch_status = time.time() # Last status switches timer
         self.t_watch_dog = time.time() # Last movement timer
         self.t_last_teleport = time.time() # Last teleport timer
         self.t_patrol_last_attack = time.time() # Last patrol attack timer
-        self.t_last_camera_missed = time.time() # Last camera loc missed
         # Patrol mode
-        self.is_patrol_to_left = True
-        self.patrol_turn_point_cnt = 0
-        self.img_frame_gray_last = None
+        self.is_patrol_to_left = True # Patrol direction flag
+        self.patrol_turn_point_cnt = 0 # Patrol tuning back counter
 
-        # Set status to hunting for start
+        # Set status to hunting for startup
         self.switch_status("hunting")
-
-        map_dir = "minimaps" if self.cfg.is_use_minimap else "maps"
 
         if args.patrol:
             # Patrol mode doesn't need map or route
@@ -74,46 +74,24 @@ class MapleStoryBot:
             self.img_routes = []
             self.img_route_rest = None
         else:
-            # Load map for camera localization
-            if self.cfg.is_use_minimap:
-                self.img_map = load_image(f"{map_dir}/{args.map}/map.png",
-                                        cv2.IMREAD_COLOR)
-            else:
-                self.img_map = load_image(f"{map_dir}/{args.map}/map.png",
-                                        cv2.IMREAD_GRAYSCALE)
-                self.img_map_resized = cv2.resize(
-                    self.img_map, (0, 0),
-                    fx=self.cfg.localize_downscale_factor,
-                    fy=self.cfg.localize_downscale_factor)
-            # Load route*.png images
-            route_files = sorted(glob.glob(f"{map_dir}/{args.map}/route*.png"))
+            # Load map.png from minimaps/
+            self.img_map = load_image(f"minimaps/{args.map}/map.png",
+                                      cv2.IMREAD_COLOR)
+            # Load route*.png from minimaps/
+            route_files = sorted(glob.glob(f"minimaps/{args.map}/route*.png"))
             route_files = [p for p in route_files if not p.endswith("route_rest.png")]
             self.img_routes = [
                 cv2.cvtColor(load_image(p), cv2.COLOR_BGR2RGB) for p in route_files
             ]
-            # Load rest route
+            # Load route_rest.png from minimaps/
             self.img_route_rest = cv2.cvtColor(
-                load_image(f"{map_dir}/{args.map}/route_rest.png"), cv2.COLOR_BGR2RGB)
+                load_image(f"minimaps/{args.map}/route_rest.png"), cv2.COLOR_BGR2RGB)
 
-            # Upscale minimap route map for better debug visualization
-            if self.cfg.is_use_minimap:
-                img_routes_resized = []
-                for img_route in self.img_routes:
-                    img_routes_resized.append(cv2.resize(
-                        img_route, (0, 0),
-                        fx=self.cfg.minimap_upscale_factor,
-                        fy=self.cfg.minimap_upscale_factor,
-                        interpolation=cv2.INTER_NEAREST))
-                self.img_routes = img_routes_resized
-                self.img_route_rest = cv2.resize(
-                            self.img_route_rest, (0, 0),
-                            fx=self.cfg.minimap_upscale_factor,
-                            fy=self.cfg.minimap_upscale_factor,
-                            interpolation=cv2.INTER_NEAREST)
-
-        # Load other images
+        # Load player's name tag
         self.img_nametag = load_image("name_tag.png")
         self.img_nametag_gray = load_image("name_tag.png", cv2.IMREAD_GRAYSCALE)
+
+        # Load rune images from rune/
         self.img_rune_warning = load_image("rune/rune_warning.png", cv2.IMREAD_GRAYSCALE)
         self.img_rune = load_image("rune/rune.png")
         self.img_rune_gray = load_image("rune/rune.png", cv2.IMREAD_GRAYSCALE)
@@ -136,7 +114,7 @@ class MapleStoryBot:
                 load_image("rune/arrow_down_3.png"),],
         }
 
-        # Load monsters images
+        # Load monsters images from monster/
         self.monsters = {}
         for monster_name in args.monsters.split(","):
             imgs = []
@@ -163,278 +141,257 @@ class MapleStoryBot:
         logger.info("Waiting for game window to activate, please click on game window")
         self.capture = GameWindowCapturor(self.cfg)
 
-    def get_minimap_location(self):
+    def get_player_location_by_nametag(self):
         '''
-        get_minimap_location
-        '''
-        loc_minimap, score, is_cached = find_pattern_sqdiff(
-                                            self.img_frame, self.img_map)
+        Detects the player's location based on the nametag position in the game window.
 
-        return loc_minimap
+        This function works by:
+        - Extracting a vertical region of interest (ROI) where the nametag is expected.
+        - Padding the ROI to avoid template matching edge issues.
+        - Using template matching to locate the nametag, split into left and right halves
+        to improve robustness against partial occlusion.
+        - Selecting the best match (left or right) based on score and cache status.
+        - Computing the player’s center position by applying a fixed offset to the nametag.
+
+        Returns:
+            loc_player (tuple): The (x, y) coordinates of the player's estimated location.
+        '''
+        img_roi = self.img_frame_gray[self.cfg.camera_ceiling:self.cfg.camera_floor, :]
+
+        # Pad search region to avoid edge cut-off issue (full template size)
+        (pad_y, pad_x) = self.img_nametag.shape[:2]
+        img_roi_padded = cv2.copyMakeBorder(
+            img_roi,
+            pad_y, pad_y, pad_x, pad_x,
+            borderType=cv2.BORDER_REPLICATE  # replicate border for safe matching
+        )
+
+        # Adjust last frame name tag location
+        if self.is_first_frame:
+            last_result = None
+        else:
+            last_result = (
+                self.loc_nametag[0] + pad_x,
+                self.loc_nametag[1] - self.cfg.camera_ceiling + pad_y
+            )
+
+        # Split nametag into left and right half, detect seperately and pick highest score
+        # This localization method is more robust for occluded nametag
+        h, w = self.img_nametag_gray.shape
+        mask_full = get_mask(self.img_nametag, (0, 255, 0))
+        nametag_variants = {
+            "left": {
+                "img_pattern": self.img_nametag_gray[:, :w // 2],
+                "mask": mask_full[:, :w // 2],
+                "last_result": last_result,
+                "score_penalty": 0.0
+            },
+            "right": {
+                "img_pattern": self.img_nametag_gray[:, w // 2:],
+                "mask": mask_full[:, w // 2:],
+                "last_result": (last_result[0] + w // 2, last_result[1]) if last_result else None,
+                "score_penalty": 0.0
+            }
+        }
+
+        # Match template for each split nametag
+        matches = []
+        for tag_type, data in nametag_variants.items():
+            loc, score, is_cached = find_pattern_sqdiff(
+                img_roi_padded,
+                data["img_pattern"],
+                last_result=data["last_result"],
+                mask=data["mask"],
+                global_threshold=0.3
+            )
+            w_match = data["img_pattern"].shape[1]
+            h_match = data["img_pattern"].shape[0]
+            score += data["score_penalty"]
+            matches.append((tag_type, loc, score, w_match, h_match, is_cached))
+
+        # Choose the best match
+        matches.sort(key=lambda x: (not x[5], x[2]))
+        tag_type, loc_nametag, score, w_match, h_match, is_cached = matches[0]
+        if tag_type == "right":
+            loc_nametag = (loc_nametag[0] - w_match, loc_nametag[1])
+
+        # Convert back to original (unpadded) coordinates
+        loc_nametag = (
+            loc_nametag[0] - pad_x,
+            loc_nametag[1] - pad_y + self.cfg.camera_ceiling
+        )
+
+        # Update name tag location if confidence is good
+        if score < self.cfg.nametag_diff_thres:
+            self.loc_nametag = loc_nametag
+        loc_player = (
+            self.loc_nametag[0] - self.cfg.nametag_offset[0],
+            self.loc_nametag[1] - self.cfg.nametag_offset[1]
+        )
+
+        # Draw name tag detection box for debug
+        draw_rectangle(self.img_frame_debug, self.loc_nametag,
+                       self.img_nametag.shape, (0, 255, 0), "")
+        text = f"NameTag,{round(score, 2)}," + \
+                f"{'cached' if is_cached else 'missed'}," + \
+                f"{tag_type}"
+        cv2.putText(self.img_frame_debug, text,
+                    (self.loc_nametag[0],
+                     self.loc_nametag[1] + self.img_nametag.shape[0] + 30),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+
+        # Draw player center
+        cv2.circle(self.img_frame_debug,
+                loc_player, radius=3,
+                color=(0, 0, 255), thickness=-1)
+
+        return loc_player
+
+    def get_minimap_loc_size(self):
+        '''
+        Detects the location and size of the minimap within the game frame.
+
+        The function works by:
+        - Thresholding the image get pure white(255,255,255) pixels.
+        - Using connected components to find white-bordered regions.
+        - Filtering candidates based on expected minimap size and margin rules:
+            - Top, bottom, left, right margins must be 1px white lines.
+
+        Returns:
+            (x, y, w, h): Top-left coordinate and width/height of the minimap.
+                        Returns None if not found.
+        '''
+        white = np.array([255, 255, 255])
+
+        # Mask for pure white
+        mask_white = cv2.inRange(self.img_frame, white, white)
+
+        # Connected components with stats
+        num_labels, labels, stats, centroids = \
+            cv2.connectedComponentsWithStats(mask_white, connectivity=8)
+
+        # Loop over components (skip label 0, which is background)
+        for i in range(1, num_labels):
+            x0, y0, rw, rh, area = stats[i]
+
+            # Filter out small blobs
+            if rw < 100 or rh < 100:
+                continue
+
+            x1 = x0 + rw - 1
+            y1 = y0 + rh - 1
+
+            # Check 1px white top and bottom margins
+            if not (np.all(self.img_frame[y0, x0:x0+rw] == white) and \
+                    np.all(self.img_frame[y1, x0:x0+rw] == white)):
+                continue
+
+            # Check 1px white left and right margins
+            if not (np.all(self.img_frame[y0:y0:rh, x0] == white) and \
+                    np.all(self.img_frame[y0:y0:rh, x1] == white)):
+                continue
+
+            # Create a mask of non-white pixels
+            mask_minimap = np.any(self.img_frame[y0:y0+rh, x0:x0+rw] != white, axis=2).astype(np.uint8)
+
+            # Find bounding box of mask_minimap
+            coords = cv2.findNonZero(mask_minimap)
+            if coords is None:
+                continue  # skip empty block
+            x_minimap, y_minimap, w_minimap, h_minimap = cv2.boundingRect(coords)
+
+            # Offset by original x0, y0 to get coords in original image
+            x_minimap += x0
+            y_minimap += y0
+
+            return x_minimap, y_minimap, w_minimap, h_minimap
+
+        return None  # minimap not found
 
     def get_player_location_on_minimap(self):
         """
-        Get the player's location on the minimap by detecting a unique 4-pixel color.
-        Return the player's location in minimap coordinates.
-        """
-        # Crop the minimap from the game screen
-        x0, y0 = self.loc_minimap
-        h, w, _ = self.img_route.shape
-        img_minimap = self.img_frame[y0:y0 + h//4, x0:x0 + w//4]
+        Detects the player's position on the minimap.
 
+        The function works by:
+        - Creating a binary mask of all pixels in the minimap that match the configured
+        player color exactly.
+        - Verifying that at least 4 matching pixels are found (to avoid false positives).
+        - Computing the average of these pixel coordinates to determine the center of
+        the player icon on the minimap.
+
+        Returns:
+            (x, y): The player's location in minimap coordinates as a tuple.
+                    Returns None if not enough matching pixels are found.
+        """
         # Find pixels matching the player color
-        mask = cv2.inRange(img_minimap,
+        mask = cv2.inRange(self.img_minimap,
                            self.cfg.minimap_player_color,
                            self.cfg.minimap_player_color)
         coords = cv2.findNonZero(mask)
         if coords is None or len(coords) < 4:
-            logger.warning("Fail to locate player location on minimap")
+            logger.warning(f"Fail to locate player location on minimap.")
             return None
 
         # Calculate the average location of the matching pixels
         avg = coords.mean(axis=0)[0]  # shape (1,2), so we take [0]
-        loc_player_minimap = (int(round(avg[0] * self.cfg.minimap_upscale_factor)),
-                              int(round(avg[1] * self.cfg.minimap_upscale_factor)))
-        # Draw red circle to mark player's location on minimap
-        cv2.circle(self.img_route_debug, loc_player_minimap,
-                   radius=4, color=(0, 255, 255), thickness=2)
+        loc_player_minimap = (int(round(avg[0])), int(round(avg[1])))
 
         return loc_player_minimap
 
-    def get_nearest_color_code_on_minimap(self):
+    def get_player_location_on_global_map(self):
         '''
-        get_nearest_color_code_on_minimap
+        get_player_location_on_global_map
         '''
-        x0, y0 = self.loc_player_minimap
-        h, w = self.img_route.shape[:2]
-        x_min = max(0, x0 - self.cfg.minimap_color_code_search_range)
-        x_max = min(w, x0 + self.cfg.minimap_color_code_search_range)
-        y_min = max(0, y0 - self.cfg.minimap_color_code_search_range)
-        y_max = min(h, y0 + self.cfg.minimap_color_code_search_range)
 
-        nearest = None
-        min_dist = float('inf')
-        for y in range(y_min, y_max):
-            for x in range(x_min, x_max):
-                pixel = tuple(self.img_route[y, x])  # (R, G, B)
-                if pixel in self.cfg.color_code:
-                    dist = abs(x - x0) + abs(y - y0)
-                    if dist < min_dist:
-                        min_dist = dist
-                        nearest = {
-                            "pixel": (x, y),
-                            "color": pixel,
-                            "action": self.cfg.color_code[pixel],
-                            "distance": dist
-                        }
 
-        # Debug
-        draw_rectangle(
+        self.loc_minimap_global, score, _ = find_pattern_sqdiff(
+                                        self.img_map,
+                                        self.img_minimap)
+        loc_player_global = (
+            self.loc_minimap_global[0] + self.loc_player_minimap[0],
+            self.loc_minimap_global[1] + self.loc_player_minimap[1]
+        )
+
+        # Draw local minimap rectangle
+        camera_bottom_right = (
+            self.loc_minimap_global[0] + self.img_minimap.shape[1],
+            self.loc_minimap_global[1] + self.img_minimap.shape[0]
+        )
+        cv2.rectangle(self.img_route_debug, self.loc_minimap_global,
+                      camera_bottom_right, (0, 255, 255), 1)
+        cv2.putText(
             self.img_route_debug,
-            (x_min, y_min),
-            (self.cfg.minimap_color_code_search_range*2,
-             self.cfg.minimap_color_code_search_range*2),
-            (0, 0, 255), "Search Range",
-        )
-        # Draw a straigt line from map_loc_player to color_code["pixel"]
-        if nearest is not None:
-            cv2.line(
-                self.img_route_debug,
-                self.loc_player_minimap, # start point
-                nearest["pixel"],       # end point
-                (0, 255, 0),            # green line
-                1                       # thickness
-            )
-
-            # Print color code on debug image
-            cv2.putText(
-                self.img_frame_debug, f"Route Action: {nearest["action"]}",
-                (720, 90),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255),
-                2, cv2.LINE_AA
-            )
-            cv2.putText(
-                self.img_frame_debug, f"Route Index: {self.idx_routes}",
-                (720, 120),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255),
-                2, cv2.LINE_AA
-            )
-
-        return nearest  # if not found return none
-
-    def switch_status(self, new_status):
-        '''
-        Switch to new status and log the transition.
-
-        Parameters:
-        - new_status: string, the new status to switch to.
-        '''
-        # Ignore dummy transition
-        if self.status == new_status:
-            return
-
-        t_elapsed = round(time.time() - self.t_last_switch_status)
-        logger.info(f"[switch_status] From {self.status}({t_elapsed} sec) to {new_status}.")
-        self.status = new_status
-        self.t_last_switch_status = time.time()
-
-    def get_nearest_monster(self, is_left = True, overlap_threshold=0.5):
-        '''
-        get_nearest_monster
-        '''
-        if is_left:
-            x0 = self.loc_player[0] - self.cfg.magic_claw_range_x
-        else:
-            x0 = self.loc_player[0]
-        y0 = self.loc_player[1] - self.cfg.magic_claw_range_y//2
-        x1 = x0 + self.cfg.magic_claw_range_x
-        y1 = y0 + self.cfg.magic_claw_range_y
-
-        # Debug, magic claw hit box
-        draw_rectangle(
-            self.img_frame_debug, (x0, y0),
-            (self.cfg.magic_claw_range_y, self.cfg.magic_claw_range_x),
-            (0, 0, 255), "Attack Box"
+            f"Minimap,score({round(score, 2)})",
+            (self.loc_minimap_global[0], self.loc_minimap_global[1]+15),
+            cv2.FONT_HERSHEY_SIMPLEX, 0.4,
+            (0, 255, 255), 1
         )
 
-        nearest_monster = None
-        min_distance = float('inf')
-        for monster in self.monster_info:
-            mx1, my1 = monster["position"]
-            mw, mh = monster["size"]
-            mx2 = mx1 + mw
-            my2 = my1 + mh
+        # Draw player center
+        cv2.circle(self.img_route_debug,
+                   loc_player_global, radius=2,
+                   color=(0, 255, 255), thickness=-1)
 
-            # Calculate intersection
-            ix1 = max(x0, mx1)
-            iy1 = max(y0, my1)
-            ix2 = min(x1, mx2)
-            iy2 = min(y1, my2)
-
-            iw = max(0, ix2 - ix1)
-            ih = max(0, iy2 - iy1)
-            inter_area = iw * ih
-
-            monster_area = mw * mh
-            if monster_area == 0:
-                continue  # skip degenerate box
-
-            if inter_area/monster_area >= overlap_threshold:
-                # Compute distance to player center
-                monster_center = (mx1 + mw // 2, my1 + mh // 2)
-                dx = monster_center[0] - self.loc_player[0]
-                dy = monster_center[1] - self.loc_player[1]
-                distance = abs(dx) + abs(dy)  # Manhattan distance
-
-                if distance < min_distance:
-                    min_distance = distance
-                    nearest_monster = monster
-
-        return nearest_monster
-
-    def solve_rune(self):
-        '''
-        Solve the rune puzzle by detecting the arrow directions and pressing corresponding keys.
-        '''
-        while self.is_in_rune_game():
-            for arrow_idx in [0,1,2,3]:
-                # Get lastest game screen frame buffer
-                self.frame = self.capture.get_frame()
-                # Resize game screen to 1296x759
-                self.img_frame = cv2.resize(self.frame, (1296, 759),
-                                            interpolation=cv2.INTER_NEAREST)
-
-                # Crop arrow detection box
-                x = self.cfg.arrow_box_start_point[0] + self.cfg.arrow_box_interval*arrow_idx
-                y = self.cfg.arrow_box_start_point[1]
-                size = self.cfg.arrow_box_size
-                img_roi = self.img_frame[y:y+size, x:x+size]
-
-                # Loop through all possible arrows template and choose the most possible one
-                best_score = float('inf')
-                best_direction = ""
-                for direction, arrow_list in self.img_arrows.items():
-                    for img_arrow in arrow_list:
-                        _, score, _ = find_pattern_sqdiff(
-                                        img_roi, img_arrow,
-                                        mask=get_mask(img_arrow, (0, 255, 0)))
-                        if score < best_score:
-                            best_score = score
-                            best_direction = direction
-                logger.info(f"[solve_rune] Arrow({arrow_idx}) is {best_direction} with score({best_score})")
-
-                # Update img_frame_debug
-                self.img_frame_debug = self.img_frame.copy()
-                draw_rectangle(
-                    self.img_frame_debug, (x, y), (size, size),
-                    (0, 0, 255), str(round(best_score, 2))
-                )
-                # Update debug window
-                self.update_img_frame_debug()
-                cv2.waitKey(1)
-
-                # For logging
-                screenshot(self.img_frame_debug, "solve_rune")
-
-                # Press the key for 0.5 second
-                if not self.args.disable_control:
-                    self.kb.press_key(best_direction, 0.5)
-                time.sleep(1)
-
-
-        logger.info(f"[solve_rune] Solved all arrows")
-
-    def is_player_stuck(self):
-        """
-        Detect if the player is stuck (not moving).
-        If stuck for more than WATCH_DOG_TIMEOUT seconds, performs a random action.
-        """
-        dx = abs(self.loc_player_global[0] - self.loc_watch_dog[0])
-        dy = abs(self.loc_player_global[1] - self.loc_watch_dog[1])
-
-        current_time = time.time()
-        if dx + dy > self.cfg.watch_dog_range:
-            # Player moved, reset watchdog timer
-            self.loc_watch_dog = self.loc_player_global
-            self.t_watch_dog = current_time
-            return False
-
-        dt = current_time - self.t_watch_dog
-        if dt > self.cfg.watch_dog_timeout:
-            # watch dog idle for too long, player stuck
-            self.loc_watch_dog = self.loc_player_global
-            self.t_watch_dog = current_time
-            logger.warning(f"[is_player_stuck] Player stuck for {dt} seconds.")
-            return True
-        return False
-
-    def is_player_stuck_minimap(self):
-        """
-        Detect if the player is stuck (not moving).
-        If stuck for more than WATCH_DOG_TIMEOUT seconds, performs a random action.
-        """
-        dx = abs(self.loc_player_minimap[0] - self.loc_watch_dog[0])
-        dy = abs(self.loc_player_minimap[1] - self.loc_watch_dog[1])
-
-        current_time = time.time()
-        if dx + dy > self.cfg.watch_dog_range:
-            # Player moved, reset watchdog timer
-            self.loc_watch_dog = self.loc_player_minimap
-            self.t_watch_dog = current_time
-            return False
-
-        dt = current_time - self.t_watch_dog
-        if dt > self.cfg.watch_dog_timeout:
-            # watch dog idle for too long, player stuck
-            self.loc_watch_dog = self.loc_player_minimap
-            self.t_watch_dog = current_time
-            logger.warning(f"[is_player_stuck] Player stuck for {dt} seconds.")
-            return True
-        return False
+        return loc_player_global
 
     def get_nearest_color_code(self):
         '''
-        get_nearest_color_code
+        Searches for the nearest color-coded action marker
+        around the player on the route map.
+
+        This function:
+        - Scans each pixel in the search box to find nearest color code
+        - Tracks the closest matching pixel using Manhattan distance (|dx| + |dy|).
+        - Returns a dictionary containing the nearest matching
+          pixel's position, color, action label, and distance.
+
+        Returns:
+            dict or None: Dictionary containing:
+                - "pixel": (x, y) coordinate of the matched pixel
+                - "color": matched RGB color tuple
+                - "action": corresponding action string from config
+                - "distance": Manhattan distance from player
+            Returns None if no matching color is found within the region.
         '''
         x0, y0 = self.loc_player_global
         h, w = self.img_route.shape[:2]
@@ -463,8 +420,9 @@ class MapleStoryBot:
         draw_rectangle(
             self.img_route_debug,
             (x_min, y_min),
-            (self.cfg.color_code_search_range*2, self.cfg.color_code_search_range*2),
-            (0, 0, 255), "Color Search Range"
+            (self.cfg.color_code_search_range*2,
+             self.cfg.color_code_search_range*2),
+            (0, 0, 255), "", text_height=0.4, thickness=1,
         )
         # Draw a straigt line from map_loc_player to color_code["pixel"]
         if nearest is not None:
@@ -494,7 +452,15 @@ class MapleStoryBot:
 
     def get_hp_mp_exp(self):
         '''
-        get_hp_mp_exp
+        Extracts the player's HP, MP, and EXP ratios from game frame.
+
+        This function:
+        - Crops the predefined HP, MP, and EXP bar regions from the game frame.
+        - Identifies empty areas in each bar.
+        - Computes the fill ratio for each bar as: 1 - (empty_pixels / total_pixels).
+
+        Returns:
+            tuple: (hp_ratio, mp_ratio, exp_ratio), each a float between 0 and 1.
         '''
         # HP crop
         hp_bar = self.img_frame[self.cfg.hp_bar_top_left[1]:self.cfg.hp_bar_bottom_right[1]+1,
@@ -545,107 +511,74 @@ class MapleStoryBot:
 
         return hp_ratio, mp_ratio, exp_ratio
 
-    def is_rune_warning(self):
+    def get_nearest_monster(self, is_left = True, overlap_threshold=0.5):
         '''
-        is_rune_warning
+        Finds the nearest monster within the player's attack range.
+
+        This function:
+        - Defines an attack box relative to the player position,
+            depending on the facing direction (`is_left`).
+        - Iterates through all detected monsters and checks which ones overlap
+          with the attack box.
+        - Returns the closest valid monster that meets the overlap criteria.
+
+        Args:
+            is_left (bool): If True, assume the player is facing left;
+                            adjusts attack box accordingly.
+            overlap_threshold (float): Minimum IoU area ratio required to consider a hit.
+
+        Returns:
+            dict or None: The nearest monster's info dict, or None if no valid match.
         '''
-        x0, y0 = self.cfg.rune_warning_top_left
-        x1, y1 = self.cfg.rune_warning_bottom_right
-        _, score, _ = find_pattern_sqdiff(
-                        self.img_frame_gray[y0:y1, x0:x1],
-                        self.img_rune_warning)
-        if self.status == "hunting" and score < self.cfg.rune_warning_diff_thres:
-            logger.info(f"[is_rune_warning] Detect rune warning on screen with score({score})")
-            return True
+        if is_left:
+            x0 = self.loc_player[0] - self.cfg.magic_claw_range_x
         else:
-            return False
+            x0 = self.loc_player[0]
+        y0 = self.loc_player[1] - self.cfg.magic_claw_range_y//2
+        x1 = x0 + self.cfg.magic_claw_range_x
+        y1 = y0 + self.cfg.magic_claw_range_y
 
-    def is_rune_near_player(self):
-        '''
-        is_rune_near_player
-        '''
-        # Calculate bounding box
-        h, w = self.img_frame.shape[:2]
-        x0 = max(0, self.loc_player[0] - self.cfg.rune_detect_box_width // 2)
-        y0 = max(0, self.loc_player[1] - self.cfg.rune_detect_box_height)
-        x1 = min(w, self.loc_player[0] + self.cfg.rune_detect_box_width // 2)
-        y1 = min(h, self.loc_player[1])
-
-        # Debug
+        # Debug, magic claw hit box
         draw_rectangle(
-            self.img_frame_debug, (x0, y0), (y1-y0, x1-x0),
-            (255, 0, 0), "Rune Detection Range"
+            self.img_frame_debug, (x0, y0),
+            (self.cfg.magic_claw_range_y, self.cfg.magic_claw_range_x),
+            (0, 0, 255), "Attack Box"
         )
 
-        # Find rune icon near player
-        if  (x1 - x0) < self.img_rune.shape[1] or \
-            (y1 - y0) < self.img_rune.shape[0]:
-            return False # Skip check if box is out of range
-        else:
-            img_roi = self.img_frame[y0:y1, x0:x1]
-            loc_rune, score, _ = find_pattern_sqdiff(
-                            img_roi,
-                            self.img_rune,
-                            mask=get_mask(self.img_rune, (0, 255, 0)))
-            # # Draw rectangle for debug
-            # draw_rectangle(
-            #     self.img_frame_debug,
-            #     (x0 + loc_rune[0], y0 + loc_rune[1]),
-            #     self.img_rune.shape,
-            #     (255, 0, 255),  # purple in BGR
-            #     f"Rune,{round(score, 2)}"
-            # )
-            detect_thres = self.cfg.rune_detect_diff_thres + self.rune_detect_level*self.cfg.rune_detect_level_coef
-            if score < detect_thres:
-                logger.info(f"[Rune Detect] Found rune near player with score({score})," + \
-                            f"level({self.rune_detect_level}),threshold({detect_thres})")
-                # Draw rectangle for debug
-                draw_rectangle(
-                    self.img_frame_debug,
-                    (x0 + loc_rune[0], y0 + loc_rune[1]),
-                    self.img_rune.shape,
-                    (255, 0, 255),  # purple in BGR
-                    f"Rune,{round(score, 2)}"
-                )
-                screenshot(self.img_frame_debug, "rune_detected")
+        nearest_monster = None
+        min_distance = float('inf')
+        for monster in self.monster_info:
+            mx1, my1 = monster["position"]
+            mw, mh = monster["size"]
+            mx2 = mx1 + mw
+            my2 = my1 + mh
 
-                return True
-            else:
-                return False
+            # Calculate intersection
+            ix1 = max(x0, mx1)
+            iy1 = max(y0, my1)
+            ix2 = min(x1, mx2)
+            iy2 = min(y1, my2)
 
-    def is_in_rune_game(self):
-        '''
-        is_in_rune_game
-        '''
-        # Get lastest game screen frame buffer
-        self.frame = self.capture.get_frame()
-        # Resize game screen to 1296x759
-        self.img_frame = cv2.resize(self.frame, (1296, 759), interpolation=cv2.INTER_NEAREST)
+            iw = max(0, ix2 - ix1)
+            ih = max(0, iy2 - iy1)
+            inter_area = iw * ih
 
-        # Crop arrow detection box
-        x, y = self.cfg.arrow_box_start_point
-        size = self.cfg.arrow_box_size
-        img_roi = self.img_frame[y:y+size, x:x+size]
+            monster_area = mw * mh
+            if monster_area == 0:
+                continue  # skip degenerate box
 
-        # Check if arrow exist on screen
-        best_score = float('inf')
-        for direc, arrow_list in self.img_arrows.items():
-            for img_arrow in arrow_list:
-                _, score, _ = find_pattern_sqdiff(
-                                img_roi, img_arrow,
-                                mask=get_mask(img_arrow, (0, 255, 0)))
-                if score < best_score:
-                    best_score = score
+            if inter_area/monster_area >= overlap_threshold:
+                # Compute distance to player center
+                monster_center = (mx1 + mw // 2, my1 + mh // 2)
+                dx = monster_center[0] - self.loc_player[0]
+                dy = monster_center[1] - self.loc_player[1]
+                distance = abs(dx) + abs(dy)  # Manhattan distance
 
-        draw_rectangle(
-            self.img_frame_debug, (x, y), (size, size),
-            (0, 0, 255), str(round(best_score, 2))
-        )
+                if distance < min_distance:
+                    min_distance = distance
+                    nearest_monster = monster
 
-        if best_score < self.cfg.arrow_box_diff_thres:
-            logger.info(f"Arrow screen detected with score({score})")
-            return True
-        return False
+        return nearest_monster
 
     def get_monsters_in_range(self, top_left, bottom_right):
         '''
@@ -826,186 +759,280 @@ class MapleStoryBot:
 
         return monster_info
 
-    def get_player_location(self):
+    def switch_status(self, new_status):
         '''
-        get player location by detecting player's nametag
+        Switch to new status and log the transition.
+
+        Parameters:
+        - new_status: string, the new status to switch to.
         '''
-        img_roi = self.img_frame_gray[self.cfg.camera_ceiling:self.cfg.camera_floor, :]
+        # Ignore dummy transition
+        if self.status == new_status:
+            return
 
-        # Pad search region to avoid edge cut-off issue (full template size)
-        (pad_y, pad_x) = self.img_nametag.shape[:2]
-        img_roi_padded = cv2.copyMakeBorder(
-            img_roi,
-            pad_y, pad_y, pad_x, pad_x,
-            borderType=cv2.BORDER_REPLICATE  # replicate border for safe matching
-        )
+        t_elapsed = round(time.time() - self.t_last_switch_status)
+        logger.info(f"[switch_status] From {self.status}({t_elapsed} sec) to {new_status}.")
+        self.status = new_status
+        self.t_last_switch_status = time.time()
 
-        # Adjust previous location
-        if self.is_first_frame:
-            last_result = None
+    def solve_rune(self):
+        '''
+        Automatically solves the rune puzzle mini-game by recognizing directional arrows
+        on the screen and simulating the correct key presses.
+
+        This function:
+        - Continuously checks whether the rune game is active.
+        - For each of the 4 arrows:
+            - Compares the cropped image with all known arrow templates.
+            - Selects the best-matching arrow direction.
+            - Simulates a key press corresponding to the detected arrow direction.
+        - Repeats until the rune game ends.
+
+        Note:
+            - Skips key press simulation if `--disable_control` flag is set.
+
+        Returns:
+            None
+        '''
+        while self.is_in_rune_game():
+            for arrow_idx in [0,1,2,3]:
+                # Get lastest game screen frame buffer
+                self.frame = self.capture.get_frame()
+                # Resize game screen to 1296x759
+                self.img_frame = cv2.resize(self.frame, (1296, 759),
+                                            interpolation=cv2.INTER_NEAREST)
+
+                # Crop arrow detection box
+                x = self.cfg.arrow_box_start_point[0] + self.cfg.arrow_box_interval*arrow_idx
+                y = self.cfg.arrow_box_start_point[1]
+                size = self.cfg.arrow_box_size
+                img_roi = self.img_frame[y:y+size, x:x+size]
+
+                # Loop through all possible arrows template and choose the most possible one
+                best_score = float('inf')
+                best_direction = ""
+                for direction, arrow_list in self.img_arrows.items():
+                    for img_arrow in arrow_list:
+                        _, score, _ = find_pattern_sqdiff(
+                                        img_roi, img_arrow,
+                                        mask=get_mask(img_arrow, (0, 255, 0)))
+                        if score < best_score:
+                            best_score = score
+                            best_direction = direction
+                logger.info(f"[solve_rune] Arrow({arrow_idx}) is {best_direction} with score({best_score})")
+
+                # Update img_frame_debug
+                self.img_frame_debug = self.img_frame.copy()
+                draw_rectangle(
+                    self.img_frame_debug, (x, y), (size, size),
+                    (0, 0, 255), str(round(best_score, 2))
+                )
+                # Update debug window
+                self.update_img_frame_debug()
+                cv2.waitKey(1)
+
+                # For logging
+                screenshot(self.img_frame_debug, "solve_rune")
+
+                # Press the key for 0.5 second
+                if not self.args.disable_control:
+                    self.kb.press_key(best_direction, 0.5)
+                time.sleep(1)
+
+        logger.info(f"[solve_rune] Solved all arrows")
+
+    def is_player_stuck(self):
+        """
+        Checks whether the player is stuck (not moving)
+        based on their global position on map.
+
+        This function:
+        - Compares the player's current position with their last known position
+          tracked by the watchdog.
+        - If the player has moved beyond a threshold (`watch_dog_range`),
+          it resets the watchdog timer.
+        - If the player hasn't moved and the elapsed time exceeds (`watch_dog_timeout`),
+          it flags the player as stuck and resets the watchdog.
+
+        Returns:
+            bool: True if the player is stuck, False otherwise.
+        """
+        dx = abs(self.loc_player_global[0] - self.loc_watch_dog[0])
+        dy = abs(self.loc_player_global[1] - self.loc_watch_dog[1])
+
+        current_time = time.time()
+        if dx + dy > self.cfg.watch_dog_range:
+            # Player moved, reset watchdog timer
+            self.loc_watch_dog = self.loc_player_global
+            self.t_watch_dog = current_time
+            return False
+
+        dt = current_time - self.t_watch_dog
+        if dt > self.cfg.watch_dog_timeout:
+            # watch dog idle for too long, player stuck
+            self.loc_watch_dog = self.loc_player_global
+            self.t_watch_dog = current_time
+            logger.warning(f"[is_player_stuck] Player stuck for {dt} seconds.")
+            return True
+        return False
+
+    def is_rune_warning(self):
+        '''
+        Checks whether the rune warning icon is appear on the game frame.
+
+        This function:
+        - Crops a specific region where the rune warning icon is expected.
+        - Compare the cropped region against the known rune warning image template.
+        - Returns True if rune warning template matched
+
+        Returns:
+            bool: True if the rune warning is detected, False otherwise.
+        '''
+        x0, y0 = self.cfg.rune_warning_top_left
+        x1, y1 = self.cfg.rune_warning_bottom_right
+        _, score, _ = find_pattern_sqdiff(
+                        self.img_frame_gray[y0:y1, x0:x1],
+                        self.img_rune_warning)
+        if self.status == "hunting" and score < self.cfg.rune_warning_diff_thres:
+            logger.info(f"[is_rune_warning] Detect rune warning on screen with score({score})")
+            return True
         else:
-            last_result = (
-                self.loc_nametag[0] + pad_x,
-                self.loc_nametag[1] - self.cfg.camera_ceiling + pad_y
-            )
+            return False
 
-        # Split nametag into left and right half, detect seperately and pick highest socre
-        # This localization method is more robust for occluded nametag
-        h, w = self.img_nametag_gray.shape
-        mask_full = get_mask(self.img_nametag, (0, 255, 0))
-        nametag_variants = {
-            "left": {
-                "img_pattern": self.img_nametag_gray[:, :w // 2],
-                "mask": mask_full[:, :w // 2],
-                "last_result": last_result,
-                "score_penalty": 0.0
-            },
-            "right": {
-                "img_pattern": self.img_nametag_gray[:, w // 2:],
-                "mask": mask_full[:, w // 2:],
-                "last_result": (last_result[0] + w // 2, last_result[1]) if last_result else None,
-                "score_penalty": 0.0
-            }
-        }
+    def is_rune_near_player(self):
+        '''
+        Checks if a rune icon is visible around the player's position.
 
-        # Match template for each split nametag
-        matches = []
-        for tag_type, data in nametag_variants.items():
-            loc, score, is_cached = find_pattern_sqdiff(
-                img_roi_padded,
-                data["img_pattern"],
-                last_result=data["last_result"],
-                mask=data["mask"],
-                global_threshold=0.3
-            )
-            w_match = data["img_pattern"].shape[1]
-            h_match = data["img_pattern"].shape[0]
-            score += data["score_penalty"]
-            matches.append((tag_type, loc, score, w_match, h_match, is_cached))
+        This function:
+        - Uses template matching to detect the rune icon within this predefine box.
+        - Dynamically adjusts the detection threshold based on the rune detection level.
 
-        # Choose the best match
-        matches.sort(key=lambda x: (not x[5], x[2]))
-        tag_type, loc_nametag, score, w_match, h_match, is_cached = matches[0]
-        if tag_type == "right":
-            loc_nametag = (loc_nametag[0] - w_match, loc_nametag[1])
+        Returns:
+            bool: True if a rune is found near the player, False otherwise.
+        '''
+        # Calculate bounding box
+        h, w = self.img_frame.shape[:2]
+        x0 = max(0, self.loc_player[0] - self.cfg.rune_detect_box_width // 2)
+        y0 = max(0, self.loc_player[1] - self.cfg.rune_detect_box_height)
+        x1 = min(w, self.loc_player[0] + self.cfg.rune_detect_box_width // 2)
+        y1 = min(h, self.loc_player[1])
 
-        # Convert back to original (unpadded) coordinates
-        loc_nametag = (
-            loc_nametag[0] - pad_x,
-            loc_nametag[1] - pad_y + self.cfg.camera_ceiling
-        )
-
-        # Update name tag location if confidence is good
-        if score < self.cfg.nametag_diff_thres:
-            self.loc_nametag = loc_nametag
-        loc_player = (
-            self.loc_nametag[0] - self.cfg.nametag_offset[0],
-            self.loc_nametag[1] - self.cfg.nametag_offset[1]
-        )
-
-        # Draw name tag detection box for debug
+        # Debug
         draw_rectangle(
-            self.img_frame_debug, self.loc_nametag, self.img_nametag.shape,
-            (0, 255, 0), "")
-        text = f"NameTag,{round(score, 2)}," + \
-                f"{'cached' if is_cached else 'missed'}," + \
-                f"{tag_type}"
-        cv2.putText(self.img_frame_debug, text,
-                    (self.loc_nametag[0], self.loc_nametag[1] + self.img_nametag.shape[0] + 30),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+            self.img_frame_debug, (x0, y0), (y1-y0, x1-x0),
+            (255, 0, 0), "Rune Detection Range"
+        )
 
-        # Draw player center
-        cv2.circle(self.img_frame_debug,
-                loc_player, radius=3,
-                color=(0, 0, 255), thickness=-1)
-
-        return loc_player
-
-    def get_player_location_global(self):
-        '''
-        get_player_location_global
-        '''
-        scale_factor = self.cfg.localize_downscale_factor
-        # Downscale both template and search image
-        img_roi = self.img_frame_gray[self.cfg.camera_ceiling:self.cfg.camera_floor, :]
-        img_query = cv2.resize(img_roi, (0, 0), fx=scale_factor, fy=scale_factor)
-
-        # Get previous frame result
-        if self.is_first_frame or \
-            time.time() - self.t_last_camera_missed > self.cfg.localize_cached_interval:
-            last_result = None
-            self.t_last_camera_missed = time.time()
+        # Find rune icon near player
+        if  (x1 - x0) < self.img_rune.shape[1] or \
+            (y1 - y0) < self.img_rune.shape[0]:
+            return False # Skip check if box is out of range
         else:
-            last_result = (
-                int(self.loc_camera[0] * scale_factor),
-                int(self.loc_camera[1] * scale_factor)
-            )
+            img_roi = self.img_frame[y0:y1, x0:x1]
+            loc_rune, score, _ = find_pattern_sqdiff(
+                            img_roi,
+                            self.img_rune,
+                            mask=get_mask(self.img_rune, (0, 255, 0)))
+            # # Draw rectangle for debug
+            # draw_rectangle(
+            #     self.img_frame_debug,
+            #     (x0 + loc_rune[0], y0 + loc_rune[1]),
+            #     self.img_rune.shape,
+            #     (255, 0, 255),  # purple in BGR
+            #     f"Rune,{round(score, 2)}"
+            # )
+            detect_thres = self.cfg.rune_detect_diff_thres + self.rune_detect_level*self.cfg.rune_detect_level_coef
+            if score < detect_thres:
+                logger.info(f"[Rune Detect] Found rune near player with score({score})," + \
+                            f"level({self.rune_detect_level}),threshold({detect_thres})")
+                # Draw rectangle for debug
+                draw_rectangle(
+                    self.img_frame_debug,
+                    (x0 + loc_rune[0], y0 + loc_rune[1]),
+                    self.img_rune.shape,
+                    (255, 0, 255),  # purple in BGR
+                    f"Rune,{round(score, 2)}"
+                )
+                screenshot(self.img_frame_debug, "rune_detected")
 
-        loc_camera, score, is_cached = find_pattern_sqdiff(
-            self.img_map_resized,
-            img_query,
-            last_result=last_result,
-            local_search_radius=20,
-            global_threshold = 0.8)
-        self.loc_camera = (
-            int(loc_camera[0] / scale_factor),
-            int(loc_camera[1] / scale_factor)
+                return True
+            else:
+                return False
+
+    def is_in_rune_game(self):
+        '''
+        Determines whether the rune puzzle game screen is currently active.
+
+        This function:
+        - Extracts the RoI where the first arrow of the rune puzzle appears.
+        - Performs masked template matching with all known arrow templates.
+        - Computes the best matching score across all arrow directions.
+        - If the best match score is below a threshold,
+          the rune puzzle is considered active.
+
+        Returns:
+            bool: True if the rune game is detected on screen, False otherwise.
+        '''
+        # Get lastest game screen frame buffer
+        self.frame = self.capture.get_frame()
+        # Resize game screen to 1296x759
+        self.img_frame = cv2.resize(self.frame, (1296, 759), interpolation=cv2.INTER_NEAREST)
+
+        # Crop arrow detection box
+        x, y = self.cfg.arrow_box_start_point
+        size = self.cfg.arrow_box_size
+        img_roi = self.img_frame[y:y+size, x:x+size]
+
+        # Check if arrow exist on screen
+        best_score = float('inf')
+        for direc, arrow_list in self.img_arrows.items():
+            for img_arrow in arrow_list:
+                _, score, _ = find_pattern_sqdiff(
+                                img_roi, img_arrow,
+                                mask=get_mask(img_arrow, (0, 255, 0)))
+                if score < best_score:
+                    best_score = score
+
+        draw_rectangle(
+            self.img_frame_debug, (x, y), (size, size),
+            (0, 0, 255), str(round(best_score, 2))
         )
-        loc_player_global = (
-            self.loc_camera[0] + self.loc_player[0],
-            self.loc_camera[1] + self.loc_player[1] - self.cfg.camera_ceiling)
 
-        # Draw camera rectangle
-        camera_bottom_right = (
-            self.loc_camera[0] + self.img_frame.shape[1],
-            self.loc_camera[1] + self.img_frame.shape[0]
-        )
-        cv2.rectangle(self.img_route_debug, self.loc_camera,
-                      camera_bottom_right, (0, 255, 255), 2)
-        cv2.putText(
-            self.img_route_debug,
-            f"Camera, score={round(score, 2)}, {'cached' if is_cached else 'missed'}",
-            (self.loc_camera[0], self.loc_camera[1] + 60),
-            cv2.FONT_HERSHEY_SIMPLEX, 2,
-            (0, 255, 0), 2
-        )
-
-        # Draw player center
-        cv2.circle(self.img_route_debug,
-                   loc_player_global, radius=3,
-                   color=(0, 0, 255), thickness=-1)
-        cv2.putText(self.img_route_debug, "Player",
-                    (loc_player_global[0] - 30, loc_player_global[1] - 10),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
-
-        return loc_player_global
+        if best_score < self.cfg.arrow_box_diff_thres:
+            logger.info(f"Arrow screen detected with score({score})")
+            return True
+        return False
 
     def is_near_edge(self):
         '''
-        is_near_edge
+        Detects whether the player is near a teleport edge region
+
+        This function:
+        - Defines a rectangular search region around the player's current global location.
+        - Scans for pixels matching a specific edge teleport color code within the region.
+        - If matching pixels are found, it computes the average X position of those pixels.
+        - Compares that average to the player's X position to determine whether the edge is on the left or right.
+
+        Returns:
+            str: One of:
+                - "edge on left"
+                - "edge on right"
+                - "" (empty string if no edge is detected nearby)
         '''
-        if self.cfg.is_use_minimap:
-            x0, y0 = self.loc_player_minimap
-            h, w = self.img_route.shape[:2]
-            x_min = max(0, x0 - self.cfg.edge_teleport_minimap_box_width//2)
-            x_max = min(w, x0 + self.cfg.edge_teleport_minimap_box_width//2)
-            y_min = max(0, y0 - self.cfg.edge_teleport_minimap_box_height//2)
-            y_max = min(h, y0 + self.cfg.edge_teleport_minimap_box_height//2)
-        else:
-            x0, y0 = self.loc_player_global
-            h, w = self.img_route.shape[:2]
-            x_min = max(0, x0 - self.cfg.edge_teleport_box_width//2)
-            x_max = min(w, x0 + self.cfg.edge_teleport_box_width//2)
-            y_min = max(0, y0 - self.cfg.edge_teleport_box_height//2)
-            y_max = min(h, y0 + self.cfg.edge_teleport_box_height//2)
+        x0, y0 = self.loc_player_global
+        h, w = self.img_route.shape[:2]
+        x_min = max(0, x0 - self.cfg.edge_teleport_box_width//2)
+        x_max = min(w, x0 + self.cfg.edge_teleport_box_width//2)
+        y_min = max(0, y0 - self.cfg.edge_teleport_box_height//2)
+        y_max = min(h, y0 + self.cfg.edge_teleport_box_height//2)
 
         # Debug: draw search box
-        draw_rectangle(
-            self.img_route_debug,
-            (x_min, y_min),
-            (y_max - y_min, x_max - x_min),
-            (0, 0, 255), "Edge Check"
-        )
+        # draw_rectangle(
+        #     self.img_route_debug,
+        #     (x_min, y_min),
+        #     (y_max - y_min, x_max - x_min),
+        #     (0, 0, 255), "Edge Check", thickness=1, text_height=0.4
+        # )
 
         # Find mask of matching pixels
         roi = self.img_route[y_min:y_max, x_min:x_max]
@@ -1055,71 +1082,48 @@ class MapleStoryBot:
                 2, cv2.LINE_AA
             )
 
+        # Draw minimap rectangle on img debug
+        draw_rectangle(
+            self.img_frame_debug,
+            self.loc_minimap,
+            self.img_minimap.shape[:2],
+            (0, 0, 255), "minimap",thickness=1
+        )
+
         # Don't draw minimap in patrol mode
         if self.args.patrol:
             return
 
-        # mini-map on debug image
-        if self.cfg.is_use_minimap:
-            # Compute crop region with boundary check
-            crop_w, crop_h = 300, 300
-            x0 = max(0, self.loc_player_minimap[0] - crop_w // 2)
-            y0 = max(0, self.loc_player_minimap[1] - crop_h // 2)
-            x1 = min(self.img_route_debug.shape[1], x0 + crop_w)
-            y1 = min(self.img_route_debug.shape[0], y0 + crop_h)
+        # Compute crop region with boundary check
+        crop_w, crop_h = 80, 80
+        x0 = max(0, self.loc_player_global[0] - crop_w // 2)
+        y0 = max(0, self.loc_player_global[1] - crop_h // 2)
+        x1 = min(self.img_route_debug.shape[1], x0 + crop_w)
+        y1 = min(self.img_route_debug.shape[0], y0 + crop_h)
 
-            # Crop region
-            mini_map_crop = self.img_route_debug[y0:y1, x0:x1]
-            mini_map_crop = cv2.resize(mini_map_crop,
-                                    (int(mini_map_crop.shape[1] // 1.5),
-                                     int(mini_map_crop.shape[0] // 1.5)),
-                                    interpolation=cv2.INTER_NEAREST)
-            # Paste into top-right corner of self.img_frame_debug
-            h_crop, w_crop = mini_map_crop.shape[:2]
-            h_frame, w_frame = self.img_frame_debug.shape[:2]
-            x_paste = w_frame - w_crop - 10  # 10px margin from right
-            y_paste = 70
-            self.img_frame_debug[y_paste:y_paste + h_crop, x_paste:x_paste + w_crop] = mini_map_crop
+        # Crop region
+        mini_map_crop = self.img_route_debug[y0:y1, x0:x1]
+        mini_map_crop = cv2.resize(mini_map_crop,
+                                (int(mini_map_crop.shape[1] * 3),
+                                 int(mini_map_crop.shape[0] * 3)),
+                                interpolation=cv2.INTER_NEAREST)
+        # Paste into top-right corner of self.img_frame_debug
+        h_crop, w_crop = mini_map_crop.shape[:2]
+        h_frame, w_frame = self.img_frame_debug.shape[:2]
+        x_paste = w_frame - w_crop - 10  # 10px margin from right
+        y_paste = 70
+        self.img_frame_debug[y_paste:y_paste + h_crop, x_paste:x_paste + w_crop] = mini_map_crop
 
-            # Draw border around minimap
-            cv2.rectangle(
-                self.img_frame_debug,
-                (x_paste, y_paste),
-                (x_paste + w_crop, y_paste + h_crop),
-                color=(255, 255, 255),   # White border
-                thickness=2
-            )
-        else:
-            # Compute crop region with boundary check
-            crop_w, crop_h = 400, 400
-            x0 = max(0, self.loc_player_global[0] - crop_w // 2)
-            y0 = max(0, self.loc_player_global[1] - crop_h // 2)
-            x1 = min(self.img_route_debug.shape[1], x0 + crop_w)
-            y1 = min(self.img_route_debug.shape[0], y0 + crop_h)
-
-            # Crop region
-            mini_map_crop = self.img_route_debug[y0:y1, x0:x1]
-            mini_map_crop = cv2.resize(mini_map_crop,
-                                    (mini_map_crop.shape[1] // 2, mini_map_crop.shape[0] // 2),
-                                    interpolation=cv2.INTER_NEAREST)
-            # Paste into top-right corner of self.img_frame_debug
-            h_crop, w_crop = mini_map_crop.shape[:2]
-            h_frame, w_frame = self.img_frame_debug.shape[:2]
-            x_paste = w_frame - w_crop - 10  # 10px margin from right
-            y_paste = 70
-            self.img_frame_debug[y_paste:y_paste + h_crop, x_paste:x_paste + w_crop] = mini_map_crop
-
-            # Draw border around minimap
-            cv2.rectangle(
-                self.img_frame_debug,
-                (x_paste, y_paste),
-                (x_paste + w_crop, y_paste + h_crop),
-                color=(255, 255, 255),   # White border
-                thickness=2
-            )
+        # Draw border around minimap
+        cv2.rectangle(
+            self.img_frame_debug,
+            (x_paste, y_paste),
+            (x_paste + w_crop, y_paste + h_crop),
+            color=(255, 255, 255),   # White border
+            thickness=2
+        )
 
     def update_img_frame_debug(self):
-
         '''
         update_img_frame_debug
         '''
@@ -1149,39 +1153,34 @@ class MapleStoryBot:
             self.img_route = self.img_routes[self.idx_routes]
             self.img_route_debug = cv2.cvtColor(self.img_route, cv2.COLOR_RGB2BGR)
 
-        # Get minimap location
-        if self.is_first_frame and self.cfg.is_use_minimap:
-            self.loc_minimap = self.get_minimap_location()
+        # Get minimap from game window
+        if self.is_first_frame:
+            x, y, w, h = self.get_minimap_loc_size()
+            self.loc_minimap = (x, y)
+            self.img_minimap = self.img_frame[y:y+h, x:x+w]
+        else:
+            x, y = self.loc_minimap
+            h, w = self.img_minimap.shape[:2]
+            self.img_minimap = self.img_frame[y:y+h, x:x+w]
 
-        # Debug
-        if self.cfg.is_use_minimap:
-            h, w = self.img_map.shape[:2]
-            draw_rectangle(
-                self.img_frame_debug,
-                self.loc_minimap,
-                (h, w),
-                (0, 0, 255), "minimap",thickness=1
-            )
-
-        # Detect HP/MP/EXP bar on UI
+        # Detect HP/MP/EXP bar on game window
         self.hp_ratio, self.mp_ratio, self.exp_ratio = self.get_hp_mp_exp()
 
         # Check whether "PLease remove runes" warning appears on screen
         if self.is_rune_warning():
             self.rune_detect_level = 0
-            self.switch_status("finding_rune")
+            self.switch_status("finding_rune") # Stop hunting and start find runes
 
         # Get player location in game window
-        self.loc_player = self.get_player_location()
+        self.loc_player = self.get_player_location_by_nametag()
 
-        # Get player location on map
-        if self.cfg.is_use_minimap:
-            loc_player_minimap = self.get_player_location_on_minimap()
-            if loc_player_minimap:
-                self.loc_player_minimap = loc_player_minimap
-        else:
-            if not self.args.patrol:
-                self.loc_player_global = self.get_player_location_global()
+        # Get player location on minimap
+        loc_player_minimap = self.get_player_location_on_minimap()
+        if loc_player_minimap:
+            self.loc_player_minimap = loc_player_minimap
+
+        # Get player location on global map
+        self.loc_player_global = self.get_player_location_on_global_map()
 
         # Check whether a rune icon is near player
         if self.is_rune_near_player():
@@ -1189,15 +1188,14 @@ class MapleStoryBot:
 
         # Check whether we entered the rune mini-game
         if self.status == "near_rune":
-            # stop character
-            self.kb.set_command("stop")
+            self.kb.set_command("stop") # stop character
             time.sleep(0.1) # Wait for character to stop
             self.kb.disable() # Disable kb thread during rune solving
 
             # Attempt to trigger rune
             if not self.args.disable_control:
                 self.kb.press_key("up", 0.02)
-            time.sleep(1) # Wait rune game to pop up
+            time.sleep(1) # Wait for rune game to pop up
 
             # If entered the game, start solving rune
             if self.is_in_rune_game():
@@ -1215,6 +1213,8 @@ class MapleStoryBot:
             x1 = min(self.img_frame.shape[1], self.loc_player[0] + self.cfg.aoe_skill_range_x//2)
             y0 = max(0, self.loc_player[1] - self.cfg.aoe_skill_range_y//2)
             y1 = min(self.img_frame.shape[0], self.loc_player[1] + self.cfg.aoe_skill_range_y//2)
+            # Get monster in skill range
+            self.monster_info = self.get_monsters_in_range((x0, y0), (x1, y1))
         elif self.args.attack == "magic_claw":
             # Search monster nearby magic claw range
             dx = self.cfg.magic_claw_range_x + self.cfg.monster_search_margin
@@ -1223,10 +1223,10 @@ class MapleStoryBot:
             x1 = min(self.img_frame.shape[1], self.loc_player[0] + dx)
             y0 = max(0, self.loc_player[1] - dy)
             y1 = min(self.img_frame.shape[0], self.loc_player[1] + dy)
+            # Get monster in skill range
+            self.monster_info = self.get_monsters_in_range((x0, y0), (x1, y1))
 
-        # Get monster in skill range
-        self.monster_info = self.get_monsters_in_range((x0, y0), (x1, y1))
-
+        # Get attack direction
         if self.args.attack == "aoe_skill":
             if len(self.monster_info) == 0:
                 attack_direction = None
@@ -1236,7 +1236,6 @@ class MapleStoryBot:
             # Get nearest monster to player
             monster_left  = self.get_nearest_monster(is_left = True)
             monster_right = self.get_nearest_monster(is_left = False)
-
             # Compute distance for left
             distance_left = float('inf')
             if monster_left is not None:
@@ -1245,7 +1244,6 @@ class MapleStoryBot:
                 center_left = (mx + mw // 2, my + mh // 2)
                 distance_left = abs(center_left[0] - self.loc_player[0]) + \
                                 abs(center_left[1] - self.loc_player[1])
-
             # Compute distance for right
             distance_right = float('inf')
             if monster_right is not None:
@@ -1254,7 +1252,6 @@ class MapleStoryBot:
                 center_right = (mx + mw // 2, my + mh // 2)
                 distance_right = abs(center_right[0] - self.loc_player[0]) + \
                                 abs(center_right[1] - self.loc_player[1])
-
             # Choose attack direction
             attack_direction = None
             if distance_left < distance_right:
@@ -1263,7 +1260,6 @@ class MapleStoryBot:
                 attack_direction = "right"
 
         command = ""
-
         if self.args.patrol:
             x, y = self.loc_player
             h, w = self.img_frame.shape[:2]
@@ -1291,10 +1287,7 @@ class MapleStoryBot:
 
         else:
             # get color code from img_route
-            if self.cfg.is_use_minimap:
-                color_code = self.get_nearest_color_code_on_minimap()
-            else:
-                color_code = self.get_nearest_color_code()
+            color_code = self.get_nearest_color_code()
             if color_code:
                 if color_code["action"] == "goal":
                     # Switch to next route map
@@ -1302,7 +1295,7 @@ class MapleStoryBot:
                     logger.debug(f"Change to new route:{self.idx_routes}")
                 command = color_code["action"]
 
-            # teleport away from edge to avoid fall off
+            # teleport away from edge to avoid falling off cliff
             if self.is_near_edge() and \
                 time.time() - self.t_last_teleport > self.cfg.teleport_cooldown:
                 command = command.replace("walk", "teleport")
@@ -1311,14 +1304,10 @@ class MapleStoryBot:
         # Special logic for each status, overwrite color code action
         if self.status == "hunting":
             # Perform a random action when player stuck
-            if self.cfg.is_use_minimap and not self.args.patrol and \
-                self.is_player_stuck_minimap():
+            if not self.args.patrol and self.is_player_stuck():
                 command = self.get_random_action()
-            elif not self.cfg.is_use_minimap and not self.args.patrol and \
-                self.is_player_stuck():
-                command = self.get_random_action()
-            elif command in ["up", "down"]:
-                pass # Don't attack or heal while character is on rope
+            elif command in ["up", "down", "jump right", "jump left"]:
+                pass # Don't attack or heal while character is on rope or jumping
             elif self.hp_ratio <= self.cfg.heal_ratio:
                 command = "heal"
             elif self.mp_ratio <= self.cfg.add_mp_ratio:
@@ -1344,7 +1333,8 @@ class MapleStoryBot:
                 self.rune_detect_level = 0 # reset level
                 self.switch_status("resting")
             # Check if need to raise level to lower the detection threshold
-            self.rune_detect_level = int(time.time() - self.t_last_switch_status) // self.cfg.rune_detect_level_raise_interval
+            dt = int(time.time() - self.t_last_switch_status)
+            self.rune_detect_level = dt // self.cfg.rune_detect_level_raise_interval
 
         elif self.status == "near_rune":
             # Stay in near_rune status for only a few seconds
@@ -1361,9 +1351,9 @@ class MapleStoryBot:
         # send command to keyboard controller
         self.kb.set_command(command)
 
-        #############
-        ### Debug ###
-        #############
+        #####################
+        ### Debug Windows ###
+        #####################
         # Print text on debug image
         self.update_info_on_img_frame_debug()
 
@@ -1377,10 +1367,11 @@ class MapleStoryBot:
 
         # Resize img_route_debug for better visualization
         if not self.args.patrol:
-            h, w = self.img_route_debug.shape[:2]
-            if not self.cfg.is_use_minimap:
-                self.img_route_debug = cv2.resize(self.img_route_debug, (w // 2, h // 2),
-                                        interpolation=cv2.INTER_NEAREST)
+            self.img_route_debug = cv2.resize(
+                        self.img_route_debug, (0, 0),
+                        fx=self.cfg.minimap_upscale_factor,
+                        fy=self.cfg.minimap_upscale_factor,
+                        interpolation=cv2.INTER_NEAREST)
             cv2.imshow("Route Map Debug", self.img_route_debug)
 
         # Enable cached location since second frame

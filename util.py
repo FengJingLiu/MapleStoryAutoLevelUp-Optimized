@@ -113,7 +113,8 @@ def screenshot(img, prefix="screenshot"):
     cv2.imwrite(filename, img)
     logger.info(f"Screenshot saved: {filename}")
 
-def draw_rectangle(img, top_left, size, color, text, thickness=2):
+def draw_rectangle(img, top_left, size, color, text,
+                   thickness=2, text_height=0.7):
     '''
     Draws a rectangle with an text label.
 
@@ -128,7 +129,7 @@ def draw_rectangle(img, top_left, size, color, text, thickness=2):
                     top_left[1] + size[0])
     cv2.rectangle(img, top_left, bottom_right, color, thickness)
     cv2.putText(img, text, (top_left[0], top_left[1] - 10),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, thickness)
+                cv2.FONT_HERSHEY_SIMPLEX, text_height, color, thickness)
 
 def find_pattern_sqdiff(
         img, img_pattern,
@@ -153,15 +154,6 @@ def find_pattern_sqdiff(
     - min_val: The matching score (lower = better for SQDIFF_NORMED).
     - bool: local search success or not
     '''
-    # # If img_pattern is grayscale, don't use mask
-    # if len(img_pattern.shape) == 3:
-    #     img_pattern_gray = cv2.cvtColor(img_pattern, cv2.COLOR_BGR2GRAY)
-    # else:
-    #     img_pattern_gray = img_pattern
-
-    # # Create mask: ignore pure white pixels
-    # _, mask_pattern = cv2.threshold(img_pattern_gray, 254, 255, cv2.THRESH_BINARY_INV)
-
     # search last result location first to speedup
     h, w = img_pattern.shape[:2]
     if last_result is not None:

@@ -5,65 +5,48 @@ class Config:
     --------------------------------------
     '''
     # ────────────────
-    # Keyboard Mapping
+    # Perference
     # ────────────────
-    # Adjust the following key to match the in-game keybinding for your character.
-
-    # Key to trigger AoE skill (e.g., Monk's AoE heal or Mage's AoE attack).
-    aoe_skill_key = "q"
-
-    # Key to trigger the basic attack skill, like Mage's Magic Claw.
-    magic_claw_key = "w"
-
-    # Key to trigger Mage's teleport skill
-    teleport_key = "e"
-
-    # Key for jumping.
-    jump_key = "space"
-
-    # Key to use a health potion.
-    heal_key = "q"
-
-    # Key to use a mana potion.
-    add_mp_key = "2"
-
-    # ────────────────
-    # System
-    # ────────────────
-    # FPS(Frame per Second) limit for main thread
+    is_use_teleport_to_walk = False # use teleport to walk
+    teleport_cooldown = 1 # second
+    is_edge_teleport = True
     fps_limit = 10
 
     # ────────────────
-    # Mage Teleport
+    # Keyboard Mapping
     # ────────────────
-    # WIP feature
-    # whether to activate Mage's teleport skill while walking
-    is_use_teleport_to_walk = False
-    # Mage's teleport skill cooldown
-    teleport_cooldown = 1 # second
+    aoe_skill_key = "q" # It can be monk's healing skill
+    magic_claw_key = "w"
+    jump_key = "space"
+    heal_key = "q"
+    add_mp_key = "2" # Drink potion
+    teleport_key = "e" # Mage's teleport skill
 
     # ────────────────
     # Edge Teleport
     # ────────────────
-    # Mage can use teleport skill if they're too close to edge
-    is_edge_teleport = True
-    edge_teleport_box_width  = 20
-    edge_teleport_box_height = 10
+    edge_teleport_box_width  = 150
+    edge_teleport_box_height = 70
+    edge_teleport_minimap_box_width  = 50
+    edge_teleport_minimap_box_height = 20
     edge_teleport_color_code = (255,127,127) # (R,G,B)
 
     # ────────────────
-    # NameTag Recongnition
+    # Player Localization
     # ────────────────
     # offset from the nametag's top-left corner to the player's center
     nametag_offset = (-50, 30) # pixel
     nametag_diff_thres = 0.4
 
     # ────────────────
-    # Camera
+    # Camera Localization
     # ────────────────
     # only use this vertical range of the screen to localize camera on map
     camera_ceiling = 60  # pixel (top)
     camera_floor = 665   # pixel (bottom)
+    localize_diff_thres = 0.5
+    localize_downscale_factor = 1.0 #0.25 # ratio = 1/4
+    localize_cached_interval = 3 # second, how long to use cached camera location until full search
 
     # ────────────────
     # Attack Settings
@@ -84,13 +67,14 @@ class Config:
     monster_detect_mode = "contour_only" # "contour_only" "color", "grayscale" "template_free"
     monster_detect_with_health_bar = True
     monster_health_bar_color = (71,204,64) # (B,G,R)
+
     character_width = 100
     character_height = 150
 
     # ────────────────
     # Route Detection (color code)
     # ────────────────
-    color_code_search_range = 10 # radius to find nearest color route from player center
+    color_code_search_range = 80 # radius to find nearest color route from player center
 
     # ────────────────
     # Movement Behavior
@@ -99,6 +83,11 @@ class Config:
     down_drag_duration = 1.0 # seconds
     watch_dog_timeout = 10 # seconds, if player doesn't move for 3 second, random perform an action
     watch_dog_range = 10 # pixel, if player location is smaller than watch_dog_range, consider it doesn't move
+
+    # ────────────────
+    # Debug Options
+    # ────────────────
+    enable_debug_windows = True   # show debug window (false = better performance)
 
     # ────────────────
     # Runes Warning
@@ -141,11 +130,13 @@ class Config:
     # ────────────────
     # Mini-Map
     # ────────────────
+    is_use_minimap = False # True, False
     minimap_player_color = (136, 255, 255) # yellow dot, (B, G, R)
+    minimap_color_code_search_range = 30 # pixel
     minimap_upscale_factor = 4 # upscale 4 time for debug route image
 
     # ────────────────
-    # Patrol Mode
+    # Patrol
     # ────────────────
     patrol_range = [0.2, 0.8] # 0.0 - 1.0, 0.0 means the left boarder of game window
                               # 1.0 means the right boarder of game window
