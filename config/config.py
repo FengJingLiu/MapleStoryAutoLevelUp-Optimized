@@ -16,7 +16,7 @@ class Config:
     magic_claw_key = "w"
 
     # Key to trigger Mage's teleport skill
-    teleport_key = "e"
+    teleport_key = "e" # set to "", if need to disable teleport skill
 
     # Key for jumping.
     jump_key = "space"
@@ -27,6 +27,10 @@ class Config:
     # Key to use a mana potion.
     add_mp_key = "2"
 
+    # Buff skill keys, e.g., magical sheild, angel blessing
+    buff_skill_keys     = ["s", "d", "f"]
+    buff_skill_cooldown = [190, 140, 75] # Second
+    buff_skill_active_duration = 1 # second
     # ────────────────
     # System
     # ────────────────
@@ -70,7 +74,7 @@ class Config:
     # ────────────────
     # aoe skill attack range relative to player position
     aoe_skill_range_x = 400 # pixels (horizontal range)
-    aoe_skill_range_y = 150  # pixels (vertical range)
+    aoe_skill_range_y = 170  # pixels (vertical range)
     # magic claw skill attack range relative to player position
     magic_claw_range_x = 350 # pixels (horizontal range)
     magic_claw_range_y = 70  # pixels (vertical range)
@@ -141,7 +145,6 @@ class Config:
     # ────────────────
     # Mini-Map
     # ────────────────
-    minimap_player_color = (136, 255, 255) # yellow dot, (B, G, R)
     minimap_upscale_factor = 4 # upscale 4 time for debug route image
 
     # ────────────────
@@ -151,6 +154,16 @@ class Config:
                               # 1.0 means the right boarder of game window
     turn_point_thres = 10 # 10 frames
     patrol_attack_interval = 2.5 # sec, attack every 2.5 second
+
+    # ────────────────
+    # Map Scan
+    # ────────────────
+    map_scan_padding = 30 # pixel, How width the black margin on map
+
+    # ────────────────
+    # Route recoder
+    # ────────────────
+    route_recoder_draw_blob_cooldown = 0.7 # second, can only draw blob for every 0.7 second
 
     # ────────────────
     # Don't modify the following parameter unless you know what you are doing
@@ -171,6 +184,8 @@ class Config:
         (255,255,0): "goal", # yellow
         (255,0,127): "teleport up", # pink
         (127,0,255): "teleport down", # light_purple
+        (0, 127, 0): "teleport left", # dark green
+        (139, 69, 19): "teleport right" # brown
     }
 
     window_size = (752, 1282)
