@@ -16,7 +16,8 @@ import cv2
 # local import
 from config.config import Config
 from logger import logger
-from util import find_pattern_sqdiff, draw_rectangle, screenshot, nms, load_image, get_mask
+from util import find_pattern_sqdiff, draw_rectangle, screenshot, nms, \
+                load_image, get_mask, get_minimap_loc_size, get_player_location_on_minimap
 from KeyBoardController import KeyBoardController
 from GameWindowCapturor import GameWindowCapturor
 
@@ -248,103 +249,10 @@ class MapleStoryBot:
 
         return loc_player
 
-    def get_minimap_loc_size(self):
-        '''
-        Detects the location and size of the minimap within the game frame.
-
-        The function works by:
-        - Thresholding the image get pure white(255,255,255) pixels.
-        - Using connected components to find white-bordered regions.
-        - Filtering candidates based on expected minimap size and margin rules:
-            - Top, bottom, left, right margins must be 1px white lines.
-
-        Returns:
-            (x, y, w, h): Top-left coordinate and width/height of the minimap.
-                        Returns None if not found.
-        '''
-        white = np.array([255, 255, 255])
-
-        # Mask for pure white
-        mask_white = cv2.inRange(self.img_frame, white, white)
-
-        # Connected components with stats
-        num_labels, labels, stats, centroids = \
-            cv2.connectedComponentsWithStats(mask_white, connectivity=8)
-
-        # Loop over components (skip label 0, which is background)
-        for i in range(1, num_labels):
-            x0, y0, rw, rh, area = stats[i]
-
-            # Filter out small blobs
-            if rw < 100 or rh < 100:
-                continue
-
-            x1 = x0 + rw - 1
-            y1 = y0 + rh - 1
-
-            # Check 1px white top and bottom margins
-            if not (np.all(self.img_frame[y0, x0:x0+rw] == white) and \
-                    np.all(self.img_frame[y1, x0:x0+rw] == white)):
-                continue
-
-            # Check 1px white left and right margins
-            if not (np.all(self.img_frame[y0:y0:rh, x0] == white) and \
-                    np.all(self.img_frame[y0:y0:rh, x1] == white)):
-                continue
-
-            # Create a mask of non-white pixels
-            mask_minimap = np.any(self.img_frame[y0:y0+rh, x0:x0+rw] != white, axis=2).astype(np.uint8)
-
-            # Find bounding box of mask_minimap
-            coords = cv2.findNonZero(mask_minimap)
-            if coords is None:
-                continue  # skip empty block
-            x_minimap, y_minimap, w_minimap, h_minimap = cv2.boundingRect(coords)
-
-            # Offset by original x0, y0 to get coords in original image
-            x_minimap += x0
-            y_minimap += y0
-
-            return x_minimap, y_minimap, w_minimap, h_minimap
-
-        return None  # minimap not found
-
-    def get_player_location_on_minimap(self):
-        """
-        Detects the player's position on the minimap.
-
-        The function works by:
-        - Creating a binary mask of all pixels in the minimap that match the configured
-        player color exactly.
-        - Verifying that at least 4 matching pixels are found (to avoid false positives).
-        - Computing the average of these pixel coordinates to determine the center of
-        the player icon on the minimap.
-
-        Returns:
-            (x, y): The player's location in minimap coordinates as a tuple.
-                    Returns None if not enough matching pixels are found.
-        """
-        # Find pixels matching the player color
-        mask = cv2.inRange(self.img_minimap,
-                           self.cfg.minimap_player_color,
-                           self.cfg.minimap_player_color)
-        coords = cv2.findNonZero(mask)
-        if coords is None or len(coords) < 4:
-            logger.warning(f"Fail to locate player location on minimap.")
-            return None
-
-        # Calculate the average location of the matching pixels
-        avg = coords.mean(axis=0)[0]  # shape (1,2), so we take [0]
-        loc_player_minimap = (int(round(avg[0])), int(round(avg[1])))
-
-        return loc_player_minimap
-
     def get_player_location_on_global_map(self):
         '''
         get_player_location_on_global_map
         '''
-
-
         self.loc_minimap_global, score, _ = find_pattern_sqdiff(
                                         self.img_map,
                                         self.img_minimap)
@@ -434,10 +342,9 @@ class MapleStoryBot:
                 (0, 255, 0),            # green line
                 1                       # thickness
             )
-
             # Print color code on debug image
             cv2.putText(
-                self.img_frame_debug, f"Route Action: {nearest["action"]}",
+                self.img_frame_debug, f"Route Action: {nearest['action']}",
                 (720, 90),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255),
                 2, cv2.LINE_AA
@@ -1157,7 +1064,7 @@ class MapleStoryBot:
 
         # Get minimap from game window
         if self.is_first_frame:
-            x, y, w, h = self.get_minimap_loc_size()
+            x, y, w, h = get_minimap_loc_size(self.img_frame)
             self.loc_minimap = (x, y)
             self.img_minimap = self.img_frame[y:y+h, x:x+w]
         else:
@@ -1177,12 +1084,15 @@ class MapleStoryBot:
         self.loc_player = self.get_player_location_by_nametag()
 
         # Get player location on minimap
-        loc_player_minimap = self.get_player_location_on_minimap()
+        loc_player_minimap = get_player_location_on_minimap(self.img_minimap)
         if loc_player_minimap:
             self.loc_player_minimap = loc_player_minimap
 
         # Get player location on global map
-        self.loc_player_global = self.get_player_location_on_global_map()
+        if self.args.patrol:
+            self.loc_player_global = self.loc_player_minimap
+        else:
+            self.loc_player_global = self.get_player_location_on_global_map()
 
         # Check whether a rune icon is near player
         if self.is_rune_near_player():
@@ -1350,6 +1260,9 @@ class MapleStoryBot:
                 command = command.replace("walk", "teleport")
                 self.t_last_teleport = time.time() # update timer
 
+        if self.cfg.teleport_key == "": # disable teleport skill
+            command = command.replace("teleport", "jump")
+
         # Special logic for each status, overwrite color code action
         if self.status == "hunting":
             # Perform a random action when player stuck
@@ -1373,12 +1286,6 @@ class MapleStoryBot:
                  time.time() - self.t_last_attack > self.cfg.attack_cooldown:
                 command = "attack right"
                 self.t_last_attack = time.time()
-            # WIP: teleport while walking is unstable
-            # elif command[:4] == "walk":
-            #     if self.cfg.is_use_teleport_to_walk and \
-            #         time.time() - self.t_last_teleport > self.cfg.teleport_cooldown:
-            #         command = command.replace("walk", "teleport")
-            #         self.t_last_teleport = time.time() # update timer
 
         elif self.status == "finding_rune":
             if self.is_player_stuck():

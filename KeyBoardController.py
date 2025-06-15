@@ -34,6 +34,7 @@ class KeyBoardController():
         self.is_need_toggle = False
         self.fps = 0
         self.fps_limit = 30
+        self.t_last_buff_cast = [0] * len(self.cfg.buff_skill_keys)
 
         # set up attack key
         if args.attack == "aoe_skill":
@@ -142,18 +143,34 @@ class KeyBoardController():
         self.t_last_run = time.time()
         # logger.info(f"FPS = {self.fps}")
 
+    def is_in_buffer_skill_active_duration(self):
+        '''
+        is_in_buffer_skill_active_duration
+        '''
+        for t_last_cast in self.t_last_buff_cast:
+            if time.time() - t_last_cast < self.cfg.buff_skill_active_duration:
+                return True
+        return False
 
     def run(self):
         '''
         run
         '''
         while True:
-
-
             # Check if game window is active
             if not self.is_enable or not self.is_game_window_active():
                 self.limit_fps()
                 continue
+
+            # Buff skill
+            if not self.is_in_buffer_skill_active_duration():
+                for i, key in enumerate(self.cfg.buff_skill_keys):
+                    cooldown = self.cfg.buff_skill_cooldown[i]
+                    if time.time() - self.t_last_buff_cast[i] >= cooldown:
+                        logger.info(f"[Buff] Press buff skill key: '{key}' (cooldown: {cooldown}s)")
+                        self.press_key(key)
+                        self.t_last_buff_cast[i] = time.time()  # Reset timer
+                        break
 
             # check if is needed to release 'Up' key
             if time.time() - self.t_last_up > self.cfg.up_drag_duration:

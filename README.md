@@ -67,6 +67,7 @@ You can press 'F2' to take a screenshot, which will save to scrennshot/
 5. lost_time_1(遺失的時間1)
 6. north forest training ground 8(北部森林訓練場8)
 7. monkey_swamp_3(猴子沼澤地3)
+8. first barrack (第一軍營)
 
 ## Supported Monsters
 1. fire pig(火肥肥)
@@ -79,9 +80,27 @@ You can press 'F2' to take a screenshot, which will save to scrennshot/
 8. evolved ghost(進化妖魔)
 9. wind single eye beast(風獨眼獸)
 10. angel monkey(天使猴)
+11. skeleton soldier(骷髏士兵)
+12. skeleton officer(骷髏隊長)
 
 If you want to try this script on other map/monster, you need to add new map to minimaps/ and add monsters icon to monster/
 
+## Route recorder
+To make the route design easier, here is a new script that listen to player's keyboard and record
+the player input on route map.
+
+To invoke the route recorder, please use the following command:
+```
+python routeRecorder.py --new_map <map_directory_name>
+
+Example:
+python routeRecorder.py --new_map my_new_map
+```
+while running this recoder
+Press 'F1' to stop/resume the recoder
+Press 'F2' to take screenshot
+Press 'F3' to save current route map and start record a new one
+Press "F4" to save current map
 
 ## Legacy Version
 This project previously use full-size screenshot map for camera localization
