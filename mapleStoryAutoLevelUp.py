@@ -61,6 +61,7 @@ class MapleStoryBot:
         self.t_watch_dog = time.time() # Last movement timer
         self.t_last_teleport = time.time() # Last teleport timer
         self.t_patrol_last_attack = time.time() # Last patrol attack timer
+        self.t_last_attack = time.time() # Last attack timer for cooldown
         # Patrol mode
         self.is_patrol_to_left = True # Patrol direction flag
         self.patrol_turn_point_cnt = 0 # Patrol tuning back counter
@@ -532,16 +533,17 @@ class MapleStoryBot:
         '''
         if is_left:
             x0 = self.loc_player[0] - self.cfg.magic_claw_range_x
+            x1 = self.loc_player[0]
         else:
             x0 = self.loc_player[0]
+            x1 = x0 + self.cfg.magic_claw_range_x
         y0 = self.loc_player[1] - self.cfg.magic_claw_range_y//2
-        x1 = x0 + self.cfg.magic_claw_range_x
         y1 = y0 + self.cfg.magic_claw_range_y
 
         # Debug, magic claw hit box
         draw_rectangle(
             self.img_frame_debug, (x0, y0),
-            (self.cfg.magic_claw_range_y, self.cfg.magic_claw_range_x),
+            (y1-y0, x1-x0),
             (0, 0, 255), "Attack Box"
         )
 
@@ -1230,8 +1232,10 @@ class MapleStoryBot:
         if self.args.attack == "aoe_skill":
             if len(self.monster_info) == 0:
                 attack_direction = None
+                nearest_monster = None
             else:
                 attack_direction = "I don't care"
+                nearest_monster = self.monster_info[0]  # Any monster for AOE
         elif self.args.attack == "magic_claw":
             # Get nearest monster to player
             monster_left  = self.get_nearest_monster(is_left = True)
@@ -1252,12 +1256,57 @@ class MapleStoryBot:
                 center_right = (mx + mw // 2, my + mh // 2)
                 distance_right = abs(center_right[0] - self.loc_player[0]) + \
                                 abs(center_right[1] - self.loc_player[1])
-            # Choose attack direction
+            # Choose attack direction and nearest monster
             attack_direction = None
-            if distance_left < distance_right:
+            nearest_monster = None
+            
+            # Additional validation: check if monster is actually on the correct side
+            def is_monster_on_correct_side(monster, direction):
+                if monster is None:
+                    return False
+                mx, my = monster["position"]
+                mw, mh = monster["size"]
+                monster_center_x = mx + mw // 2
+                player_x = self.loc_player[0]
+                
+                if direction == "left":
+                    return monster_center_x < player_x  # Monster should be left of player
+                else:  # direction == "right"
+                    return monster_center_x > player_x  # Monster should be right of player
+            
+            # Only choose direction if there's a clear winner and monster is on correct side
+            if monster_left is not None and monster_right is None and is_monster_on_correct_side(monster_left, "left"):
                 attack_direction = "left"
-            elif distance_right < distance_left:
+                nearest_monster = monster_left
+            elif monster_right is not None and monster_left is None and is_monster_on_correct_side(monster_right, "right"):
                 attack_direction = "right"
+                nearest_monster = monster_right
+            elif monster_left is not None and monster_right is not None:
+                # Both sides have monsters, check distance and side validation
+                left_valid = is_monster_on_correct_side(monster_left, "left")
+                right_valid = is_monster_on_correct_side(monster_right, "right")
+                
+                if left_valid and not right_valid:
+                    attack_direction = "left"
+                    nearest_monster = monster_left
+                elif right_valid and not left_valid:
+                    attack_direction = "right"
+                    nearest_monster = monster_right
+                elif left_valid and right_valid and distance_left < distance_right - 50:
+                    attack_direction = "left"
+                    nearest_monster = monster_left
+                elif left_valid and right_valid and distance_right < distance_left - 50:
+                    attack_direction = "right"
+                    nearest_monster = monster_right
+                # If both valid but distances too close, don't attack to avoid confusion
+            
+            # Debug attack direction selection
+            if monster_left is not None or monster_right is not None:
+                left_side_ok = is_monster_on_correct_side(monster_left, "left") if monster_left else False
+                right_side_ok = is_monster_on_correct_side(monster_right, "right") if monster_right else False
+                debug_text = f"L:{distance_left:.0f}({left_side_ok}) R:{distance_right:.0f}({right_side_ok}) Dir:{attack_direction}"
+                cv2.putText(self.img_frame_debug, debug_text,
+                           (10, 450), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 2)
 
         command = ""
         if self.args.patrol:
@@ -1277,7 +1326,7 @@ class MapleStoryBot:
                 self.patrol_turn_point_cnt = 0
 
             # Set command for patrol mode
-            if time.time() - self.t_patrol_last_attack > self.cfg.patrol_attack_interval:
+            if time.time() - self.t_patrol_last_attack > self.cfg.patrol_attack_interval and len(self.monster_info) > 0:
                 command = "attack"
                 self.t_patrol_last_attack = time.time()
             elif self.is_patrol_to_left:
@@ -1312,12 +1361,18 @@ class MapleStoryBot:
                 command = "heal"
             elif self.mp_ratio <= self.cfg.add_mp_ratio:
                 command = "add mp"
-            elif attack_direction == "I don't care":
+            elif attack_direction == "I don't care" and nearest_monster is not None and \
+                 time.time() - self.t_last_attack > self.cfg.attack_cooldown:
                 command = "attack"
-            elif attack_direction == "left":
+                self.t_last_attack = time.time()
+            elif attack_direction == "left" and nearest_monster is not None and \
+                 time.time() - self.t_last_attack > self.cfg.attack_cooldown:
                 command = "attack left"
-            elif attack_direction == "right":
+                self.t_last_attack = time.time()
+            elif attack_direction == "right" and nearest_monster is not None and \
+                 time.time() - self.t_last_attack > self.cfg.attack_cooldown:
                 command = "attack right"
+                self.t_last_attack = time.time()
             # WIP: teleport while walking is unstable
             # elif command[:4] == "walk":
             #     if self.cfg.is_use_teleport_to_walk and \
@@ -1350,6 +1405,11 @@ class MapleStoryBot:
 
         # send command to keyboard controller
         self.kb.set_command(command)
+        
+        # Debug: show current command on screen
+        if command and len(command) > 0:
+            cv2.putText(self.img_frame_debug, f"CMD: {command}",
+                       (10, 480), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
 
         #####################
         ### Debug Windows ###

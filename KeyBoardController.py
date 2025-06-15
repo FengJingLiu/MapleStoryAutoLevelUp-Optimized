@@ -123,6 +123,8 @@ class KeyBoardController():
         pyautogui.keyUp("right")
         pyautogui.keyUp("up")
         pyautogui.keyUp("down")
+        # Also release attack keys to stop any ongoing attacks
+        pyautogui.keyUp(self.attack_key)
 
 
     def limit_fps(self):
@@ -229,17 +231,20 @@ class KeyBoardController():
             elif self.command == "attack left":
                 pyautogui.keyUp("right")
                 pyautogui.keyDown("left")
+                time.sleep(self.cfg.character_turn_delay)  # Small delay for character to turn
                 self.press_key(self.attack_key)
                 pyautogui.keyUp("left")
 
             elif self.command == "attack right":
                 pyautogui.keyUp("left")
                 pyautogui.keyDown("right")
+                time.sleep(self.cfg.character_turn_delay)  # Small delay for character to turn
                 self.press_key(self.attack_key)
                 pyautogui.keyUp("right")
 
             elif self.command == "stop":
                 self.release_all_key()
+                self.command = ""  # Clear command after stopping
 
             elif self.command == "heal":
                 self.press_key(self.cfg.heal_key)
