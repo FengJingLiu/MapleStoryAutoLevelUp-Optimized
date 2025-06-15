@@ -341,10 +341,9 @@ class MapleStoryBot:
                 (0, 255, 0),            # green line
                 1                       # thickness
             )
-
             # Print color code on debug image
             cv2.putText(
-                self.img_frame_debug, f"Route Action: {nearest["action"]}",
+                self.img_frame_debug, f"Route Action: {nearest['action']}",
                 (720, 90),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255),
                 2, cv2.LINE_AA
