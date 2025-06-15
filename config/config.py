@@ -78,6 +78,10 @@ class Config:
     # magic claw skill attack range relative to player position
     magic_claw_range_x = 350 # pixels (horizontal range)
     magic_claw_range_y = 70  # pixels (vertical range)
+    # attack cooldown time in seconds
+    attack_cooldown = 0.05  # seconds between attacks
+    # character turn delay before attack
+    character_turn_delay = 0.02  # seconds to wait for character to turn before attacking
 
     # ────────────────
     # Monster Detection
