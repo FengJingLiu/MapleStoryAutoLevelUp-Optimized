@@ -145,7 +145,7 @@ class MapleStoryBot:
         self.capture = GameWindowCapturor(self.cfg)
         
         # Start health monitoring thread
-        self.health_monitor = HealthMonitor(self.cfg, args)
+        self.health_monitor = HealthMonitor(self.cfg, args, self.kb)
         self.health_monitor.start()
 
     def get_player_location_by_nametag(self):
@@ -1244,9 +1244,13 @@ class MapleStoryBot:
                 self.patrol_turn_point_cnt = 0
 
             # Set command for patrol mode
-            if time.time() - self.t_patrol_last_attack > self.cfg.patrol_attack_interval and len(self.monster_info) > 0:
-                command = "attack"
-                self.t_patrol_last_attack = time.time()
+            # Use proper attack range checking instead of just checking if monsters exist
+            if (time.time() - self.t_patrol_last_attack > self.cfg.patrol_attack_interval and 
+                len(self.monster_info) > 0 and nearest_monster is not None):
+                # Check if monster is actually in attack range
+                if attack_direction == "I don't care" or attack_direction == "left" or attack_direction == "right":
+                    command = "attack"
+                    self.t_patrol_last_attack = time.time()
             elif self.is_patrol_to_left:
                 command = "walk left"
             else:

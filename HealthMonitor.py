@@ -1,15 +1,15 @@
 import threading
 import time
-import pyautogui
 from logger import logger
 
 class HealthMonitor:
     '''
     Independent health monitoring thread that can heal while other actions are running
     '''
-    def __init__(self, cfg, args):
+    def __init__(self, cfg, args, kb_controller):
         self.cfg = cfg
         self.args = args
+        self.kb = kb_controller
         self.running = False
         self.enabled = True
         self.thread = None
@@ -136,9 +136,7 @@ class HealthMonitor:
         Execute heal action
         '''
         try:
-            pyautogui.keyDown(self.cfg.heal_key)
-            time.sleep(0.05)
-            pyautogui.keyUp(self.cfg.heal_key)
+            self.kb.press_key(self.cfg.heal_key, 0.05)
         except Exception as e:
             logger.error(f"Heal action failed: {e}")
     
@@ -147,8 +145,6 @@ class HealthMonitor:
         Execute MP recovery action
         '''
         try:
-            pyautogui.keyDown(self.cfg.add_mp_key)
-            time.sleep(0.05)
-            pyautogui.keyUp(self.cfg.add_mp_key)
+            self.kb.press_key(self.cfg.add_mp_key, 0.05)
         except Exception as e:
             logger.error(f"MP action failed: {e}")
