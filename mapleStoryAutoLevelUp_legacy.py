@@ -18,7 +18,7 @@ from config.config_legacy import Config
 from logger import logger
 from util import find_pattern_sqdiff, draw_rectangle, screenshot, nms, load_image, get_mask
 from KeyBoardController import KeyBoardController
-from GameWindowCapturor import GameWindowCapturor
+from GameWindowCapturorSelector import GameWindowCapturor
 
 class MapleStoryBot:
     '''

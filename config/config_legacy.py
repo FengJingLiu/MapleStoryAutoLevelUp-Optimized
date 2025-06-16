@@ -11,16 +11,24 @@ class Config:
     teleport_cooldown = 1 # second
     is_edge_teleport = True
     fps_limit = 10
+    character_turn_delay = 0.02  # seconds to wait for character to turn before attacking
+
+    # ────────────────
+    # Buff Skill
+    # ────────────────
+    buff_skill_keys     = ["f"]
+    buff_skill_cooldown = [190] # Second
+    buff_skill_active_duration = 1 # second
 
     # ────────────────
     # Keyboard Mapping
     # ────────────────
-    aoe_skill_key = "q" # It can be monk's healing skill
-    magic_claw_key = "w"
-    jump_key = "space"
-    heal_key = "q"
-    add_mp_key = "2" # Drink potion
-    teleport_key = "e" # Mage's teleport skill
+    aoe_skill_key = "x" # It can be monk's healing skill
+    magic_claw_key = "d"
+    jump_key = "z"
+    heal_key = ""
+    add_mp_key = "" # Drink potion
+    teleport_key = "" # Mage's teleport skill
 
     # ────────────────
     # Edge Teleport
@@ -146,7 +154,7 @@ class Config:
     # ────────────────
     # Don't modify the following parameter unless you know what you are doing
     # ────────────────
-    game_window_title = 'MapleStory Worlds-Artale (繁體中文版)'
+    game_window_title = 'MapleStory Worlds'
     # color code for patrol route
     color_code = {
         # R   G   B

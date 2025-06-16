@@ -196,3 +196,6 @@ class Config:
     }
 
     window_size = (752, 1282)
+
+    def __init__(self):
+        self.buff_skill_keys = []

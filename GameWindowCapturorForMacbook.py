@@ -12,6 +12,14 @@ def get_window_region(window_title):
         Quartz.kCGWindowListOptionOnScreenOnly | Quartz.kCGWindowListExcludeDesktopElements,
         Quartz.kCGNullWindowID
     )
+    # 新增：列印所有可見視窗標題
+    all_titles = []
+    for window in window_list:
+        title = window.get(Quartz.kCGWindowName, '')
+        owner = window.get(Quartz.kCGWindowOwnerName, '')
+        if title:
+            all_titles.append(f"{title} (Owner: {owner})")
+    logger.info(f"所有可見視窗標題: {all_titles}")
     for window in window_list:
         if window.get(Quartz.kCGWindowName, '') == window_title:
             bounds = window.get(Quartz.kCGWindowBounds, {})
