@@ -1041,8 +1041,9 @@ class MapleStoryBot:
         '''
         update_img_frame_debug
         '''
-        cv2.imshow("Game Window Debug",
-                   self.img_frame_debug[self.cfg.camera_ceiling:self.cfg.camera_floor, :])
+        cv2.namedWindow("Game Window Debug", cv2.WINDOW_NORMAL)
+        cv2.resizeWindow("Game Window Debug", 1296, 759)
+        cv2.imshow("Game Window Debug", self.img_frame_debug)
         # Update FPS timer
         self.t_last_frame = time.time()
 
