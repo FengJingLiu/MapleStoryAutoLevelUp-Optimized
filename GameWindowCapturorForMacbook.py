@@ -5,6 +5,23 @@ import cv2
 import numpy as np
 from logger import logger
 from config.config import Config
+import Quartz
+
+def get_window_region(window_title):
+    window_list = Quartz.CGWindowListCopyWindowInfo(
+        Quartz.kCGWindowListOptionOnScreenOnly | Quartz.kCGWindowListExcludeDesktopElements,
+        Quartz.kCGNullWindowID
+    )
+    for window in window_list:
+        if window.get(Quartz.kCGWindowName, '') == window_title:
+            bounds = window.get(Quartz.kCGWindowBounds, {})
+            return {
+                "left": int(bounds.get('X', 0)),
+                "top": int(bounds.get('Y', 0)),
+                "width": int(bounds.get('Width', 0)),
+                "height": int(bounds.get('Height', 0))
+            }
+    return None
 
 class GameWindowCapturor:
     '''
@@ -18,13 +35,11 @@ class GameWindowCapturor:
         # 使用 mss 來擷取特定螢幕區域
         self.capture = mss.mss()
 
-        # 手動指定擷取 MapleStory 的畫面區域（請根據實際視窗位置調整）
-        self.region = {
-            "left": 0,
-            "top": 24,
-            "width": 1296,
-            "height": 759
-        }
+        # 動態取得 MapleStory 視窗位置
+        self.region = get_window_region(self.cfg.game_window_title)
+        if self.region is None:
+            logger.error(f"找不到視窗: {self.cfg.game_window_title}")
+            raise RuntimeError("找不到遊戲視窗")
 
         # 啟動擷取執行緒
         threading.Thread(target=self.start_capture, daemon=True).start()
