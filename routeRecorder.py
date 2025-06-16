@@ -316,6 +316,15 @@ class RouteRecorder():
             black_mask = np.all(map_slice == [0, 0, 0], axis=2)
             map_slice[black_mask] = self.img_minimap[black_mask]
 
+            # Replace player "yellow" dot to black on map
+            self.replace_color_on_map(
+                (55, 40, 80),
+                (60, 100, 100)
+            )
+            # Replace other player "red" dot to black on map
+            self.replace_color_on_map((0, 80, 80),
+                                      (5, 100, 100))
+
         cv2.imshow("Map", self.img_map)
         self.img_route_debug = self.img_route.copy()
 
@@ -363,8 +372,6 @@ class RouteRecorder():
             action = "walk right"
         else:
             action = ""
-
-
 
         # Check if need to change route
         if self.kb.is_pressed_func_key[2]: # 'F3' is pressed
