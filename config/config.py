@@ -189,10 +189,10 @@ class Config:
         (255,255,127): "down", # light_yellow
         (0,255,127): "stop", # pink_green
         (255,255,0): "goal", # yellow
-        (255,0,127): "teleport up", # pink
-        (127,0,255): "teleport down", # light_purple
-        (0, 127, 0): "teleport left", # dark green
-        (139, 69, 19): "teleport right" # brown
+        # (255,0,127): "teleport up", # pink
+        # (127,0,255): "teleport down", # light_purple
+        # (0, 127, 0): "teleport left", # dark green
+        # (139, 69, 19): "teleport right" # brown
     }
 
     window_size = (752, 1282)

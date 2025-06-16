@@ -1319,10 +1319,10 @@ class MapleStoryBot:
                 command = self.get_random_action()
             elif command in ["up", "down"]:
                 pass # Don't attack or heal while character is on rope
-            elif self.hp_ratio <= self.cfg.heal_ratio:
-                command = "heal"
-            elif self.mp_ratio <= self.cfg.add_mp_ratio:
-                command = "add mp"
+            # elif self.hp_ratio <= self.cfg.heal_ratio:
+            #     command = "heal"
+            # elif self.mp_ratio <= self.cfg.add_mp_ratio:
+            #     command = "add mp"
             elif attack_direction == "I don't care":
                 command = "attack"
             elif attack_direction == "left":

@@ -33,8 +33,8 @@ class Config:
     # ────────────────
     # Edge Teleport
     # ────────────────
-    edge_teleport_box_width  = 150
-    edge_teleport_box_height = 70
+    edge_teleport_box_width  = 10
+    edge_teleport_box_height = 10
     edge_teleport_minimap_box_width  = 50
     edge_teleport_minimap_box_height = 20
     edge_teleport_color_code = (255,127,127) # (R,G,B)
@@ -168,8 +168,8 @@ class Config:
         (255,255,127): "down", # light_yellow
         (0,255,127): "stop", # pink_green
         (255,255,0): "goal", # yellow
-        (255,0,127): "teleport up", # pink
-        (127,0,255): "teleport down", # light_purple
+        # (255,0,127): "teleport up", # pink
+        # (127,0,255): "teleport down", # light_purple
     }
 
     window_size = (752, 1282)
