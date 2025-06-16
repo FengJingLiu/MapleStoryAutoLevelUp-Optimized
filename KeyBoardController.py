@@ -6,7 +6,7 @@ import threading
 import time
 
 import pyautogui
-import pygetwindow as gw
+import Quartz
 from pynput import keyboard
 
 # Local import
@@ -113,8 +113,16 @@ class KeyBoardController():
         - True
         - False
         '''
-        active_window = gw.getActiveWindow()
-        return active_window is not None and self.window_title in active_window.title
+        active_window = Quartz.CGWindowListCopyWindowInfo(
+            Quartz.kCGWindowListOptionOnScreenOnly | Quartz.kCGWindowListExcludeDesktopElements,
+            Quartz.kCGNullWindowID
+        )
+        
+        for window in active_window:
+            window_name = window.get(Quartz.kCGWindowName, '')
+            if window_name and self.window_title in window_name:
+                return True
+        return False
 
     def release_all_key(self):
         '''

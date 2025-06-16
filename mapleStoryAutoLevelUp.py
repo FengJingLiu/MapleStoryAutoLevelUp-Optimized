@@ -19,7 +19,7 @@ from logger import logger
 from util import find_pattern_sqdiff, draw_rectangle, screenshot, nms, \
                 load_image, get_mask, get_minimap_loc_size, get_player_location_on_minimap
 from KeyBoardController import KeyBoardController
-from GameWindowCapturor import GameWindowCapturor
+from GameWindowCapturorSelector import GameWindowCapturor
 from HealthMonitor import HealthMonitor
 
 class MapleStoryBot:
@@ -158,7 +158,7 @@ class MapleStoryBot:
         - Using template matching to locate the nametag, split into left and right halves
         to improve robustness against partial occlusion.
         - Selecting the best match (left or right) based on score and cache status.
-        - Computing the player’s center position by applying a fixed offset to the nametag.
+        - Computing the player's center position by applying a fixed offset to the nametag.
 
         Returns:
             loc_player (tuple): The (x, y) coordinates of the player's estimated location.
@@ -1047,14 +1047,24 @@ class MapleStoryBot:
         self.t_last_frame = time.time()
 
     def run_once(self):
-        '''
-        Process with one game window frame
-        '''
-        # Get lastest game screen frame buffer
-        self.frame = self.capture.get_frame()
+        # 檢查遊戲視窗是否啟動
+        if not self.kb.is_game_window_active():
+            return
 
-        # Resize game screen to 1296x759
-        self.img_frame = cv2.resize(self.frame, (1296, 759), interpolation=cv2.INTER_NEAREST)
+        # 擷取遊戲畫面
+        self.img_frame = self.capture.get_frame()
+        if self.img_frame is None:
+            logger.warning("Failed to capture game frame.")
+            return
+
+        # 取得小地圖位置與大小
+        minimap_result = get_minimap_loc_size(self.img_frame)
+        if minimap_result is None:
+            logger.warning("Failed to get minimap location and size.")
+            return
+        x, y, w, h = minimap_result
+        self.loc_minimap = (x, y)
+        self.img_minimap = self.img_frame[y:y+h, x:x+w]
 
         # Grayscale game window
         self.img_frame_gray = cv2.cvtColor(self.img_frame, cv2.COLOR_BGR2GRAY)
@@ -1066,16 +1076,6 @@ class MapleStoryBot:
         if not self.args.patrol:
             self.img_route = self.img_routes[self.idx_routes]
             self.img_route_debug = cv2.cvtColor(self.img_route, cv2.COLOR_RGB2BGR)
-
-        # Get minimap from game window
-        if self.is_first_frame:
-            x, y, w, h = get_minimap_loc_size(self.img_frame)
-            self.loc_minimap = (x, y)
-            self.img_minimap = self.img_frame[y:y+h, x:x+w]
-        else:
-            x, y = self.loc_minimap
-            h, w = self.img_minimap.shape[:2]
-            self.img_minimap = self.img_frame[y:y+h, x:x+w]
 
         # Detect HP/MP/EXP bar on game window
         self.hp_ratio, self.mp_ratio, self.exp_ratio = self.get_hp_mp_exp()
@@ -1338,7 +1338,7 @@ class MapleStoryBot:
 
         # Check if need to save screenshot
         if self.kb.is_need_screen_shot:
-            screenshot(mapleStoryBot.img_frame)
+            screenshot(self.img_frame)
             self.kb.is_need_screen_shot = False
 
         # Resize img_route_debug for better visualization

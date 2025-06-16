@@ -275,6 +275,7 @@ def get_minimap_loc_size(img_frame):
 
         return x_minimap, y_minimap, w_minimap, h_minimap
 
+    logger.warning("Minimap not found in the game frame.")
     return None  # minimap not found
 
 def get_player_location_on_minimap(img_minimap, minimap_player_color=(136, 255, 255)):

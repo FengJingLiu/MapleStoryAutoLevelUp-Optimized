@@ -4,9 +4,9 @@ import mss
 import cv2
 import numpy as np
 from logger import logger
-from config import Config
+from config.config import Config
 
-class GameWindowCapturorForMacbook:
+class GameWindowCapturor:
     '''
     GameWindowCapturor for macOS
     '''
@@ -63,6 +63,7 @@ class GameWindowCapturorForMacbook:
         with self.lock:
             if self.frame is None:
                 return None
+            cv2.imwrite("debug_frame.png", self.frame)
             return cv2.cvtColor(self.frame, cv2.COLOR_BGRA2BGR)
 
     def on_closed(self):
