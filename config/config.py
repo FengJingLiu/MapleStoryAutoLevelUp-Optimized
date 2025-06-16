@@ -145,6 +145,9 @@ class Config:
     exp_bar_bottom_right = (860, 749)
     heal_ratio = 0.5 # heal when hp is below 50%
     add_mp_ratio = 0.5 # drink potion when mp is below 50%
+    # Health monitor cooldowns (to prevent spam)
+    heal_cooldown = 0.5  # seconds between heals
+    mp_cooldown = 0.5    # seconds between MP potions
 
     # ────────────────
     # Mini-Map
