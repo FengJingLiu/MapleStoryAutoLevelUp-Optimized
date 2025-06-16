@@ -20,6 +20,7 @@ from util import find_pattern_sqdiff, draw_rectangle, screenshot, nms, \
                 load_image, get_mask, get_minimap_loc_size, get_player_location_on_minimap
 from KeyBoardController import KeyBoardController
 from GameWindowCapturor import GameWindowCapturor
+from HealthMonitor import HealthMonitor
 
 class MapleStoryBot:
     '''
@@ -142,6 +143,10 @@ class MapleStoryBot:
         # Start game window capturing thread
         logger.info("Waiting for game window to activate, please click on game window")
         self.capture = GameWindowCapturor(self.cfg)
+        
+        # Start health monitoring thread
+        self.health_monitor = HealthMonitor(self.cfg, args)
+        self.health_monitor.start()
 
     def get_player_location_by_nametag(self):
         '''
@@ -1074,6 +1079,9 @@ class MapleStoryBot:
 
         # Detect HP/MP/EXP bar on game window
         self.hp_ratio, self.mp_ratio, self.exp_ratio = self.get_hp_mp_exp()
+        
+        # Update health monitor with current frame
+        self.health_monitor.update_frame(self.img_frame)
 
         # Check whether "PLease remove runes" warning appears on screen
         if self.is_rune_warning():
@@ -1270,20 +1278,17 @@ class MapleStoryBot:
                 command = self.get_random_action()
             elif command in ["up", "down", "jump right", "jump left"]:
                 pass # Don't attack or heal while character is on rope or jumping
-            elif self.hp_ratio <= self.cfg.heal_ratio:
-                command = "heal"
-            elif self.mp_ratio <= self.cfg.add_mp_ratio:
-                command = "add mp"
+            # Note: HP/MP monitoring is now handled by separate HealthMonitor thread
             elif attack_direction == "I don't care" and nearest_monster is not None and \
-                 time.time() - self.t_last_attack > self.cfg.attack_cooldown:
+                time.time() - self.t_last_attack > self.cfg.attack_cooldown:
                 command = "attack"
                 self.t_last_attack = time.time()
             elif attack_direction == "left" and nearest_monster is not None and \
-                 time.time() - self.t_last_attack > self.cfg.attack_cooldown:
+                time.time() - self.t_last_attack > self.cfg.attack_cooldown:
                 command = "attack left"
                 self.t_last_attack = time.time()
             elif attack_direction == "right" and nearest_monster is not None and \
-                 time.time() - self.t_last_attack > self.cfg.attack_cooldown:
+                time.time() - self.t_last_attack > self.cfg.attack_cooldown:
                 command = "attack right"
                 self.t_last_attack = time.time()
 
