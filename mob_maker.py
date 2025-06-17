@@ -30,7 +30,7 @@ def get_all_mobs(region=None, version=None):
         version = DEFAULT_VERSION
 
     url = f"{BASE_URL}/api/{region}/{version}/mob"
-    print(f"Fetching mobs from: {url}")
+    print(f"Fetching mobs from: {url}\nYou can find monster names at https://maplestory.wiki/GMS/65/mob")
 
     try:
         response = requests.get(url)
