@@ -5,3 +5,5 @@ windows-capture
 pygetwindow
 pyautogui
 pynput
+requests
+zipfile
