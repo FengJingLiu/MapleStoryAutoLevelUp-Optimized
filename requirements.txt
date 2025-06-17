@@ -3,4 +3,4 @@ numpy
 pyautogui
 pynput
 requests
-# pyobjc-framework-Quartz  # Mac 系統 API 建議切一個Mac分支
+pyobjc-framework-Quartz ; sys_platform == "darwin" # TODO: dev macOS in another branch

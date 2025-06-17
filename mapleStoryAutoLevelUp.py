@@ -79,7 +79,7 @@ class MapleStoryBot:
         if is_mac():
             self.cfg.minimap_upscale_factor = 2 # Mac laptop typically has a smaller screen
             self.cfg.game_window_title = 'MapleStory Worlds'
-            self.cfg.game_window = (776, 1280) # Set resolution to (1280x720) in game setting
+            self.cfg.window_size = (776, 1280) # Set resolution to (1280x720) in game setting
 
         if args.patrol:
             # Patrol mode doesn't need map or route
@@ -1067,8 +1067,8 @@ class MapleStoryBot:
             return
 
         # Make sure resolution is as expected
-        if self.cfg.game_window != self.frame.shape[:2]:
-            text = f"Unexpeted window size: {self.frame.shape[:2]} (expect {self.cfg.game_window})"
+        if self.cfg.window_size != self.frame.shape[:2]:
+            text = f"Unexpeted window size: {self.frame.shape[:2]} (expect {self.cfg.window_size})"
             logger.error(text)
             return
 
