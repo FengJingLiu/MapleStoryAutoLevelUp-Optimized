@@ -156,7 +156,7 @@ def find_pattern_sqdiff(
     '''
     # search last result location first to speedup
     h, w = img_pattern.shape[:2]
-    if last_result is not None:
+    if last_result is not None and global_threshold > 0.0:
         lx, ly = last_result
         x0 = max(0, lx - local_search_radius)
         y0 = max(0, ly - local_search_radius)
