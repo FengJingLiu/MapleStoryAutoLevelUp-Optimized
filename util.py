@@ -6,12 +6,21 @@ Utility functions
 import cv2
 import datetime
 import os
+import platform
 
 #
 import numpy as np
 
 # Local import
 from logger import logger
+
+OS_NAME = platform.system()
+
+def is_mac():
+    return OS_NAME == 'Darwin'
+
+def is_windows():
+    return OS_NAME == 'Windows'
 
 def load_image(path, mode=cv2.IMREAD_COLOR):
     '''
@@ -21,6 +30,7 @@ def load_image(path, mode=cv2.IMREAD_COLOR):
         logger.error(f"Image not found: {path}")
         raise FileNotFoundError(f"Image not found: {path}")
 
+    # Load image
     img = cv2.imread(path, mode)
     if img is None:
         logger.error(f"Failed to load image file: {path}")
@@ -154,6 +164,13 @@ def find_pattern_sqdiff(
     - min_val: The matching score (lower = better for SQDIFF_NORMED).
     - bool: local search success or not
     '''
+    # Make sure image is bigger than pattern
+    h_img, w_img = img.shape[:2]
+    h_tpl, w_tpl = img_pattern.shape[:2]
+    assert h_img >= h_tpl and w_img >= w_tpl, (
+        f"Pattern size ({w_tpl}x{h_tpl}) is larger than image size ({w_img}x{h_img})"
+    )
+
     # search last result location first to speedup
     h, w = img_pattern.shape[:2]
     if last_result is not None:
@@ -293,10 +310,19 @@ def get_player_location_on_minimap(img_minimap, minimap_player_color=(136, 255, 
         (x, y): The player's location in minimap coordinates as a tuple.
                 Returns None if not enough matching pixels are found.
     """
+
     # Find pixels matching the player color
-    mask = cv2.inRange(img_minimap,
-                        minimap_player_color,
-                        minimap_player_color)
+    if is_mac():
+        # give more tolerance to blue channel for mac
+        tolerance = 200
+        B, G, R = minimap_player_color
+        lower = (max(B - tolerance, 0), G, R)
+        upper = (min(B + tolerance, 255), G, R)
+        mask = cv2.inRange(img_minimap, lower, upper)
+    else:
+        mask = cv2.inRange(img_minimap,
+                            minimap_player_color,
+                            minimap_player_color)
     coords = cv2.findNonZero(mask)
     if coords is None or len(coords) < 4:
         logger.warning(f"Fail to locate player location on minimap.")

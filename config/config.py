@@ -10,26 +10,26 @@ class Config:
     # Adjust the following key to match the in-game keybinding for your character.
 
     # Key to trigger AoE skill (e.g., Monk's AoE heal or Mage's AoE attack).
-    aoe_skill_key = "x"
+    aoe_skill_key = "q"
 
     # Key to trigger the basic attack skill, like Mage's Magic Claw.
-    magic_claw_key = "d"
+    magic_claw_key = "w"
 
     # Key to trigger Mage's teleport skill
     teleport_key = "" # set to "", if need to disable teleport skill
 
     # Key for jumping.
-    jump_key = "z"
+    jump_key = "space"
 
     # Key to use a health potion.
-    heal_key = ""
+    heal_key = "1"
 
     # Key to use a mana potion.
-    add_mp_key = ""
+    add_mp_key = "2"
 
     # Buff skill keys, e.g., magical sheild, angel blessing
-    buff_skill_keys     = ["f"]
-    buff_skill_cooldown = [190] # Second
+    buff_skill_keys     = []
+    buff_skill_cooldown = [] # Second
     buff_skill_active_duration = 1 # second
     # ────────────────
     # System
@@ -153,6 +153,7 @@ class Config:
     # Mini-Map
     # ────────────────
     minimap_upscale_factor = 4 # upscale 4 time for debug route image
+    minimap_player_color = (136, 255, 255) # BGR
 
     # ────────────────
     # Patrol Mode
@@ -175,7 +176,7 @@ class Config:
     # ────────────────
     # Don't modify the following parameter unless you know what you are doing
     # ────────────────
-    game_window_title = 'MapleStory Worlds'
+    game_window_title = 'MapleStory Worlds-Artale (繁體中文版)'
     # color code for patrol route
     color_code = {
         # R   G   B
@@ -189,13 +190,11 @@ class Config:
         (255,255,127): "down", # light_yellow
         (0,255,127): "stop", # pink_green
         (255,255,0): "goal", # yellow
-        # (255,0,127): "teleport up", # pink
-        # (127,0,255): "teleport down", # light_purple
-        # (0, 127, 0): "teleport left", # dark green
-        # (139, 69, 19): "teleport right" # brown
+        (255,0,127): "teleport up", # pink
+        (127,0,255): "teleport down", # light_purple
+        (0, 127, 0): "teleport left", # dark green
+        (139, 69, 19): "teleport right" # brown
     }
 
     window_size = (752, 1282)
 
-    def __init__(self):
-        self.buff_skill_keys = []

@@ -11,6 +11,7 @@ from pynput import keyboard
 
 # Local import
 from logger import logger
+from util import is_mac
 
 pyautogui.PAUSE = 0  # remove delay
 
@@ -36,6 +37,15 @@ class KeyBoardController():
         self.fps_limit = 30
         self.t_last_buff_cast = [0] * len(self.cfg.buff_skill_keys)
 
+        # use 'ctrl', 'alt' for mac, because it's hard to get around
+        # macOS's security settings
+        if is_mac():
+            self.toggle_key = keyboard.Key.ctrl
+            self.screenshot_key = keyboard.Key.alt
+        else:
+            self.toggle_key = keyboard.Key.f1
+            self.screenshot_key = keyboard.Key.f2
+
         # set up attack key
         if args.attack == "aoe_skill":
             self.attack_key = cfg.aoe_skill_key
@@ -59,11 +69,11 @@ class KeyBoardController():
             key.char
         except AttributeError:
             # Handle special keys
-            if key == keyboard.Key.f1:
+            if key == self.toggle_key:
                 if time.time() - self.t_last_toggle > self.debounce_interval:
                     self.toggle_enable()
                     self.t_last_toggle = time.time()
-            elif key == keyboard.Key.f2:
+            elif key == self.screenshot_key:
                 if time.time() - self.t_last_screenshot > self.debounce_interval:
                     self.is_need_screen_shot = True
                     self.t_last_screenshot = time.time()

@@ -136,7 +136,7 @@ class HealthMonitor:
         Execute heal action
         '''
         try:
-            # self.kb.press_key(self.cfg.heal_key, 0.05)
+            self.kb.press_key(self.cfg.heal_key, 0.05)
         except Exception as e:
             logger.error(f"Heal action failed: {e}")
     
@@ -145,6 +145,6 @@ class HealthMonitor:
         Execute MP recovery action
         '''
         try:
-            # self.kb.press_key(self.cfg.add_mp_key, 0.05)
+            self.kb.press_key(self.cfg.add_mp_key, 0.05)
         except Exception as e:
             logger.error(f"MP action failed: {e}")
