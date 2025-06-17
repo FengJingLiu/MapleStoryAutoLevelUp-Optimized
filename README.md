@@ -102,6 +102,26 @@ Press 'F2' to take screenshot
 Press 'F3' to save current route map and start record a new one
 Press "F4" to save current map
 
+## Auto Download Monster
+
+You can find the names of the monsters to be added at the following website:
+
+[Maplestory GMS 65](https://maplestory.wiki/GMS/65/mob)
+
+```
+python mob_maker.py
+
+>Fetching mobs from: https://maplestory.io/api/GMS/65/mob
+>You can find monster names at https://maplestory.wiki/GMS/65/mob
+>Enter mob name:Snail  <-- Example
+```
+
+Automatically download monster PNG images, excluding death animation frames, since monsters do not need to be attacked again after death and therefore do not require recognition.
+
+The monster actions such as `hit`, `move`, `skill`, and `stand` are retained. While it's uncertain whether keeping so many actions will affect performance, the expectation is that having a greater variety of monster animations will enhance the diversity and accuracy of monster recognition.
+
+Once the download is complete, you can find the downloaded image in the `Monster/{MonsterName}` folder.
+
 ## Legacy Version
 This project previously use full-size screenshot map for camera localization
 and route planning. However, I found that capturing player location from top-left corner minimap in the game is easier and more reliable.

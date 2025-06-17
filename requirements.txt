@@ -2,4 +2,5 @@ opencv-python
 numpy
 pyautogui
 pynput
-pyobjc-framework-Quartz  # Mac 系統 API
+requests
+# pyobjc-framework-Quartz  # Mac 系統 API 建議切一個Mac分支

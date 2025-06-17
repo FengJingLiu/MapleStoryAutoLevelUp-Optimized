@@ -136,11 +136,11 @@ class MapleStoryBot:
                 load_image("rune/arrow_down_3.png"),],
         }
 
-        # Load monsters images
+        # Load monsters images from monster/{monster_name}
         self.monsters = {}
         for monster_name in args.monsters.split(","):
             imgs = []
-            for file in glob.glob(f"monster/{monster_name}*.png"):
+            for file in glob.glob(f"monster/{monster_name}/{monster_name}*.png"):
                 # Add original image
                 img = load_image(file)
                 imgs.append((img, get_mask(img, (0, 255, 0))))
@@ -150,8 +150,8 @@ class MapleStoryBot:
             if imgs:
                 self.monsters[monster_name] = imgs
             else:
-                logger.error(f"No images found in monster/{monster_name}*")
-                raise RuntimeError(f"No images found in monster/{monster_name}*")
+                logger.error(f"No images found in monster/{monster_name}/{monster_name}*")
+                raise RuntimeError(f"No images found in monster/{monster_name}/{monster_name}*")
         logger.info(f"Loaded monsters: {list(self.monsters.keys())}")
 
         # Start keyboard controller thread

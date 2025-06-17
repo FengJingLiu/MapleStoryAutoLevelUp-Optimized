@@ -1,10 +1,13 @@
 import requests
 import json
+import zipfile
+import io
 import cv2
 import numpy as np
+from pathlib import Path
 
 # Assuming a base URL for the API. In a real application, this would be in a config file.
-BASE_URL = "https://maplestory.io/" # Placeholder URL, replace with actual API base URL
+BASE_URL = "https://maplestory.io" # Placeholder URL, replace with actual API base URL
 
 # Default region and version if not provided
 DEFAULT_REGION = "GMS"
@@ -27,7 +30,7 @@ def get_all_mobs(region=None, version=None):
         version = DEFAULT_VERSION
 
     url = f"{BASE_URL}/api/{region}/{version}/mob"
-    print(f"Fetching mobs from: {url}")
+    print(f"Fetching mobs from: {url}\nYou can find monster names at https://maplestory.wiki/GMS/65/mob")
 
     try:
         response = requests.get(url)
@@ -50,59 +53,81 @@ def find_mob_id(all_mobs, mob_name):
     """
     Finds a monster by name in all mobs data.
     """
-    result = next((mob for mob in all_mobs if mob["name"] == mob_name), None)
-    if result != None:
-        return result['id']
-    else:
-        return None
+    mob_name_lower = mob_name.lower() # Convert input to lowercase for case-insensitive comparison
+    result = next((mob for mob in all_mobs if mob["name"].lower() == mob_name_lower), None)
+    return result['id'] if result else None
 
-def save_mob(mob_id, mob_name="mob"):
-    for action in ['stand', 'move']:
-        for frame in [0,1]:
-            filename = f"{mob_name}_{action}_{frame}.png"
-            try:
-                response = requests.get(f"{BASE_URL}/api/{DEFAULT_REGION}/{DEFAULT_VERSION}/mob/{mob_id}/render/{action}/{frame}", stream=True)
-                response.raise_for_status()  # Raise an HTTPError for bad responses (4xx or 5xx)
-                
-                # Check if the content type is indeed image/png
-                if 'image/png' in response.headers.get('Content-Type', ''):
-                    image_data = response.content
-                    # Convert image data to a numpy array
+def save_mob(mob_id, folder="monster", mob_name="mob"):
+    # Create output directory path: ./folder/mob_name
+    output_dir = Path(".") / folder / mob_name
+    # Create the directory and all parent directories if they don't exist
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Construct the URL to download the mob zip file
+    download_url = f"{BASE_URL}/api/{DEFAULT_REGION}/{DEFAULT_VERSION}/mob/{mob_id}/download"
+
+    try:
+        # Send HTTP GET request to download the zip file content
+        response = requests.get(download_url)
+        # Raise exception if HTTP request returned an unsuccessful status code
+        response.raise_for_status()
+
+        # Create a BytesIO stream from the downloaded zip file bytes (in-memory file)
+        zip_bytes = io.BytesIO(response.content)
+
+        # Open the zip file from the in-memory bytes
+        with zipfile.ZipFile(zip_bytes) as zip_file:
+            index = 1  # Counter to name saved images sequentially
+
+            # Iterate over all files inside the zip archive
+            for file_name in zip_file.namelist():
+                # Skip files that contain "die1" in their name (case insensitive)
+                if "die1" in file_name.lower():
+                    continue
+
+                # Open each image file inside the zip
+                with zip_file.open(file_name) as file:
+                    # Read the image data as bytes
+                    image_data = file.read()
+                    # Convert byte data to a NumPy array for OpenCV
                     np_arr = np.frombuffer(image_data, np.uint8)
+                    # Decode the image data into an OpenCV image matrix, preserving alpha channel if present
                     img = cv2.imdecode(np_arr, cv2.IMREAD_UNCHANGED)
 
-                    if img is not None:
-                        # Check if the image has an alpha channel (4 channels: B, G, R, A)
-                        if img.shape[2] == 4:
-                            # Create a mask for transparent pixels (alpha channel is 0)
-                            alpha_channel = img[:, :, 3]
-                            transparent_pixels = alpha_channel == 0
+                    # If image decoding fails, print a warning and skip this file
+                    if img is None:
+                        print(f"Failed to decode image: {file_name}")
+                        continue
 
-                            # Set the BGR channels of transparent pixels to green (0, 255, 0)
-                            # OpenCV uses BGR format by default
-                            img[transparent_pixels] = [0, 255, 0, 255] # Blue, Green, Red, Alpha (set alpha to 255 for opaque green)
+                    # If the image has an alpha channel (4 channels)
+                    if img.shape[2] == 4:
+                        # Extract the alpha channel
+                        alpha_channel = img[:, :, 3]
+                        # Find pixels that are fully transparent (alpha == 0)
+                        transparent_pixels = (alpha_channel == 0)
+                        # Replace transparent pixels with solid green color (BGR: 0,255,0) and full opacity (255)
+                        img[transparent_pixels, 0] = 0    # Blue channel
+                        img[transparent_pixels, 1] = 255  # Green channel
+                        img[transparent_pixels, 2] = 0    # Red channel
+                        img[transparent_pixels, 3] = 255  # Alpha channel (opaque)
 
-                        cv2.imwrite(filename, img)
-                        print(f"PNG image successfully downloaded, processed, and saved as {filename}")
-                    else:
-                        print(f"Failed to decode image from response for {filename}")
-                else:
-                    print(f"The response content type is not image/png. It is: {response.headers.get('Content-Type')}")
-                    print("Response content (first 500 bytes):", response.content[:500])
-            except requests.exceptions.RequestException as e:
-                print(f"An error occurred while fetching or processing {filename}: {e}")
-            except Exception as e: # Catch any other unexpected errors during image processing
-                print(f"An unexpected error occurred during image processing for {filename}: {e}")
+                    # Prepare the filename for saving the processed image
+                    new_filename = f"{mob_name}_{index}.png"
+                    save_path = output_dir / new_filename
+                    # Save the processed image to disk
+                    cv2.imwrite(str(save_path), img)
+                    print(f"Saved: {save_path}")
+                    index += 1
+
+    except Exception as e:
+        # Catch and print any unexpected errors during the process
+        print(f"Unexpected error occurred: {e}")
 
 if __name__ == "__main__":
     mobs = get_all_mobs(region=DEFAULT_REGION, version=DEFAULT_VERSION)
     mob_name = input("Enter mob name: ")
     mob_id = find_mob_id(mobs, mob_name)
 
-    mob_file_name = ""
-    for i, text in enumerate(mob_name.split()):
-        mob_file_name += text.lower()
-        if (i+1) != len(mob_name.split()):
-            mob_file_name += '_'
-            
-    save_mob(mob_id, "monster/" + mob_file_name)
+    mob_file_name = "_".join(text.lower() for text in mob_name.split())
+
+    save_mob(mob_id, folder="monster", mob_name=mob_file_name)
