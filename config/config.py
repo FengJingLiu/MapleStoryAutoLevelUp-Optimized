@@ -22,7 +22,7 @@ class Config:
     jump_key = "space"
 
     # Key to use a health potion.
-    heal_key = "q"
+    heal_key = "1"
 
     # Key to use a mana potion.
     add_mp_key = "2"
@@ -61,6 +61,15 @@ class Config:
     # offset from the nametag's top-left corner to the player's center
     nametag_offset = (-50, 30) # pixel
     nametag_diff_thres = 0.4
+
+    # Nametag template matching threshold.
+    # If the matching diff is smaller than <nametag_global_thres>
+    # it will only search area near the last frame nametag.
+    # If diff is bigger than <nametag_global_thres>, it will search the whole frame
+    # and get the best match.
+    # If you find the nametag is cached, but the location is incorrect.
+    # Disable this feature by setting nametag_global_thres = 0.0
+    nametag_global_thres = 0.2
 
     # ────────────────
     # Camera

@@ -14,7 +14,7 @@ import numpy as np
 import cv2
 
 # local import
-from config.config_legacy import Config
+from config.legacy.config_legacy import Config
 from logger import logger
 from util import find_pattern_sqdiff, draw_rectangle, screenshot, nms, load_image, get_mask
 from KeyBoardController import KeyBoardController

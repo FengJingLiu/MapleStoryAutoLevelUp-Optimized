@@ -91,8 +91,8 @@ class MapleStoryBot:
                 load_image(f"minimaps/{args.map}/route_rest.png"), cv2.COLOR_BGR2RGB)
 
         # Load player's name tag
-        self.img_nametag = load_image("name_tag.png")
-        self.img_nametag_gray = load_image("name_tag.png", cv2.IMREAD_GRAYSCALE)
+        self.img_nametag = load_image(f"nametag/{args.nametag}.png")
+        self.img_nametag_gray = load_image(f"nametag/{args.nametag}.png", cv2.IMREAD_GRAYSCALE)
 
         # Load rune images from rune/
         self.img_rune_warning = load_image("rune/rune_warning.png", cv2.IMREAD_GRAYSCALE)
@@ -209,7 +209,7 @@ class MapleStoryBot:
                 data["img_pattern"],
                 last_result=data["last_result"],
                 mask=data["mask"],
-                global_threshold=0.3
+                global_threshold=self.cfg.nametag_global_thres
             )
             w_match = data["img_pattern"].shape[1]
             h_match = data["img_pattern"].shape[0]
@@ -1388,6 +1388,13 @@ if __name__ == '__main__':
         type=str,
         default='magic_claw',
         help='Choose attack method, "magic_claw", "aoe_skill"'
+    )
+
+    parser.add_argument(
+        '--nametag',
+        type=str,
+        default='example',
+        help='Choose nametag png file in nametag/'
     )
 
     try:
