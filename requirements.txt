@@ -6,4 +6,3 @@ pygetwindow
 pyautogui
 pynput
 requests
-zipfile
