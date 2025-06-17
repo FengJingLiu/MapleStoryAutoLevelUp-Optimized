@@ -16,7 +16,7 @@ class Config:
     magic_claw_key = "w"
 
     # Key to trigger Mage's teleport skill
-    teleport_key = "e" # set to "", if need to disable teleport skill
+    teleport_key = "" # set to "", if need to disable teleport skill
 
     # Key for jumping.
     jump_key = "space"
@@ -28,8 +28,8 @@ class Config:
     add_mp_key = "2"
 
     # Buff skill keys, e.g., magical sheild, angel blessing
-    buff_skill_keys     = ["s", "d", "f"]
-    buff_skill_cooldown = [190, 140, 75] # Second
+    buff_skill_keys     = []
+    buff_skill_cooldown = [] # Second
     buff_skill_active_duration = 1 # second
     # ────────────────
     # System
@@ -162,6 +162,7 @@ class Config:
     # Mini-Map
     # ────────────────
     minimap_upscale_factor = 4 # upscale 4 time for debug route image
+    minimap_player_color = (136, 255, 255) # BGR
 
     # ────────────────
     # Patrol Mode
@@ -205,3 +206,4 @@ class Config:
     }
 
     window_size = (752, 1282)
+

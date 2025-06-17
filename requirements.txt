@@ -1,7 +1,5 @@
 opencv-python
-pywin32
 numpy
-windows-capture
-pygetwindow
 pyautogui
 pynput
+pyobjc-framework-Quartz  # Mac 系統 API
