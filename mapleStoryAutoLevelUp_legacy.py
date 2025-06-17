@@ -18,7 +18,7 @@ from config.legacy.config_legacy import Config
 from logger import logger
 from util import find_pattern_sqdiff, draw_rectangle, screenshot, nms, load_image, get_mask
 from KeyBoardController import KeyBoardController
-from GameWindowCapturor import GameWindowCapturor
+from GameWindowCapturorSelector import GameWindowCapturor
 
 class MapleStoryBot:
     '''
@@ -1319,10 +1319,10 @@ class MapleStoryBot:
                 command = self.get_random_action()
             elif command in ["up", "down"]:
                 pass # Don't attack or heal while character is on rope
-            elif self.hp_ratio <= self.cfg.heal_ratio:
-                command = "heal"
-            elif self.mp_ratio <= self.cfg.add_mp_ratio:
-                command = "add mp"
+            # elif self.hp_ratio <= self.cfg.heal_ratio:
+            #     command = "heal"
+            # elif self.mp_ratio <= self.cfg.add_mp_ratio:
+            #     command = "add mp"
             elif attack_direction == "I don't care":
                 command = "attack"
             elif attack_direction == "left":
