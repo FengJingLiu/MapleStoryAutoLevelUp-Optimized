@@ -68,6 +68,10 @@ You can press 'F2' to take a screenshot, which will save to scrennshot/
 6. north forest training ground 8(北部森林訓練場8)
 7. monkey_swamp_3(猴子沼澤地3)
 8. first barrack (第一軍營)
+9. dragon territory (魔龍領地)
+10. empty house (空屋)
+11. mushroom hill (菇菇山丘)
+12. pig shores (肥肥海岸)
 
 ## Supported Monsters
 1. fire pig(火肥肥)
@@ -82,6 +86,10 @@ You can press 'F2' to take a screenshot, which will save to scrennshot/
 10. angel monkey(天使猴)
 11. skeleton soldier(骷髏士兵)
 12. skeleton officer(骷髏隊長)
+13. wild kargo (魔龍)
+14. pig (肥肥)
+15. ribbon pig (緞帶肥肥)
+16. cold eye (冰獨眼獸)
 
 If you want to try this script on other map/monster, you need to add new map to minimaps/ and add monsters icon to monster/
 
@@ -97,9 +105,13 @@ Example:
 python routeRecorder.py --new_map my_new_map
 ```
 while running this recoder
+
 Press 'F1' to stop/resume the recoder
+
 Press 'F2' to take screenshot
+
 Press 'F3' to save current route map and start record a new one
+
 Press "F4" to save current map
 
 ## Auto Download Monster
