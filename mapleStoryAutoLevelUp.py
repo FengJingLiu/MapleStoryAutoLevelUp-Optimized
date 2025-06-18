@@ -37,9 +37,6 @@ class MapleStoryBot:
         self.args = args # User arguments
         self.status = "hunting" # 'resting', 'finding_rune', 'near_rune'
         self.idx_routes = 0 # Index of route map
-        self.hp_ratio = 1.0 # HP bar ratio, [0.0 ~ 1.0]
-        self.mp_ratio = 1.0 # MP bar ratio, [0.0 ~ 1.0]
-        self.exp_ratio = 1.0 # EXP bar ratio, [0.0 ~ 1.0]
         self.monster_info = [] # monster information
         self.fps = 0 # Frame per second
         self.is_first_frame = True # first frame flag
@@ -154,7 +151,7 @@ class MapleStoryBot:
         # Start game window capturing thread
         logger.info("Waiting for game window to activate, please click on game window")
         self.capture = GameWindowCapturor(self.cfg)
-        
+
         # Start health monitoring thread
         self.health_monitor = HealthMonitor(self.cfg, args, self.kb)
         self.health_monitor.start()
@@ -374,66 +371,7 @@ class MapleStoryBot:
 
         return nearest  # if not found return none
 
-    def get_hp_mp_exp(self):
-        '''
-        Extracts the player's HP, MP, and EXP ratios from game frame.
 
-        This function:
-        - Crops the predefined HP, MP, and EXP bar regions from the game frame.
-        - Identifies empty areas in each bar.
-        - Computes the fill ratio for each bar as: 1 - (empty_pixels / total_pixels).
-
-        Returns:
-            tuple: (hp_ratio, mp_ratio, exp_ratio), each a float between 0 and 1.
-        '''
-        # HP crop
-        hp_bar = self.img_frame[self.cfg.hp_bar_top_left[1]:self.cfg.hp_bar_bottom_right[1]+1,
-                                self.cfg.hp_bar_top_left[0]:self.cfg.hp_bar_bottom_right[0]+1]
-        # MP crop
-        mp_bar = self.img_frame[self.cfg.mp_bar_top_left[1]:self.cfg.mp_bar_bottom_right[1]+1,
-                                self.cfg.mp_bar_top_left[0]:self.cfg.mp_bar_bottom_right[0]+1]
-        # EXP crop
-        exp_bar = self.img_frame[self.cfg.exp_bar_top_left[1]:self.cfg.exp_bar_bottom_right[1]+1,
-                                self.cfg.exp_bar_top_left[0]:self.cfg.exp_bar_bottom_right[0]+1]
-        # HP Detection (detect empty part)
-        empty_mask_hp = (hp_bar[:,:,0] == hp_bar[:,:,1]) & (hp_bar[:,:,0] == hp_bar[:,:,2])
-        empty_pixels_hp = np.count_nonzero(empty_mask_hp)-6 # 6 pixel always be white
-        total_pixels_hp = hp_bar.shape[0] * hp_bar.shape[1] - 6
-        hp_ratio = 1 - (empty_pixels_hp / total_pixels_hp)
-
-        # MP Detection (detect empty part)
-        empty_mask_mp = (mp_bar[:,:,0] == mp_bar[:,:,1]) & (mp_bar[:,:,0] == mp_bar[:,:,2])
-        empty_pixels_mp = np.count_nonzero(empty_mask_mp)-6 # 6 pixel always be white
-        total_pixels_mp = mp_bar.shape[0] * mp_bar.shape[1] - 6
-        mp_ratio = 1 - (empty_pixels_mp / total_pixels_mp)
-
-        # EXP Detection (detect eexpty part)
-        empty_mask_exp = (exp_bar[:,:,0] == exp_bar[:,:,1]) & (exp_bar[:,:,0] == exp_bar[:,:,2])
-        eexpty_pixels_exp = np.count_nonzero(empty_mask_exp)-6 # 6 pixel always be white
-        total_pixels_exp = exp_bar.shape[0] * exp_bar.shape[1] - 6
-        exp_ratio = 1 - (eexpty_pixels_exp / total_pixels_exp)
-
-        # Compute original bar dimensions
-        hp_h, hp_w = hp_bar.shape[:2]
-        mp_h, mp_w = mp_bar.shape[:2]
-        exp_h, exp_w = exp_bar.shape[:2]
-
-        # Overlay HP/MP/EXP text
-        x_start, y_start = (250, 90)
-        cv2.putText(self.img_frame_debug, f"HP: {hp_ratio*100:.1f}%", (x_start, y_start),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0,0,255), 2)
-        cv2.putText(self.img_frame_debug, f"MP: {mp_ratio*100:.1f}%", (x_start, y_start+30),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0,0,255), 2)
-        cv2.putText(self.img_frame_debug, f"EXP: {exp_ratio*100:.1f}%", (x_start, y_start+60),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0,0,255), 2)
-
-        # Paste HP/MP/EXP bar on img_frame_debug
-        x_start, y_start = (410, 73)
-        self.img_frame_debug[y_start:y_start+hp_h, x_start:x_start+hp_w] = hp_bar
-        self.img_frame_debug[y_start+30:y_start+30+mp_h, x_start:x_start+mp_w] = mp_bar
-        self.img_frame_debug[y_start+60:y_start+60+exp_h, x_start:x_start+exp_w] = exp_bar
-
-        return hp_ratio, mp_ratio, exp_ratio
 
     def get_nearest_monster(self, is_left = True, overlap_threshold=0.5):
         '''
@@ -1081,10 +1019,10 @@ class MapleStoryBot:
         minimap_result = get_minimap_loc_size(self.img_frame)
         if minimap_result is None:
             logger.warning("Failed to get minimap location and size.")
-            return
-        x, y, w, h = minimap_result
-        self.loc_minimap = (x, y)
-        self.img_minimap = self.img_frame[y:y+h, x:x+w]
+        else:
+            x, y, w, h = minimap_result
+            self.loc_minimap = (x, y)
+            self.img_minimap = self.img_frame[y:y+h, x:x+w]
 
         # Grayscale game window
         self.img_frame_gray = cv2.cvtColor(self.img_frame, cv2.COLOR_BGR2GRAY)
@@ -1097,11 +1035,26 @@ class MapleStoryBot:
             self.img_route = self.img_routes[self.idx_routes]
             self.img_route_debug = cv2.cvtColor(self.img_route, cv2.COLOR_RGB2BGR)
 
-        # Detect HP/MP/EXP bar on game window
-        self.hp_ratio, self.mp_ratio, self.exp_ratio = self.get_hp_mp_exp()
-        
         # Update health monitor with current frame
-        self.health_monitor.update_frame(self.img_frame)
+        self.health_monitor.update_frame(self.img_frame[self.cfg.camera_floor:, :])
+
+        # Draw HP/MP/EXP bar on debug window
+        ratio_bars = [self.health_monitor.hp_ratio,
+                      self.health_monitor.mp_ratio,
+                      self.health_monitor.exp_ratio]
+        for i, bar_name in enumerate(["HP", "MP", "EXP"]):
+            x_s, y_s = (250, 90)
+            # Print bar ratio on debug window
+            cv2.putText(self.img_frame_debug,
+                        f"{bar_name}: {ratio_bars[i]*100:.1f}%",
+                        (x_s, y_s + 30*i),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0,0,255), 2)
+            # Draw bar on debug window
+            x_s, y_s = (410, 73)
+            # print(self.health_monitor.loc_size_bars)
+            x, y, w, h = self.health_monitor.loc_size_bars[i]
+            self.img_frame_debug[y_s+30*i:y_s+h+30*i, x_s:x_s+w] = \
+                self.img_frame[self.cfg.camera_floor:, :][y:y+h, x:x+w]
 
         # Check whether "PLease remove runes" warning appears on screen
         if self.is_rune_warning():
@@ -1343,7 +1296,7 @@ class MapleStoryBot:
 
         # send command to keyboard controller
         self.kb.set_command(command)
-        
+
         # Debug: show current command on screen
         if command and len(command) > 0:
             cv2.putText(self.img_frame_debug, f"CMD: {command}",

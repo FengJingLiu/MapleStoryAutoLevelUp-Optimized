@@ -1,6 +1,10 @@
 import threading
 import time
+import cv2
+
+# Local import
 from logger import logger
+from util import get_bar_ratio
 
 class HealthMonitor:
     '''
@@ -13,17 +17,24 @@ class HealthMonitor:
         self.running = False
         self.enabled = True
         self.thread = None
-        
+
         # Health monitoring state
         self.hp_ratio = 1.0
         self.mp_ratio = 1.0
+        self.exp_ratio = 1.0
         self.last_heal_time = 0
         self.last_mp_time = 0
-        
+
         # Frame data (will be updated by main thread)
         self.img_frame = None
         self.frame_lock = threading.Lock()
-        
+
+        # Debug information
+        # hp/mp/exp bars loc and size, [(x,y,w,h), ...]
+        self.loc_size_bars = [(0, 0, 0, 0),
+                              (0, 0, 0, 0),
+                              (0, 0, 0, 0)]
+
     def start(self):
         '''
         Start health monitoring thread
@@ -32,8 +43,8 @@ class HealthMonitor:
             self.running = True
             self.thread = threading.Thread(target=self._monitor_loop, daemon=True)
             self.thread.start()
-            logger.info("Health monitor started")
-    
+            logger.info("[Health Monitor]: Started")
+
     def stop(self):
         '''
         Stop health monitoring thread
@@ -41,29 +52,79 @@ class HealthMonitor:
         self.running = False
         if self.thread:
             self.thread.join()
-            logger.info("Health monitor stopped")
-    
+            logger.info("[Health Monitor]: Stopped")
+
     def enable(self):
         '''
         Enable health monitoring
         '''
         self.enabled = True
-        
+
     def disable(self):
         '''
         Disable health monitoring
         '''
         self.enabled = False
-        
+
     def update_frame(self, img_frame):
         '''
         Update frame data from main thread
         '''
         with self.frame_lock:
             self.img_frame = img_frame
-    
-    def get_hp_mp_ratio(self):
+
+    def get_hp_mp_exp_ratio(self):
         '''
+        Extracts the player's HP, MP, and EXP ratios from game frame.
+
+        This function:
+        - Crops the predefined HP, MP, and EXP bar regions from the game frame.
+        - Identifies empty areas in each bar.
+        - Computes the fill ratio for each bar as: 1 - (empty_pixels / total_pixels).
+
+        Returns:
+            tuple: (hp_ratio, mp_ratio, exp_ratio), each a float between 0 and 1.
+        '''
+        if self.img_frame is None:
+            return None, None, None
+
+        with self.frame_lock:
+            img_frame = self.img_frame.copy()
+
+        img_frame_gray = cv2.cvtColor(img_frame, cv2.COLOR_BGR2GRAY)
+        white_mask = cv2.inRange(img_frame_gray, 240, 255)
+        # cv2.imshow("white_mask", white_mask)
+
+        contours, _ = cv2.findContours(white_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+        loc_size_bars = []
+        for cnt in contours:
+            x, y, w, h = cv2.boundingRect(cnt)
+            # for game window resolution 752x1282, w/h == 7.5, w*h == 3630
+            if 4 < w/h < 10 and 2500 < w*h < 5000:
+                loc_size_bars.append((x, y, w, h))
+
+        # sort contours by x coordinate
+        loc_size_bars = sorted(loc_size_bars, key=lambda bar: bar[0])
+        if len(loc_size_bars) != 3:
+            logger.warning(f"[Health Monitor]: HP/MP/EXP bar detection has an unexpected result:{loc_size_bars}")
+            return (None, None, None)
+
+        # Update loc_size_bars
+        self.loc_size_bars = loc_size_bars
+
+        # Get bar filled ratio
+        ratio_bars = []
+        for x, y, w, h in loc_size_bars:
+            ratio_bars.append(get_bar_ratio(img_frame[y:y+h, x:x+w]))
+        return ratio_bars
+
+    def get_hp_mp_ratio_legacy(self):
+        '''
+        Deprecated: This hp/mp bar detection method require specific window resolution as input
+                    and use hard-coded pixel coordinate to capture hp/mp bar
+                    This function is replaced by get_hp_mp_exp_ratio() which is more flexiable and
+                    can work on different window resolution
         Extract HP and MP ratios from current frame
         '''
         if self.img_frame is None:
@@ -102,35 +163,39 @@ class HealthMonitor:
                 if not self.enabled or self.args.disable_control:
                     time.sleep(0.1)
                     continue
-                
+
                 # Get current HP/MP ratios
-                hp_ratio, mp_ratio = self.get_hp_mp_ratio()
-                self.hp_ratio = hp_ratio
-                self.mp_ratio = mp_ratio
-                
+                hp_ratio, mp_ratio, exp_ratio = self.get_hp_mp_exp_ratio()
+                if hp_ratio is not None:
+                    self.hp_ratio = hp_ratio
+                if mp_ratio is not None:
+                    self.mp_ratio = mp_ratio
+                if exp_ratio is not None:
+                    self.exp_ratio = exp_ratio
+
                 current_time = time.time()
-                
+
                 # Check if need to heal (with cooldown)
-                if (hp_ratio <= self.cfg.heal_ratio and 
+                if (self.hp_ratio <= self.cfg.heal_ratio and
                     current_time - self.last_heal_time > self.cfg.heal_cooldown):
                     self._heal()
                     self.last_heal_time = current_time
-                    logger.info(f"Auto heal triggered, HP: {hp_ratio*100:.1f}%")
-                
+                    logger.info(f"[Health Monitor]: Auto heal triggered, HP: {self.hp_ratio*100:.1f}%")
+
                 # Check if need MP (with cooldown)
-                if (mp_ratio <= self.cfg.add_mp_ratio and 
+                if (self.mp_ratio <= self.cfg.add_mp_ratio and
                     current_time - self.last_mp_time > self.cfg.mp_cooldown):
                     self._add_mp()
                     self.last_mp_time = current_time
-                    logger.info(f"Auto MP triggered, MP: {mp_ratio*100:.1f}%")
-                
+                    logger.info(f"[Health Monitor]: Auto MP triggered, MP: {self.mp_ratio*100:.1f}%")
+
                 # Sleep to avoid excessive CPU usage
                 time.sleep(0.05)  # Check every 50ms
-                
+
             except Exception as e:
-                logger.error(f"Health monitor error: {e}")
+                logger.error(f"[Health Monitor]: {e}")
                 time.sleep(0.1)
-    
+
     def _heal(self):
         '''
         Execute heal action
@@ -138,8 +203,8 @@ class HealthMonitor:
         try:
             self.kb.press_key(self.cfg.heal_key, 0.05)
         except Exception as e:
-            logger.error(f"Heal action failed: {e}")
-    
+            logger.error(f"[Health Monitor]: Heal action failed: {e}")
+
     def _add_mp(self):
         '''
         Execute MP recovery action
@@ -147,4 +212,4 @@ class HealthMonitor:
         try:
             self.kb.press_key(self.cfg.add_mp_key, 0.05)
         except Exception as e:
-            logger.error(f"MP action failed: {e}")
+            logger.error(f"[Health Monitor]: MP action failed: {e}")

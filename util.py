@@ -346,3 +346,43 @@ def get_player_location_on_minimap(img_minimap, minimap_player_color=(136, 255, 
     loc_player_minimap = (int(round(avg[0])), int(round(avg[1])))
 
     return loc_player_minimap
+
+def get_bar_ratio(img):
+    '''
+    Get HP/MP/EXP bar ratio with given bar image
+
+    Return: float [0.0 - 1.0]
+    '''
+    # Sample a horizontal line at the vertical center of the bar
+    h, w = img.shape[:2]
+    line_pixels = img[h // 2, :]
+
+    # Get left white boundary of bar
+    lb = 0
+    while lb < w and np.all(line_pixels[lb] >= 255):
+        lb += 1
+
+    # Get right white boundary of bar
+    rb = w - 1
+    while rb > lb and np.all(line_pixels[rb] >= 255):
+        rb -= 1
+
+    # Sanity check
+    if rb <= lb:
+        return 0.0
+
+    # Get unfill pixel count in bar
+    unfill_pixel_cnt = 0
+    tolerance = 10
+    for i in range(lb, rb + 1):
+        r, g, b = line_pixels[i]
+        if  abs(int(r) - int(g)) <= tolerance and \
+            abs(int(r) - int(b)) <= tolerance and \
+            int(r) > 0:
+            unfill_pixel_cnt += 1
+
+    # Compute fill ratio
+    total_width = rb - lb + 1
+    fill_width = total_width - unfill_pixel_cnt
+    fill_ratio = fill_width / total_width if total_width > 0 else 0.0
+    return fill_ratio
