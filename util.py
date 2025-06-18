@@ -141,6 +141,29 @@ def draw_rectangle(img, top_left, size, color, text,
     cv2.putText(img, text, (top_left[0], top_left[1] - 10),
                 cv2.FONT_HERSHEY_SIMPLEX, text_height, color, thickness)
 
+def pad_to_size(img, size, pad_value=0):
+    '''
+    pad_to_size
+    '''
+    h_img, w_img = img.shape[:2]
+    h_target, w_target = size
+
+    pad_h = max(0, h_target - h_img)
+    pad_w = max(0, w_target - w_img)
+
+    if pad_h > 0 or pad_w > 0:
+        img = cv2.copyMakeBorder(
+            img,
+            top   = pad_h // 2,
+            bottom= pad_h - pad_h // 2,
+            left  = pad_w // 2,
+            right = pad_w - pad_w // 2,
+            borderType=cv2.BORDER_CONSTANT,
+            value=pad_value
+        )
+
+    return img
+
 def find_pattern_sqdiff(
         img, img_pattern,
         last_result=None,
@@ -164,12 +187,8 @@ def find_pattern_sqdiff(
     - min_val: The matching score (lower = better for SQDIFF_NORMED).
     - bool: local search success or not
     '''
-    # Make sure image is bigger than pattern
-    h_img, w_img = img.shape[:2]
-    h_tpl, w_tpl = img_pattern.shape[:2]
-    assert h_img >= h_tpl and w_img >= w_tpl, (
-        f"Pattern size ({w_tpl}x{h_tpl}) is larger than image size ({w_img}x{h_img})"
-    )
+    # Padding if img is smaller than pattern
+    img = pad_to_size(img, img_pattern.shape[:2])
 
     # search last result location first to speedup
     h, w = img_pattern.shape[:2]
