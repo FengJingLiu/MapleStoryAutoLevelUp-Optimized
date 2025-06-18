@@ -1,4 +1,5 @@
 *__pycache__/
 screenshot/
 *.log
-name_tag/
+nametag/
+*.DS_Store

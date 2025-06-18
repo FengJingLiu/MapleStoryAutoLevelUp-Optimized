@@ -218,6 +218,10 @@ def find_pattern_sqdiff(
             cv2.TM_SQDIFF_NORMED,
             mask=mask
     )
+
+    # Replace -inf/+inf/nan to 1.0 to avoid numerical error
+    res = np.nan_to_num(res, nan=1.0, posinf=1.0, neginf=1.0)
+
     min_val, max_val, min_loc, max_loc = cv2.minMaxLoc(res)
 
     return min_loc, min_val, False
@@ -329,19 +333,9 @@ def get_player_location_on_minimap(img_minimap, minimap_player_color=(136, 255, 
         (x, y): The player's location in minimap coordinates as a tuple.
                 Returns None if not enough matching pixels are found.
     """
-
-    # Find pixels matching the player color
-    if is_mac():
-        # give more tolerance to blue channel for mac
-        tolerance = 200
-        B, G, R = minimap_player_color
-        lower = (max(B - tolerance, 0), G, R)
-        upper = (min(B + tolerance, 255), G, R)
-        mask = cv2.inRange(img_minimap, lower, upper)
-    else:
-        mask = cv2.inRange(img_minimap,
-                            minimap_player_color,
-                            minimap_player_color)
+    mask = cv2.inRange(img_minimap,
+                        minimap_player_color,
+                        minimap_player_color)
     coords = cv2.findNonZero(mask)
     if coords is None or len(coords) < 4:
         logger.warning(f"Fail to locate player location on minimap.")

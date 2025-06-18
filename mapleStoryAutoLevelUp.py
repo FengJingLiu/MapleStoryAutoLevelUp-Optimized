@@ -80,7 +80,8 @@ class MapleStoryBot:
             self.cfg.minimap_upscale_factor = 2 # Mac laptop typically has a smaller screen
             self.cfg.game_window_title = 'MapleStory Worlds'
             self.cfg.window_size = (776, 1280) # Set resolution to (1280x720) in game setting
-
+            self.cfg.monster_health_bar_color = (90, 201, 108) # (B,G,R)
+            self.cfg.minimap_player_color = (84, 255, 255) # BGR
         if args.patrol:
             # Patrol mode doesn't need map or route
             self.img_map = None
