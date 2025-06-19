@@ -965,6 +965,10 @@ class MapleStoryBot:
         x1 = min(self.img_route_debug.shape[1], x0 + crop_w)
         y1 = min(self.img_route_debug.shape[0], y0 + crop_h)
 
+        # Check if valid crop region
+        if x1 <= x0 or y1 <= y0:
+            return
+
         # Crop region
         mini_map_crop = self.img_route_debug[y0:y1, x0:x1]
         mini_map_crop = cv2.resize(mini_map_crop,

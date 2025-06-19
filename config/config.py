@@ -27,10 +27,15 @@ class Config:
     # Key to use a mana potion.
     add_mp_key = "2"
 
+    # ────────────────
+    # Buff skill
+    # ────────────────
     # Buff skill keys, e.g., magical sheild, angel blessing
     buff_skill_keys     = []
     buff_skill_cooldown = [] # Second
     buff_skill_active_duration = 1 # second
+    buff_skill_action_cooldown = 1 # second, avoid cast buff skill after attack
+
     # ────────────────
     # System
     # ────────────────
@@ -146,12 +151,6 @@ class Config:
     # ────────────────
     # HP Bar and HP bar
     # ────────────────
-    hp_bar_top_left = (348, 732)
-    hp_bar_bottom_right = (509, 749)
-    mp_bar_top_left = (517, 732)
-    mp_bar_bottom_right = (678, 749)
-    exp_bar_top_left = (699, 732)
-    exp_bar_bottom_right = (860, 749)
     heal_ratio = 0.5 # heal when hp is below 50%
     add_mp_ratio = 0.5 # drink potion when mp is below 50%
     # Health monitor cooldowns (to prevent spam)
