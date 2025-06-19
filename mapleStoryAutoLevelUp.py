@@ -1349,7 +1349,7 @@ class MapleStoryBot:
                 command = self.get_random_action()
 
             # If the HP is reduced switch to hurting (other player probably help solved the rune)
-            if time.time() - self.health_monitor.last_hp_reduce_time > 3:
+            if time.time() - self.health_monitor.last_hp_reduce_time < 3:
                 self.switch_status("hunting")
 
             # Check if finding rune timeout
