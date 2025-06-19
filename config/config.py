@@ -66,7 +66,7 @@ class Config:
     # ────────────────
     # offset from the nametag's top-left corner to the player's center
     nametag_offset = (-50, 30) # pixel
-    nametag_diff_thres = 0.4
+    nametag_diff_thres = 0.2
 
     # Nametag template matching threshold.
     # If the matching diff is smaller than <nametag_global_thres>

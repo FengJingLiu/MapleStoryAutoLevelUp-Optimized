@@ -393,8 +393,6 @@ class MapleStoryBot:
 
         return nearest  # if not found return none
 
-
-
     def get_nearest_monster(self, is_left = True, overlap_threshold=0.5):
         '''
         Finds the nearest monster within the player's attack range.
@@ -414,16 +412,28 @@ class MapleStoryBot:
         Returns:
             dict or None: The nearest monster's info dict, or None if no valid match.
         '''
-        if is_left:
-            x0 = self.loc_player[0] - self.cfg.magic_claw_range_x
-            x1 = self.loc_player[0]
+        # Get attack box
+        if self.args.attack == "aoe_skill":
+            dx = self.cfg.aoe_skill_range_x // 2
+            dy = self.cfg.aoe_skill_range_y // 2
+            x0 = max(0, self.loc_player[0] - dx)
+            x1 = min(self.img_frame.shape[1], self.loc_player[0] + dx)
+            y0 = max(0, self.loc_player[1] - dy)
+            y1 = min(self.img_frame.shape[0], self.loc_player[1] + dy)
+        elif self.args.attack == "magic_claw":
+            if is_left:
+                x0 = self.loc_player[0] - self.cfg.magic_claw_range_x
+                x1 = self.loc_player[0]
+            else:
+                x0 = self.loc_player[0]
+                x1 = x0 + self.cfg.magic_claw_range_x
+            y0 = self.loc_player[1] - self.cfg.magic_claw_range_y//2
+            y1 = y0 + self.cfg.magic_claw_range_y
         else:
-            x0 = self.loc_player[0]
-            x1 = x0 + self.cfg.magic_claw_range_x
-        y0 = self.loc_player[1] - self.cfg.magic_claw_range_y//2
-        y1 = y0 + self.cfg.magic_claw_range_y
+            logger.error(f"Unsupported attack mode: {self.args.attack}")
+            return None
 
-        # Debug, magic claw hit box
+        # Draw attack box on debug window
         draw_rectangle(
             self.img_frame_debug, (x0, y0),
             (y1-y0, x1-x0),
@@ -973,7 +983,7 @@ class MapleStoryBot:
             self.img_frame_debug,
             self.loc_minimap,
             self.img_minimap.shape[:2],
-            (0, 0, 255), "minimap",thickness=1
+            (0, 0, 255), "minimap",thickness=2
         )
 
         # Don't draw minimap in patrol mode
@@ -1017,7 +1027,8 @@ class MapleStoryBot:
         '''
         update_img_frame_debug
         '''
-        cv2.imshow("Game Window Debug", self.img_frame_debug)
+        cv2.imshow("Game Window Debug",
+                   self.img_frame_debug[self.cfg.camera_ceiling:self.cfg.camera_floor, :])
         # Update FPS timer
         self.t_last_frame = time.time()
 
@@ -1127,34 +1138,33 @@ class MapleStoryBot:
             # Restore kb thread
             self.kb.enable()
 
-        # Get all monster near player
+        # Get monster search box
+        margin = self.cfg.monster_search_margin
         if self.args.attack == "aoe_skill":
-            # Search monster near player
-            x0 = max(0, self.loc_player[0] - self.cfg.aoe_skill_range_x//2)
-            x1 = min(self.img_frame.shape[1], self.loc_player[0] + self.cfg.aoe_skill_range_x//2)
-            y0 = max(0, self.loc_player[1] - self.cfg.aoe_skill_range_y//2)
-            y1 = min(self.img_frame.shape[0], self.loc_player[1] + self.cfg.aoe_skill_range_y//2)
-            # Get monster in skill range
-            self.monster_info = self.get_monsters_in_range((x0, y0), (x1, y1))
+            dx = self.cfg.aoe_skill_range_x // 2 + margin
+            dy = self.cfg.aoe_skill_range_y // 2 + margin
         elif self.args.attack == "magic_claw":
-            # Search monster nearby magic claw range
-            dx = self.cfg.magic_claw_range_x + self.cfg.monster_search_margin
-            dy = self.cfg.magic_claw_range_y + self.cfg.monster_search_margin
-            x0 = max(0, self.loc_player[0] - dx)
-            x1 = min(self.img_frame.shape[1], self.loc_player[0] + dx)
-            y0 = max(0, self.loc_player[1] - dy)
-            y1 = min(self.img_frame.shape[0], self.loc_player[1] + dy)
-            # Get monster in skill range
-            self.monster_info = self.get_monsters_in_range((x0, y0), (x1, y1))
+            dx = self.cfg.magic_claw_range_x + margin
+            dy = self.cfg.magic_claw_range_y + margin
+        else:
+            logger.error(f"Unsupported attack mode: {self.args.attack}")
+            return
+        x0 = max(0, self.loc_player[0] - dx)
+        x1 = min(self.img_frame.shape[1], self.loc_player[0] + dx)
+        y0 = max(0, self.loc_player[1] - dy)
+        y1 = min(self.img_frame.shape[0], self.loc_player[1] + dy)
+
+        # Get monsters in the search box
+        self.monster_info = self.get_monsters_in_range((x0, y0), (x1, y1))
 
         # Get attack direction
         if self.args.attack == "aoe_skill":
             if len(self.monster_info) == 0:
                 attack_direction = None
-                nearest_monster = None
             else:
                 attack_direction = "I don't care"
-                nearest_monster = self.monster_info[0]  # Any monster for AOE
+            nearest_monster = self.get_nearest_monster()
+
         elif self.args.attack == "magic_claw":
             # Get nearest monster to player
             monster_left  = self.get_nearest_monster(is_left = True)
