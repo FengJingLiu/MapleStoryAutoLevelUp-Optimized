@@ -41,6 +41,7 @@ class Config:
     # ────────────────
     # FPS(Frame per Second) limit for main thread
     fps_limit = 10
+    show_debug_window = True # False, disable debug window to save system resource
 
     # ────────────────
     # Mage Teleport

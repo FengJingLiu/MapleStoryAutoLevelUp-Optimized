@@ -1328,19 +1328,26 @@ class MapleStoryBot:
             cv2.putText(self.img_frame_debug, f"CMD: {command}",
                        (10, 480), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
 
+        # Check if need to save screenshot
+        if self.kb.is_need_screen_shot:
+            screenshot(self.img_frame)
+            self.kb.is_need_screen_shot = False
+
+        # Enable cached location since second frame
+        self.is_first_frame = False
+
         #####################
         ### Debug Windows ###
         #####################
+        # Don't show debug window to save system resource
+        if not self.cfg.show_debug_window:
+            return
+
         # Print text on debug image
         self.update_info_on_img_frame_debug()
 
         # Show debug image on window
         self.update_img_frame_debug()
-
-        # Check if need to save screenshot
-        if self.kb.is_need_screen_shot:
-            screenshot(self.img_frame)
-            self.kb.is_need_screen_shot = False
 
         # Resize img_route_debug for better visualization
         if not self.args.patrol:
@@ -1351,8 +1358,6 @@ class MapleStoryBot:
                         interpolation=cv2.INTER_NEAREST)
             cv2.imshow("Route Map Debug", self.img_route_debug)
 
-        # Enable cached location since second frame
-        self.is_first_frame = False
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
