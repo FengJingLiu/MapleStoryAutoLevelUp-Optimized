@@ -17,7 +17,8 @@ import cv2
 from config.config import Config
 from logger import logger
 from util import find_pattern_sqdiff, draw_rectangle, screenshot, nms, \
-                load_image, get_mask, get_minimap_loc_size, get_player_location_on_minimap, is_mac
+                load_image, get_mask, get_minimap_loc_size, get_player_location_on_minimap, \
+                is_mac, nms_matches
 from KeyBoardController import KeyBoardController
 if is_mac():
     from GameWindowCapturorForMac import GameWindowCapturor
@@ -104,8 +105,9 @@ class MapleStoryBot:
 
         # Load rune images from rune/
         self.img_rune_warning = load_image("rune/rune_warning.png", cv2.IMREAD_GRAYSCALE)
-        self.img_rune = load_image("rune/rune.png")
-        self.img_rune_gray = load_image("rune/rune.png", cv2.IMREAD_GRAYSCALE)
+        self.img_runes = [load_image("rune/rune_1.png"),
+                          load_image("rune/rune_2.png"),
+                          load_image("rune/rune_3.png"),]
         self.img_arrows = {
             "left":
                 [load_image("rune/arrow_left_1.png"),
@@ -818,41 +820,77 @@ class MapleStoryBot:
             (255, 0, 0), "Rune Detection Range"
         )
 
-        # Find rune icon near player
-        if  (x1 - x0) < self.img_rune.shape[1] or \
-            (y1 - y0) < self.img_rune.shape[0]:
-            return False # Skip check if box is out of range
-        else:
-            img_roi = self.img_frame[y0:y1, x0:x1]
-            loc_rune, score, _ = find_pattern_sqdiff(
-                            img_roi,
-                            self.img_rune,
-                            mask=get_mask(self.img_rune, (0, 255, 0)))
-            # # Draw rectangle for debug
-            # draw_rectangle(
-            #     self.img_frame_debug,
-            #     (x0 + loc_rune[0], y0 + loc_rune[1]),
-            #     self.img_rune.shape,
-            #     (255, 0, 255),  # purple in BGR
-            #     f"Rune,{round(score, 2)}"
-            # )
-            detect_thres = self.cfg.rune_detect_diff_thres + self.rune_detect_level*self.cfg.rune_detect_level_coef
-            if score < detect_thres:
-                logger.info(f"[Rune Detect] Found rune near player with score({score})," + \
-                            f"level({self.rune_detect_level}),threshold({detect_thres})")
-                # Draw rectangle for debug
-                draw_rectangle(
-                    self.img_frame_debug,
-                    (x0 + loc_rune[0], y0 + loc_rune[1]),
-                    self.img_rune.shape,
-                    (255, 0, 255),  # purple in BGR
-                    f"Rune,{round(score, 2)}"
-                )
-                screenshot(self.img_frame_debug, "rune_detected")
+        # Make sure ROI is large enough to hold a full rune
+        max_rune_height = max(r.shape[0] for r in self.img_runes)
+        max_rune_width  = max(r.shape[1] for r in self.img_runes)
+        if (x1 - x0) < max_rune_width or (y1 - y0) < max_rune_height:
+            return False  # Skip check if box is out of range
 
-                return True
-            else:
-                return False
+        # Extract ROI near player
+        img_roi = self.img_frame[y0:y1, x0:x1]
+
+        # Match each rune part separately
+        matches = []
+        for i, img_rune in enumerate(self.img_runes):
+            mask = get_mask(img_rune, (0, 255, 0))
+            loc, score, _ = find_pattern_sqdiff(img_roi, img_rune, mask=mask)
+            matches.append((i, loc, score, img_rune.shape))
+
+        # Matches box debug
+        # for i, (part_idx, loc, score, shape) in enumerate(matches):
+        #     draw_rectangle(
+        #         self.img_frame_debug,
+        #         (x0 + loc[0], y0 + loc[1]),
+        #         shape,
+        #         (255, 255, 0),
+        #         f"{i},{round(score, 2)}",
+        #         thickness=1,
+        #         text_height=0.4
+        #     )
+
+        # Check scores and alignment
+        detect_thres = self.cfg.rune_detect_diff_thres
+
+        # Filter out good matches
+        good_matches = [
+            (i, loc, score, shape)
+            for (i, loc, score, shape) in matches
+            if score < detect_thres
+        ]
+
+        # Remove overlapping matches
+        good_matches = nms_matches(good_matches)
+
+        # Require at least 2 rune parts
+        if len(good_matches) < 2:
+            return False
+
+        # Horizontal: max distance between part's centers are small
+        x_centers = [x0 + loc[0] + shape[1] // 2 for (_, loc, _, shape) in good_matches]
+        if max(x_centers) - min(x_centers) > 10:
+            return False
+
+        # Vertical: check if all Y's are strictly increasing
+        ys = [y0 + loc[1] for (_, loc, _, _) in good_matches]
+        if not all(ys[i] < ys[i + 1] for i in range(len(ys) - 1)):
+            return False
+
+        logger.info(f"[Rune Detect] Found rune parts near player with scores:"
+                    f" {[round(s, 2) for (_, _, s, _) in matches]}")
+
+        # Draw all parts on debug window
+        for (i, loc, score, shape) in matches:
+            draw_rectangle(
+                self.img_frame_debug,
+                (x0 + loc[0], y0 + loc[1]),
+                shape,
+                (255, 0, 255),
+                f"{i},{round(score, 2)}",
+                text_height=0.5,
+                thickness=1
+            )
+        screenshot(self.img_frame_debug, "rune_detected")
+        return True
 
     def is_in_rune_game(self):
         '''
@@ -1119,14 +1157,13 @@ class MapleStoryBot:
             self.switch_status("near_rune")
 
         # Check whether we entered the rune mini-game
-        if self.status == "near_rune":
+        if self.status == "near_rune" and (not self.args.disable_control):
             self.kb.set_command("stop") # stop character
             time.sleep(0.1) # Wait for character to stop
             self.kb.disable() # Disable kb thread during rune solving
 
             # Attempt to trigger rune
-            if not self.args.disable_control:
-                self.kb.press_key("up", 0.02)
+            self.kb.press_key("up", 0.02)
             time.sleep(1) # Wait for rune game to pop up
 
             # If entered the game, start solving rune
@@ -1310,6 +1347,11 @@ class MapleStoryBot:
         elif self.status == "finding_rune":
             if self.is_player_stuck():
                 command = self.get_random_action()
+
+            # If the HP is reduced switch to hurting (other player probably help solved the rune)
+            if time.time() - self.health_monitor.last_hp_reduce_time > 3:
+                self.switch_status("hunting")
+
             # Check if finding rune timeout
             if time.time() - self.t_last_switch_status > self.cfg.rune_finding_timeout:
                 self.rune_detect_level = 0 # reset level

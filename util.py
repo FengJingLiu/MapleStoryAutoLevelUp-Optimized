@@ -386,3 +386,40 @@ def get_bar_ratio(img):
     fill_width = total_width - unfill_pixel_cnt
     fill_ratio = fill_width / total_width if total_width > 0 else 0.0
     return fill_ratio
+
+def nms_matches(matches, iou_thresh=0.0):
+    '''
+    Apply non-maximum suppression to remove overlapping matches.
+
+    Args:
+        matches: List of tuples (idx, loc, score, shape)
+        iou_thresh: IoU threshold to trigger suppression (default 0.0 = any overlap)
+
+    Returns:
+        List of filtered matches (same format as input)
+    '''
+    filtered = matches.copy()
+    i = 0
+    while i < len(filtered):
+        j = i + 1
+        while j < len(filtered):
+            _, loc_i, score_i, shape_i = filtered[i]
+            _, loc_j, score_j, shape_j = filtered[j]
+
+            box_i = (loc_i[0], loc_i[1],
+                     loc_i[0] + shape_i[1], loc_i[1] + shape_i[0])
+            box_j = (loc_j[0], loc_j[1],
+                     loc_j[0] + shape_j[1], loc_j[1] + shape_j[0])
+
+            if get_iou(box_i, box_j) > iou_thresh:
+                if score_i > score_j:
+                    filtered.pop(i)
+                    i -= 1
+                    break
+                else:
+                    filtered.pop(j)
+                    j -= 1
+            j += 1
+        i += 1
+
+    return filtered

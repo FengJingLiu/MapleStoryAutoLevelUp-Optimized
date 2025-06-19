@@ -24,6 +24,7 @@ class HealthMonitor:
         self.exp_ratio = 1.0
         self.last_heal_time = 0
         self.last_mp_time = 0
+        self.last_hp_reduce_time = 0
 
         # Frame data (will be updated by main thread)
         self.img_frame = None
@@ -167,6 +168,9 @@ class HealthMonitor:
                 # Get current HP/MP ratios
                 hp_ratio, mp_ratio, exp_ratio = self.get_hp_mp_exp_ratio()
                 if hp_ratio is not None:
+                    # Check if HP bar has reduced
+                    if self.hp_ratio > hp_ratio:
+                        self.last_hp_reduce_time = time.time()
                     self.hp_ratio = hp_ratio
                 if mp_ratio is not None:
                     self.mp_ratio = mp_ratio
