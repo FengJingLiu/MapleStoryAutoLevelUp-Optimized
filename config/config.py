@@ -75,6 +75,8 @@ class Config:
     # If you find the nametag is cached, but the location is incorrect.
     # Disable this feature by setting nametag_global_thres = 0.0
     nametag_global_thres = 0.2
+    nametag_split_width = 30 # pixel, vertically split nametag
+    nametag_detection_mode = "grayscale" # "grayscale", "white_mask"
 
     # ────────────────
     # Camera

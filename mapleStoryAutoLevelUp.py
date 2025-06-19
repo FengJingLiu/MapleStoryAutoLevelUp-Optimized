@@ -171,17 +171,35 @@ class MapleStoryBot:
         Returns:
             loc_player (tuple): The (x, y) coordinates of the player's estimated location.
         '''
-        img_roi = self.img_frame_gray[self.cfg.camera_ceiling:self.cfg.camera_floor, :]
+        # Get camera region in the game window
+        img_camera = self.img_frame_gray[self.cfg.camera_ceiling:self.cfg.camera_floor, :]
 
-        # Pad search region to avoid edge cut-off issue (full template size)
+        # Get nametag image and search image
+        if self.cfg.nametag_detection_mode == "white_mask":
+            # Apply Gaussian blur for smoother white detection
+            img_camera = cv2.GaussianBlur(img_camera, (3, 3), 0)
+            img_nametag = cv2.GaussianBlur(self.img_nametag_gray, (3, 3), 0)
+            lower_white, upper_white = (150, 255)
+            img_roi = cv2.inRange(img_camera, lower_white, upper_white)
+            img_nametag  = cv2.inRange(img_nametag, lower_white, upper_white)
+        elif self.cfg.nametag_detection_mode == "grayscale":
+            img_roi = img_camera
+            img_nametag = self.img_nametag_gray
+        else:
+            logger.error(f"Unsupported nametag detection mode: {self.cfg.nametag_detection_mode}")
+            return
+        # cv2.imshow("img_roi", img_roi)
+        # cv2.imshow("img_nametag", img_nametag)
+
+        # Pad search region to deal with fail detection when player is at map edge
         (pad_y, pad_x) = self.img_nametag.shape[:2]
-        img_roi_padded = cv2.copyMakeBorder(
+        img_roi = cv2.copyMakeBorder(
             img_roi,
             pad_y, pad_y, pad_x, pad_x,
             borderType=cv2.BORDER_REPLICATE  # replicate border for safe matching
         )
 
-        # Adjust last frame name tag location
+        # Get last frame name tag location
         if self.is_first_frame:
             last_result = None
         else:
@@ -190,61 +208,65 @@ class MapleStoryBot:
                 self.loc_nametag[1] - self.cfg.camera_ceiling + pad_y
             )
 
-        # Split nametag into left and right half, detect seperately and pick highest score
-        # This localization method is more robust for occluded nametag
-        h, w = self.img_nametag_gray.shape
-        mask_full = get_mask(self.img_nametag, (0, 255, 0))
-        nametag_variants = {
-            "left": {
-                "img_pattern": self.img_nametag_gray[:, :w // 2],
-                "mask": mask_full[:, :w // 2],
-                "last_result": last_result,
-                "score_penalty": 0.0
-            },
-            "right": {
-                "img_pattern": self.img_nametag_gray[:, w // 2:],
-                "mask": mask_full[:, w // 2:],
-                "last_result": (last_result[0] + w // 2, last_result[1]) if last_result else None,
-                "score_penalty": 0.0
-            }
-        }
+        # Get number of splits
+        h, w = img_nametag.shape
+        num_splits = max(1, w // self.cfg.nametag_split_width)
+        w_split = w // num_splits
 
-        # Match template for each split nametag
+        # Get nametag's background mask
+        mask = get_mask(self.img_nametag, (0, 255, 0))
+
+        # Vertically split the nametag image
+        nametag_splits = {}
+        for i in range(num_splits):
+            x_s = i * w_split
+            x_e = (i + 1) * w_split if i < num_splits - 1 else w
+            nametag_splits[f"{i+1}/{num_splits}"] = {
+                "img": img_nametag[:, x_s:x_e],
+                "mask": mask[:, x_s:x_e],
+                "last_result": (
+                    (last_result[0] + x_s, last_result[1]) if last_result else None
+                ),
+                "score_penalty": 0.0,
+                "offset_x": x_s
+            }
+
+        # Match tempalte
         matches = []
-        for tag_type, data in nametag_variants.items():
+        for tag_type, split in nametag_splits.items():
             loc, score, is_cached = find_pattern_sqdiff(
-                img_roi_padded,
-                data["img_pattern"],
-                last_result=data["last_result"],
-                mask=data["mask"],
+                img_roi,
+                split["img"],
+                last_result=split["last_result"],
+                mask=split["mask"],
                 global_threshold=self.cfg.nametag_global_thres
             )
-            w_match = data["img_pattern"].shape[1]
-            h_match = data["img_pattern"].shape[0]
-            score += data["score_penalty"]
-            matches.append((tag_type, loc, score, w_match, h_match, is_cached))
+            w_match = split["img"].shape[1]
+            h_match = split["img"].shape[0]
+            score += split["score_penalty"]
+            matches.append((tag_type, loc, score, w_match, h_match, is_cached, split["offset_x"]))
 
-        # Choose the best match
-        matches.sort(key=lambda x: (not x[5], x[2]))
-        tag_type, loc_nametag, score, w_match, h_match, is_cached = matches[0]
-        if tag_type == "right":
-            loc_nametag = (loc_nametag[0] - w_match, loc_nametag[1])
+        # Select best match and fix offset:
+        matches.sort(key=lambda x: (not x[5], x[2]))  # prefer cached, then low score
+        tag_type, loc_nametag, score, w_match, h_match, is_cached, offset_x = matches[0]
 
-        # Convert back to original (unpadded) coordinates
+        # Adjust match location back to full nametag coordinates
+        loc_nametag = (loc_nametag[0] - offset_x, loc_nametag[1])
         loc_nametag = (
             loc_nametag[0] - pad_x,
             loc_nametag[1] - pad_y + self.cfg.camera_ceiling
         )
 
-        # Update name tag location if confidence is good
+        # Only update nametag location when score is good enough
         if score < self.cfg.nametag_diff_thres:
             self.loc_nametag = loc_nametag
+
         loc_player = (
             self.loc_nametag[0] - self.cfg.nametag_offset[0],
             self.loc_nametag[1] - self.cfg.nametag_offset[1]
         )
 
-        # Draw name tag detection box for debug
+        # Draw name tag detection box for debugging
         draw_rectangle(self.img_frame_debug, self.loc_nametag,
                        self.img_nametag.shape, (0, 255, 0), "")
         text = f"NameTag,{round(score, 2)}," + \
@@ -255,7 +277,7 @@ class MapleStoryBot:
                      self.loc_nametag[1] + self.img_nametag.shape[0] + 30),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
 
-        # Draw player center
+        # Draw player center for debugging
         cv2.circle(self.img_frame_debug,
                 loc_player, radius=3,
                 color=(0, 0, 255), thickness=-1)
