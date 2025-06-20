@@ -8,6 +8,10 @@ An auto leveling up script for Maple Story Artale
 
 This work purely-based on Computer Vision technique, it doesn't required access game's memory. Instead, it detects image pattern(i.e., player nametag and monsters) on game window screen and send simulated keyboard command to the game to control player's character.
 
+✅ No memory access required
+✅ Purely screen-based CV detection
+✅ Simulates real keyboard input
+
 ## Environment
 Windows11
 
@@ -24,15 +28,13 @@ pip install -r requirements.txt
 1. Run MapleStory and make sure the game is on windowed mode and game window size is resized to smallest
 2. Turn on minimap on the top-left corner of the game window
 3. Execute the script and press 'F2' to take a screenshot
-4. Edit saved screenshot and crop your character nametag and use it to replace name_tag.png
-
-## Config
-Please check config.py before running, customized to your keyboard settings
+4. Edit saved screenshot, crop your character nametag, mark background green, and use it to replace name_tag.png
+5. Set up your own key-binding at config/config_edit_me.yaml
 
 ## Run
 Run command
 ```
-python mapleStoryAutoLevelUp.py --map <name_of_the_map> --monsters <name_of_the_monsters> --attack <skill>
+python mapleStoryAutoLevelUp.py --map <map_name> --monsters <monster1,monster2,...> --attack <attack_mode>
 ```
 Exmaple for north forest training ground 2(北部森林訓練場2)
 ```
@@ -56,8 +58,9 @@ python mapleStoryAutoLevelUp.py --map lost_time_1 --monsters evolved_ghost --att
 ```
 Note that after script execution, you need to click back to Maple Story game window (Make sure the game windows is your active window)
 
-You can press 'F1' to pasue/continue the script control
-You can press 'F2' to take a screenshot, which will save to scrennshot/
+Press 'F1' to pasue/continue the script control
+
+Press 'F2' to take a screenshot, which will be saved to scrennshot/
 
 ## Supported Map 
 1. north forest training ground 2(北部森林訓練場2)
@@ -91,28 +94,23 @@ You can press 'F2' to take a screenshot, which will save to scrennshot/
 15. ribbon pig (緞帶肥肥)
 16. cold eye (冰獨眼獸)
 
-If you want to try this script on other map/monster, you need to add new map to minimaps/ and add monsters icon to monster/
 
-## Route recorder
-To make the route design easier, here is a new script that listen to player's keyboard and record
-the player input on route map.
+## Want to Make a New Map? → Route Recorder
 
-To invoke the route recorder, please use the following command:
+To design a custom route more easily, you can use the `routeRecorder.py` script.
+It listens to your keyboard inputs and records them onto a route map.
+
+Use the following command in your terminal to start recording:
+
 ```
 python routeRecorder.py --new_map <map_directory_name>
-
-Example:
-python routeRecorder.py --new_map my_new_map
 ```
-while running this recoder
-
-Press 'F1' to stop/resume the recoder
-
-Press 'F2' to take screenshot
-
-Press 'F3' to save current route map and start record a new one
-
-Press "F4" to save current map
+| Key  | Action                                     |
+| ---- | ------------------------------------------ |
+| `F1` | Pause or resume the recorder               |
+| `F2` | Take a screenshot (saved to `screenshot/`) |
+| `F3` | Save current route map and start a new one |
+| `F4` | Save the current map to map.png            |
 
 ## Auto Download Monster
 
@@ -146,8 +144,3 @@ python mapleStoryAutoLevelUp_legacy.py --map <name_of_the_map> --monsters <name_
 Exmaple:
 python mapleStoryAutoLevelUp_legacy.py --map lost_time_1 --monsters evolved_ghost --attack aoe_skill
 ```
-
-
-
-
-

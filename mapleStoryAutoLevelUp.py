@@ -162,7 +162,8 @@ class MapleStoryBot:
 
         # Start health monitoring thread
         self.health_monitor = HealthMonitor(self.cfg, args, self.kb)
-        self.health_monitor.start()
+        if self.cfg["health_monitor"]["enable"]:
+            self.health_monitor.start()
 
     def get_player_location_by_nametag(self):
         '''

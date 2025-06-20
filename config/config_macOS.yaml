@@ -1,3 +1,6 @@
+# ====== macOS Configuration ======
+# The following configuration is only for macOS
+
 game_window:
   title: "MapleStory Worlds"
   size: [776, 1280]
@@ -7,4 +10,4 @@ monster_detect:
 
 minimap:
   player_color: [84, 255, 255] # BGR
-  debug_window_upscale: 2 # upscale 4 time for debug route image
+  debug_window_upscale: 2

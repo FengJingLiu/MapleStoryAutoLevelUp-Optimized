@@ -101,9 +101,10 @@ class KeyBoardController():
         '''
         Simulates a key press for a specified duration
         '''
-        pyautogui.keyDown(key)
-        time.sleep(duration)
-        pyautogui.keyUp(key)
+        if key:
+            pyautogui.keyDown(key)
+            time.sleep(duration)
+            pyautogui.keyUp(key)
 
     def disable(self):
         '''
