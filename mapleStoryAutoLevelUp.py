@@ -429,15 +429,15 @@ class MapleStoryBot:
             x1 = min(self.img_frame.shape[1], self.loc_player[0] + dx)
             y0 = max(0, self.loc_player[1] - dy)
             y1 = min(self.img_frame.shape[0], self.loc_player[1] + dy)
-        elif self.args.attack == "magic_claw":
+        elif self.args.attack == "directional":
             if is_left:
-                x0 = self.loc_player[0] - self.cfg["attack"]["range_x"]
+                x0 = self.loc_player[0] - self.cfg["directional_attack"]["range_x"]
                 x1 = self.loc_player[0]
             else:
                 x0 = self.loc_player[0]
-                x1 = x0 + self.cfg["attack"]["range_x"]
-            y0 = self.loc_player[1] - self.cfg["attack"]["range_y"] // 2
-            y1 = y0 + self.cfg["attack"]["range_y"]
+                x1 = x0 + self.cfg["directional_attack"]["range_x"]
+            y0 = self.loc_player[1] - self.cfg["directional_attack"]["range_y"] // 2
+            y1 = y0 + self.cfg["directional_attack"]["range_y"]
         else:
             logger.error(f"Unsupported attack mode: {self.args.attack}")
             return None
@@ -446,7 +446,7 @@ class MapleStoryBot:
         draw_rectangle(
             self.img_frame_debug, (x0, y0),
             (y1-y0, x1-x0),
-            (0, 0, 255), "Attack Box"
+            (0, 0, 255), "Attack Range"
         )
 
         nearest_monster = None
@@ -939,7 +939,7 @@ class MapleStoryBot:
             (0, 0, 255), str(round(best_score, 2))
         )
 
-        if best_score < self.cfg["rune_solver"]["diff_thres"]:
+        if best_score < self.cfg["rune_solver"]["arrow_box_diff_thres"]:
             logger.info(f"Arrow screen detected with score({score})")
             return True
         return False
@@ -1191,9 +1191,9 @@ class MapleStoryBot:
         if self.args.attack == "aoe_skill":
             dx = self.cfg["aoe_skill"]["range_x"] // 2 + margin
             dy = self.cfg["aoe_skill"]["range_y"] // 2 + margin
-        elif self.args.attack == "magic_claw":
-            dx = self.cfg["attack"]["range_x"] + margin
-            dy = self.cfg["attack"]["range_y"] + margin
+        elif self.args.attack == "directional":
+            dx = self.cfg["directional_attack"]["range_x"] + margin
+            dy = self.cfg["directional_attack"]["range_y"] + margin
         else:
             logger.error(f"Unsupported attack mode: {self.args.attack}")
             return
@@ -1213,7 +1213,7 @@ class MapleStoryBot:
                 attack_direction = "I don't care"
             nearest_monster = self.get_nearest_monster()
 
-        elif self.args.attack == "magic_claw":
+        elif self.args.attack == "directional":
             # Get nearest monster to player
             monster_left  = self.get_nearest_monster(is_left = True)
             monster_right = self.get_nearest_monster(is_left = False)
@@ -1343,15 +1343,15 @@ class MapleStoryBot:
                 pass # Don't attack or heal while character is on rope or jumping
             # Note: HP/MP monitoring is now handled by separate HealthMonitor thread
             elif attack_direction == "I don't care" and nearest_monster is not None and \
-                time.time() - self.t_last_attack > self.cfg["attack"]["cooldown"]:
+                time.time() - self.t_last_attack > self.cfg["directional_attack"]["cooldown"]:
                 command = "attack"
                 self.t_last_attack = time.time()
             elif attack_direction == "left" and nearest_monster is not None and \
-                time.time() - self.t_last_attack > self.cfg["attack"]["cooldown"]:
+                time.time() - self.t_last_attack > self.cfg["directional_attack"]["cooldown"]:
                 command = "attack left"
                 self.t_last_attack = time.time()
             elif attack_direction == "right" and nearest_monster is not None and \
-                time.time() - self.t_last_attack > self.cfg["attack"]["cooldown"]:
+                time.time() - self.t_last_attack > self.cfg["directional_attack"]["cooldown"]:
                 command = "attack right"
                 self.t_last_attack = time.time()
 
@@ -1451,8 +1451,8 @@ if __name__ == '__main__':
     parser.add_argument(
         '--attack',
         type=str,
-        default='magic_claw',
-        help='Choose attack method, "magic_claw", "aoe_skill"'
+        default='directional',
+        help='Choose attack method, "directional", "aoe_skill"'
     )
 
     parser.add_argument(
@@ -1488,7 +1488,7 @@ if __name__ == '__main__':
 
             # Cap FPS to save system resource
             frame_duration = time.time() - t_start
-            target_duration = 1.0 / mapleStoryBot.cfg["system"]["fps_limit"]
+            target_duration = 1.0 / mapleStoryBot.cfg["system"]["fps_limit_main"]
             if frame_duration < target_duration:
                 time.sleep(target_duration - frame_duration)
 

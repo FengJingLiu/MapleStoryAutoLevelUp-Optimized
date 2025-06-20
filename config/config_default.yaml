@@ -9,7 +9,7 @@
 
 key:
   aoe_skill: "q"         # Key to trigger AoE skill (e.g., Monk's AoE heal or Mage's AoE attack)
-  attack: "w"        # Key to trigger the basic attack skill, like Mage's Magic Claw
+  directional_attack: "w"        # Key to trigger the basic attack skill, like Mage's Magic Claw
   teleport: ""           # Key to trigger Mage's teleport skill (set to "" to disable)
   jump: "space"          # Key for jumping
   add_hp: "1"             # Key to use a health potion.
@@ -73,7 +73,7 @@ camera:
 # ────────────────
 # Attack Settings
 # ────────────────
-attack:
+directional_attack:
   # magic claw skill attack range relative to player position
   range_x: 350 # pixels (horizontal range)
   range_y: 70  # pixels (vertical range)
@@ -173,6 +173,7 @@ health_monitor:
   # Health monitor cooldowns (to prevent spam)
   add_hp_cooldown: 0.5  # seconds between heals
   add_mp_cooldown: 0.5    # seconds between MP potions
+  fps_limit: 20
 
 # ────────────────
 # Mini-Map
@@ -212,8 +213,9 @@ game_window:
 # FPS(Frame per Second) limit for main thread
 # TODO: Make other thread fps configurable
 system:
-  fps_limit: 10
+  fps_limit_main: 10
   fps_limit_keyboard_controller: 30
+  fps_limit_window_capturor: 15
   key_debounce_interval: 1
   show_debug_window: True # False, disable debug window to save system resource
 

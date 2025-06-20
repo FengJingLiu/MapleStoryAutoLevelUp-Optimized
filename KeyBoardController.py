@@ -58,8 +58,8 @@ class KeyBoardController():
         self.attack_key = ""
         if args.attack == "aoe_skill":
             self.attack_key = cfg["key"]["aoe_skill"]
-        elif args.attack == "magic_claw":
-            self.attack_key = cfg["key"]["attack"]
+        elif args.attack == "directional":
+            self.attack_key = cfg["key"]["directional_attack"]
         else:
             logger.error(f"Unexpected attack argument: {args.attack}")
 
@@ -157,7 +157,6 @@ class KeyBoardController():
         # Also release attack keys to stop any ongoing attacks
         pyautogui.keyUp(self.attack_key)
 
-
     def limit_fps(self):
         '''
         Limit FPS
@@ -184,7 +183,6 @@ class KeyBoardController():
                 continue
 
             # Buff skill
-            # if not self.is_in_buffer_skill_active_duration():
             for i, buff_skill_key in enumerate(self.cfg["buff_skill"]["keys"]):
                 cooldown = self.cfg["buff_skill"]["cooldown"][i]
                 if time.time() - self.t_last_buff_cast[i] >= cooldown and \
@@ -273,7 +271,7 @@ class KeyBoardController():
             elif self.command == "attack left":
                 pyautogui.keyUp("right")
                 pyautogui.keyDown("left")
-                time.sleep(self.cfg["attack"]["character_turn_delay"])  # Small delay for character to turn
+                time.sleep(self.cfg["directional_attack"]["character_turn_delay"])  # Small delay for character to turn
                 self.press_key(self.attack_key)
                 pyautogui.keyUp("left")
                 self.t_last_action = time.time()
@@ -281,7 +279,7 @@ class KeyBoardController():
             elif self.command == "attack right":
                 pyautogui.keyUp("left")
                 pyautogui.keyDown("right")
-                time.sleep(self.cfg["attack"]["character_turn_delay"])  # Small delay for character to turn
+                time.sleep(self.cfg["directional_attack"]["character_turn_delay"])  # Small delay for character to turn
                 self.press_key(self.attack_key)
                 pyautogui.keyUp("right")
                 self.t_last_action = time.time()

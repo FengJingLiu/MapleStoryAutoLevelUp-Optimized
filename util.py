@@ -24,12 +24,12 @@ def is_windows():
     return OS_NAME == 'Windows'
 
 def load_yaml(path):
-    with open(path, 'r') as f:
+    with open(path, 'r', encoding='utf-8') as f:
         data = yaml.safe_load(f) or {}
         return convert_lists_to_tuples(data)
 
 def save_yaml(data, path):
-    with open(path, 'w') as f:
+    with open(path, 'w', encoding='utf-8') as f:
         yaml.dump(data, f, default_flow_style=False)
 
 def override_cfg(cfg, cfg_override):

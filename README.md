@@ -36,11 +36,11 @@ python mapleStoryAutoLevelUp.py --map <name_of_the_map> --monsters <name_of_the_
 ```
 Exmaple for north forest training ground 2(北部森林訓練場2)
 ```
-python mapleStoryAutoLevelUp.py --map north_forest_training_ground_2 --monsters green_mushroom,spike_mushroom --attack magic_claw
+python mapleStoryAutoLevelUp.py --map north_forest_training_ground_2 --monsters green_mushroom,spike_mushroom --attack directional
 ```
 Exmaple for fire land 2(火焰之地2)
 ```
-python mapleStoryAutoLevelUp.py --map fire_land_2 --monsters fire_pig,black_axe_stump --attack magic_claw
+python mapleStoryAutoLevelUp.py --map fire_land_2 --monsters fire_pig,black_axe_stump --attack directional
 ```
 Example for ant_cave_2(螞蟻洞2)
 ```
