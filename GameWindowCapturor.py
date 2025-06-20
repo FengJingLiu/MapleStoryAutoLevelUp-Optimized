@@ -18,7 +18,7 @@ class GameWindowCapturor:
     '''
     def __init__(self, cfg):
         self.cfg = cfg
-        self.window_title = cfg.game_window_title
+        self.window_title = cfg["game_window"]["title"]
         self.frame = None
         self.lock = threading.Lock()
 
@@ -33,7 +33,7 @@ class GameWindowCapturor:
         time.sleep(0.1)
 
         # Check is game windows size is as expected
-        if self.frame.shape[:2] != cfg.window_size:
+        if self.frame.shape[:2] != cfg["game_window"]["size"]:
             logger.error(f"Invalid window size: {self.frame.shape[:2]} (expected {cfg.window_size})")
             logger.error("Please use windowed mode & smallest resolution.")
             raise RuntimeError(f"Unexpected window size: {self.frame.shape[:2]}")

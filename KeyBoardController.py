@@ -5,6 +5,7 @@ KeyBoardController
 import threading
 import time
 
+# Library import
 import pyautogui
 from pynput import keyboard
 
@@ -26,7 +27,7 @@ class KeyBoardController():
     def __init__(self, cfg, args):
         self.cfg = cfg
         self.command = ""
-        self.window_title = cfg.game_window_title
+        self.window_title = cfg["game_window"]["title"]
         self.fps = 0 # Frame per seconds
         # Timer
         self.t_last_up = 0.0
@@ -35,15 +36,14 @@ class KeyBoardController():
         self.t_last_screenshot = 0.0
         self.t_last_run = time.time()
         self.t_last_action = 0.0 # Last time character perform action(attack, cast spell, ...)
-        self.t_last_buff_cast = [0] * len(self.cfg.buff_skill_keys) # Last time cast buff skill
+        self.t_last_buff_cast = [0] * len(self.cfg["buff_skill"]["keys"]) # Last time cast buff skill
         # Flags
         self.is_enable = True
         self.is_need_screen_shot = False
         self.is_need_toggle = False
         # Parameters
-        self.debounce_interval = 1 # second
-        self.fps_limit = 30
-
+        self.debounce_interval = self.cfg["system"]["key_debounce_interval"]
+        self.fps_limit = self.cfg["system"]["fps_limit_keyboard_controller"]
 
         # use 'ctrl', 'alt' for mac, because it's hard to get around
         # macOS's security settings
@@ -57,9 +57,9 @@ class KeyBoardController():
         # set up attack key
         self.attack_key = ""
         if args.attack == "aoe_skill":
-            self.attack_key = cfg.aoe_skill_key
+            self.attack_key = cfg["key"]["aoe_skill"]
         elif args.attack == "magic_claw":
-            self.attack_key = cfg.magic_claw_key
+            self.attack_key = cfg["key"]["attack"]
         else:
             logger.error(f"Unexpected attack argument: {args.attack}")
 
@@ -185,10 +185,10 @@ class KeyBoardController():
 
             # Buff skill
             # if not self.is_in_buffer_skill_active_duration():
-            for i, buff_skill_key in enumerate(self.cfg.buff_skill_keys):
-                cooldown = self.cfg.buff_skill_cooldown[i]
+            for i, buff_skill_key in enumerate(self.cfg["buff_skill"]["keys"]):
+                cooldown = self.cfg["buff_skill"]["cooldown"][i]
                 if time.time() - self.t_last_buff_cast[i] >= cooldown and \
-                    time.time() - self.t_last_action > self.cfg.buff_skill_action_cooldown:
+                    time.time() - self.t_last_action > self.cfg["buff_skill"]["action_cooldown"]:
                     self.press_key(buff_skill_key)
                     logger.info(f"[Buff] Press buff skill key: '{buff_skill_key}' (cooldown: {cooldown}s)")
                     # Reset timers
@@ -197,11 +197,11 @@ class KeyBoardController():
                     break
 
             # check if is needed to release 'Up' key
-            if time.time() - self.t_last_up > self.cfg.up_drag_duration:
+            if time.time() - self.t_last_up > self.cfg["route"]["up_drag_duration"]:
                 pyautogui.keyUp("up")
 
             # check if is needed to release 'Down' key
-            if time.time() - self.t_last_down > self.cfg.down_drag_duration:
+            if time.time() - self.t_last_down > self.cfg["route"]["down_drag_duration"]:
                 pyautogui.keyUp("down")
 
             if self.command == "walk left":
@@ -215,26 +215,26 @@ class KeyBoardController():
             elif self.command == "jump left":
                 pyautogui.keyUp("right")
                 pyautogui.keyDown("left")
-                self.press_key(self.cfg.jump_key)
+                self.press_key(self.cfg["key"]["jump"])
                 pyautogui.keyUp("left")
 
             elif self.command == "jump right":
                 pyautogui.keyUp("left")
                 pyautogui.keyDown("right")
-                self.press_key(self.cfg.jump_key)
+                self.press_key(self.cfg["key"]["jump"])
                 pyautogui.keyUp("right")
 
             elif self.command == "jump down":
                 pyautogui.keyUp("right")
                 pyautogui.keyUp("left")
                 pyautogui.keyDown("down")
-                self.press_key(self.cfg.jump_key)
+                self.press_key(self.cfg["key"]["jump"])
                 pyautogui.keyUp("down")
 
             elif self.command == "jump":
                 pyautogui.keyUp("left")
                 pyautogui.keyUp("right")
-                self.press_key(self.cfg.jump_key)
+                self.press_key(self.cfg["key"]["jump"])
 
             elif self.command == "up":
                 pyautogui.keyUp("down")
@@ -249,21 +249,21 @@ class KeyBoardController():
             if self.command == "teleport left":
                 pyautogui.keyUp("right")
                 pyautogui.keyDown("left")
-                self.press_key(self.cfg.teleport_key)
+                self.press_key(self.cfg["key"]["teleport"])
 
             elif self.command == "teleport right":
                 pyautogui.keyUp("left")
                 pyautogui.keyDown("right")
-                self.press_key(self.cfg.teleport_key)
+                self.press_key(self.cfg["key"]["teleport"])
 
             elif self.command == "teleport up":
                 pyautogui.keyDown("up")
-                self.press_key(self.cfg.teleport_key)
+                self.press_key(self.cfg["key"]["teleport"])
                 pyautogui.keyUp("up")
 
             elif self.command == "teleport down":
                 pyautogui.keyDown("down")
-                self.press_key(self.cfg.teleport_key)
+                self.press_key(self.cfg["key"]["teleport"])
                 pyautogui.keyUp("down")
 
             elif self.command == "attack":
@@ -273,7 +273,7 @@ class KeyBoardController():
             elif self.command == "attack left":
                 pyautogui.keyUp("right")
                 pyautogui.keyDown("left")
-                time.sleep(self.cfg.character_turn_delay)  # Small delay for character to turn
+                time.sleep(self.cfg["attack"]["character_turn_delay"])  # Small delay for character to turn
                 self.press_key(self.attack_key)
                 pyautogui.keyUp("left")
                 self.t_last_action = time.time()
@@ -281,7 +281,7 @@ class KeyBoardController():
             elif self.command == "attack right":
                 pyautogui.keyUp("left")
                 pyautogui.keyDown("right")
-                time.sleep(self.cfg.character_turn_delay)  # Small delay for character to turn
+                time.sleep(self.cfg["attack"]["character_turn_delay"])  # Small delay for character to turn
                 self.press_key(self.attack_key)
                 pyautogui.keyUp("right")
                 self.t_last_action = time.time()
@@ -291,11 +291,11 @@ class KeyBoardController():
                 self.command = ""  # Clear command after stopping
 
             elif self.command == "heal":
-                self.press_key(self.cfg.heal_key)
+                self.press_key(self.cfg["key"]["add_hp"])
                 self.command = ""
 
             elif self.command == "add mp":
-                self.press_key(self.cfg.add_mp_key)
+                self.press_key(self.cfg["key"]["add_mp"])
                 self.command = ""
 
             else:

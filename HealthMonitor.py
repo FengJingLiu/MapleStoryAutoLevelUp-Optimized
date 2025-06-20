@@ -180,15 +180,15 @@ class HealthMonitor:
                 current_time = time.time()
 
                 # Check if need to heal (with cooldown)
-                if (self.hp_ratio <= self.cfg.heal_ratio and
-                    current_time - self.last_heal_time > self.cfg.heal_cooldown):
+                if (self.hp_ratio <= self.cfg["health_monitor"]["add_hp_ratio"] and
+                    current_time - self.last_heal_time > self.cfg["health_monitor"]["add_hp_cooldown"]):
                     self._heal()
                     self.last_heal_time = current_time
                     logger.info(f"[Health Monitor]: Auto heal triggered, HP: {self.hp_ratio*100:.1f}%")
 
                 # Check if need MP (with cooldown)
-                if (self.mp_ratio <= self.cfg.add_mp_ratio and
-                    current_time - self.last_mp_time > self.cfg.mp_cooldown):
+                if (self.mp_ratio <= self.cfg["health_monitor"]["add_mp_ratio"] and
+                    current_time - self.last_mp_time > self.cfg["health_monitor"]["add_mp_cooldown"]):
                     self._add_mp()
                     self.last_mp_time = current_time
                     logger.info(f"[Health Monitor]: Auto MP triggered, MP: {self.mp_ratio*100:.1f}%")
@@ -205,7 +205,7 @@ class HealthMonitor:
         Execute heal action
         '''
         try:
-            self.kb.press_key(self.cfg.heal_key, 0.05)
+            self.kb.press_key(self.cfg["key"]["add_hp"], 0.05)
         except Exception as e:
             logger.error(f"[Health Monitor]: Heal action failed: {e}")
 
@@ -214,6 +214,6 @@ class HealthMonitor:
         Execute MP recovery action
         '''
         try:
-            self.kb.press_key(self.cfg.add_mp_key, 0.05)
+            self.kb.press_key(self.cfg["key"]["add_mp"], 0.05)
         except Exception as e:
             logger.error(f"[Health Monitor]: MP action failed: {e}")

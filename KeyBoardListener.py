@@ -22,7 +22,7 @@ class KeyBoardListener():
         self.cfg = cfg
         self.t_last_run = time.time()
         self.is_enable = True
-        self.window_title = cfg.game_window_title
+        self.window_title = cfg["game_window"]["title"]
         self.debounce_interval = 1 # second
         self.is_need_screen_shot = False
         self.is_need_toggle = False

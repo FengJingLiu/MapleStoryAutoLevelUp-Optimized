@@ -1,11 +1,15 @@
+# Standard import
 import time
 import threading
+
+# Library import
 import mss
 import cv2
 import numpy as np
-from logger import logger
-from config.config import Config
 import Quartz
+
+# Local import
+from logger import logger
 
 def get_window_region(window_title):
     window_list = Quartz.CGWindowListCopyWindowInfo(
@@ -40,6 +44,8 @@ class GameWindowCapturor:
         self.frame = None
         self.lock = threading.Lock()
 
+        self.window_title = cfg["game_window"]["title"]
+
         # 使用 mss 來擷取特定螢幕區域
         self.capture = mss.mss()
 
@@ -73,9 +79,9 @@ class GameWindowCapturor:
         '''
         Update window region
         '''
-        self.region = get_window_region(self.cfg.game_window_title)
+        self.region = get_window_region(self.window_title)
         if self.region is None:
-            text = f"Cannot find window: {self.cfg.game_window_title}"
+            text = f"Cannot find window: {self.window_title}"
             logger.error(text)
             raise RuntimeError(text)
 
