@@ -3,9 +3,7 @@ Auto generate route map
 '''
 # Standard import
 import time
-import random
 import argparse
-import glob
 import sys
 import os
 import shutil
@@ -15,11 +13,10 @@ import numpy as np
 import cv2
 
 # local import
-from config.config import Config
 from logger import logger
-from util import find_pattern_sqdiff, draw_rectangle, screenshot, nms, \
-                load_image, get_mask, get_minimap_loc_size, get_player_location_on_minimap, \
-                to_opencv_hsv
+from util import find_pattern_sqdiff, draw_rectangle, screenshot, \
+                get_minimap_loc_size, get_player_location_on_minimap, \
+                to_opencv_hsv, load_yaml, override_cfg, is_mac
 from KeyBoardListener import KeyBoardListener
 from GameWindowCapturor import GameWindowCapturor
 
@@ -95,7 +92,8 @@ class RouteRecorder():
         update_img_frame_debug
         '''
         cv2.imshow("Game Window Debug",
-                   self.img_frame_debug[self.cfg.camera_ceiling:self.cfg.camera_floor, :])
+                   self.img_frame_debug[self.cfg["camera"]["y_start"]:
+                                        self.cfg["camera"]["y_end"], :])
         # Update FPS timer
         self.t_last_frame = time.time()
 
@@ -154,7 +152,6 @@ class RouteRecorder():
         '''
         Init MapleStoryBot
         '''
-        self.cfg = Config # Configuration
         self.args = args # User arguments
         self.idx_routes = 0 # Index of route map
         self.fps = 0 # Frame per second
@@ -179,6 +176,22 @@ class RouteRecorder():
         self.t_last_frame = time.time() # Last frame timer, for fps calculation
         self.t_last_draw_blob = time.time() # Last draw blob timer
 
+        # Load defautl yaml config
+        cfg = load_yaml("config/config_default.yaml")
+        # Override with platform config
+        if is_mac():
+            cfg = override_cfg(cfg, load_yaml("config/config_macOS.yaml"))
+        # Override with user customized config
+        self.cfg = override_cfg(cfg, load_yaml(f"config/config_{args.cfg}.yaml"))
+
+        # Parse color code
+        self.color_code = {
+            tuple(map(int, k.split(','))): v
+            for k, v in cfg["route"]["color_code"].items()
+        }
+
+        self.fps_limit = self.cfg["system"]["fps_limit_route_recorder"]
+
         # Check create new map directory
         map_dir = os.path.join("minimaps", args.new_map)
         if os.path.exists(map_dir):
@@ -201,10 +214,10 @@ class RouteRecorder():
     def ensure_img_map_capacity(self, x, y, h, w):
         '''
         Ensure that self.img_map is large enough to contain the region defined by (x, y, h, w).
-        Always add at least self.cfg.map_scan_padding when expanding in any direction.
+        Always add at least "map_padding" when expanding in any direction.
         '''
         map_h, map_w = self.img_map.shape[:2]
-        pad = self.cfg.map_scan_padding
+        pad = self.cfg["route_recoder"]["map_padding"]
 
         # Compute required expansion margins
         expand_top = pad - y if y < pad else 0
@@ -237,7 +250,7 @@ class RouteRecorder():
         """
         Set all pixels in self.img_map to black if they match any color in color_code (assumed RGB).
         """
-        for rgb in self.cfg.color_code.keys():
+        for rgb in self.color_code.keys():
             bgr = (rgb[2], rgb[1], rgb[0])  # Convert RGB → BGR
             mask = np.all(img == bgr, axis=2)
             img[mask] = (0, 0, 0)
@@ -275,7 +288,7 @@ class RouteRecorder():
 
             # copy minimap to map
             self.img_map = self.img_minimap.copy()
-            pad = self.cfg.map_scan_padding
+            pad = self.cfg["route_recoder"]["map_padding"]
             self.img_map = cv2.copyMakeBorder(
                 self.img_map,
                 top=pad, bottom=pad, left=pad, right=pad,
@@ -386,7 +399,7 @@ class RouteRecorder():
         # Update route image
         if self.is_enable and action != "":
             # Get color from action
-            dict_action_to_color = {v: k for k, v in self.cfg.color_code.items()}
+            dict_action_to_color = {v: k for k, v in self.color_code.items()}
             color_rgb = dict_action_to_color.get(action, None)
             color_bgr = (color_rgb[2], color_rgb[1], color_rgb[0])
 
@@ -394,7 +407,7 @@ class RouteRecorder():
             px, py = self.loc_player_global
             if is_draw_blob:
                 dt = time.time() - self.t_last_draw_blob
-                if dt > self.cfg.route_recoder_draw_blob_cooldown:
+                if dt > self.cfg["route_recoder"]["blob_cooldown"]:
                     # Draw a small filled circle at current position
                     cv2.circle(self.img_route,
                             (px, py),
@@ -447,8 +460,8 @@ class RouteRecorder():
         # Resize img_route_debug for better visualization
         self.img_route_debug = cv2.resize(
                     self.img_route_debug, (0, 0),
-                    fx=self.cfg.minimap_upscale_factor,
-                    fy=self.cfg.minimap_upscale_factor,
+                    fx=self.cfg["minimap"]["debug_window_upscale"],
+                    fy=self.cfg["minimap"]["debug_window_upscale"],
                     interpolation=cv2.INTER_NEAREST)
         cv2.imshow("Route Map Debug", self.img_route_debug)
 
@@ -464,6 +477,13 @@ if __name__ == '__main__':
         type=str,
         default='new_map',
         help='Specify the new map name'
+    )
+
+    parser.add_argument(
+        '--cfg',
+        type=str,
+        default='edit_me',
+        help='Choose customized config yaml file in config/'
     )
 
     try:
@@ -485,7 +505,7 @@ if __name__ == '__main__':
 
             # Cap FPS to save system resource
             frame_duration = time.time() - t_start
-            target_duration = 1.0 / routeRecorder.cfg.fps_limit
+            target_duration = 1.0 / routeRecorder.fps_limit
             if frame_duration < target_duration:
                 time.sleep(target_duration - frame_duration)
 

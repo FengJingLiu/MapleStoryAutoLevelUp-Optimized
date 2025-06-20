@@ -1,11 +1,15 @@
+# Standard import
 import time
 import threading
+
+# Library import
 import mss
 import cv2
 import numpy as np
-from logger import logger
-from config.config import Config
 import Quartz
+
+# Local import
+from logger import logger
 
 def get_window_region(window_title):
     window_list = Quartz.CGWindowListCopyWindowInfo(
@@ -40,6 +44,12 @@ class GameWindowCapturor:
         self.frame = None
         self.lock = threading.Lock()
 
+        self.window_title = cfg["game_window"]["title"]
+
+        self.fps = 0
+        self.fps_limit = cfg["system"]["fps_limit_window_capturor"]
+        self.t_last_run = 0.0
+
         # 使用 mss 來擷取特定螢幕區域
         self.capture = mss.mss()
 
@@ -52,8 +62,7 @@ class GameWindowCapturor:
         # Wait frame init
         time.sleep(0.1)
         while self.frame is None:
-            time.sleep(0.1)
-
+            self.limit_fps()
 
     def start_capture(self):
         '''
@@ -66,16 +75,16 @@ class GameWindowCapturor:
             # Update self.frame
             self.capture_frame()
 
-            # Cap FPS to 30
-            time.sleep(0.033)
+            # Limit FPS to save systme resources
+            self.limit_fps()
 
     def update_window_region(self):
         '''
         Update window region
         '''
-        self.region = get_window_region(self.cfg.game_window_title)
+        self.region = get_window_region(self.window_title)
         if self.region is None:
-            text = f"Cannot find window: {self.cfg.game_window_title}"
+            text = f"Cannot find window: {self.window_title}"
             logger.error(text)
             raise RuntimeError(text)
 
@@ -104,3 +113,18 @@ class GameWindowCapturor:
         '''
         logger.warning("Capture session closed.")
         cv2.destroyAllWindows()
+
+    def limit_fps(self):
+        '''
+        Limit FPS
+        '''
+        # If the loop finished early, sleep to maintain target FPS
+        target_duration = 1.0 / self.fps_limit  # seconds per frame
+        frame_duration = time.time() - self.t_last_run
+        if frame_duration < target_duration:
+            time.sleep(target_duration - frame_duration)
+
+        # Update FPS
+        self.fps = round(1.0 / (time.time() - self.t_last_run))
+        self.t_last_run = time.time()
+        # logger.info(f"FPS = {self.fps}")

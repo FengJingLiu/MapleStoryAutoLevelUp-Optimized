@@ -1,0 +1,313 @@
+# ====== Default Configuration ======
+# DO NOT directly modify the following parameters
+# Put your own setting in config_edit_me.yaml instead.
+# --------------------------------------
+
+# ────────────────────────────────
+# 🎮 Keyboard Mapping
+# ────────────────────────────────
+# Adjust the keys below to match your in-game keybindings.
+# Set a key to "" to disable that feature.
+#
+# Examples:
+#   - "q":      Presses key Q
+#   - "space":  Space bar
+#   - "1":      Number key 1
+#   - "ctrl":   Control key
+#   - "alt":    Alt key
+#   - "shift":  Shift key
+
+key:
+  aoe_skill: "q"            # 💥 AoE skill (e.g., Cleric's heal or Mage's lightning)
+  directional_attack: "w"   # ⚔️ Basic directional attack (e.g., Magic Claw or throwing stars)
+  teleport: "e"             # 🌀 Teleport skill. Set to "" if not usable
+  jump: "space"             # 🦘 Jump key
+  add_hp: "1"               # ❤️ Use HP potion. Set to "" to disable auto-healing
+  add_mp: "2"               # 💧 Use MP potion. Set to "" to disable auto-mana
+
+# ────────────────
+# 💫 Buff Skill
+# ────────────────
+# This feature allows the bot to automatically apply buff skills 
+# when their cooldowns are ready.
+#
+# Great for managing multiple buffs at once, like:
+# 🛡️ Mage's Magic Guard
+# 😇 Cleric's Angel's Blessing
+# 🌀 Thief's Speed Boost
+#
+# ⚠️ Note: If your pet already provides auto-buff, you can disable this.
+
+buff_skill:
+  keys: []                # ⌨️ List of keys to cast each buff skill (e.g., ["a", "s"])
+  cooldown: []            # ⏱️ Cooldown time (in seconds), matches the order of `keys`
+  action_cooldown: 1      # 🕒 Delay (in seconds) after buffing before continuing actions
+
+# ────────────────
+# 🗡️ Directional Attack
+# ────────────────
+# Directional attacks are basic skills that rely on the character’s facing direction.
+# Examples include: Mage’s Magic Claw, Thief’s dart throw, or even a snail shell toss.
+# These settings are applied when launching the program with: --attack "directional_attack"
+
+directional_attack:
+  range_x: 350               # ↔️ Horizontal attack range (in pixels)
+  range_y: 70                # ↕️ Vertical attack range (in pixels)
+  cooldown: 0.05             # ⏱️ Time between attacks (in seconds)
+  character_turn_delay: 0.02 # 🔄 Delay after turning before attacking (in seconds)
+
+# ────────────────
+# 💥 AoE Skill
+# ────────────────
+# AoE (Area of Effect) skills hit enemies no matter which direction the chrarcter is facing.
+# Examples: Cleric’s Heal, Mage’s Lightning Bolt
+
+aoe_skill:
+  range_x: 400               # ↔️ Horizontal skill range (in pixels)
+  range_y: 170               # ↕️ Vertical skill range (in pixels)
+
+# ────────────────
+# ❤️ Health Monitor
+# ────────────────
+# Automatically drinks HP/MP potions when health or mana drops below a threshold.
+# ⚠️ Note that this feature mimics what an pet does.
+#    If your pet already handles auto-healing, you can disable this.
+
+health_monitor:
+  enable: True             # ✅ Enable or disable health monitor
+  add_hp_ratio: 0.5        # ❤️ Drink HP potion when HP drops below this ratio [0.0 ~ 1.0]
+  add_mp_ratio: 0.5        # 💙 Drink MP potion when MP drops below this ratio [0.0 ~ 1.0]
+  add_hp_cooldown: 0.5     # 🕒 Seconds to wait between HP potions, prevent potion spam
+  add_mp_cooldown: 0.5     # 🕒 Seconds to wait between MP potions, prevent potion spam
+  fps_limit: 20            # 🚥 Loop rate for the health monitor thread
+
+# ────────────────
+# 🌀 Mage Teleport
+# ────────────────
+# This feature lets Mages use teleport to move faster while walking.
+# ⚠️ Still experimental! Enabling it may cause route-following issues.
+
+teleport:
+  is_use_teleport_to_walk: False  # ✅ Use teleport while walking (may cause inaccurate pathing)
+  cooldown: 1                     # ⏱️ Teleport skill cooldown (in seconds)
+
+# ────────────────
+# 🧙‍♂️ Edge Teleport
+# ────────────────
+# When your character approaches the edge of a platform,
+# this feature triggers a teleport (for Mages) to prevent falling.
+# If your character isn't a Mage, it will perform a jump instead.
+
+edge_teleport:
+  enable: True                 # ✅ Enable or disable this feature
+  trigger_box_width: 20        # ↔️ Width of the edge detection box (in pixels)
+  trigger_box_height: 10       # ↕️ Height of the edge detection box (in pixels)
+  color_code: [255, 127, 127]  # 🎨 RGB color code to represent platform edge
+
+# ────────────────
+# 🏷️ NameTag Recognition
+# ────────────────
+# Detects your character's nametag on the game window to estimate player location.
+
+nametag:
+  # 🧪 Comparison mode for matching the nametag:
+  #   - "grayscale": match using grayscale image
+  #   - "white_mask": match using binarized image
+  mode: "grayscale"  # Options: "grayscale", "white_mask"
+
+  # 🎯 Offset from the top-left corner of the matched nametag to the character center
+  offset: [-50, 30]  # in pixels
+
+  # 📏 Matching threshold
+  diff_thres: 0.2     # [0.0 ~ 1.0] — lower = more tolerant, higher = stricter
+
+  # 🧠 Global detection fallback
+  # If the diff is higher than this threshold, do a full-frame search.
+  # If lower, search near the last known location to save time.
+  # Set to 0.0 to disable this optimization
+  global_diff_thres: 0.2
+
+  # ✂️ Split detection
+  # To avoid occlusion from ladders or background objects,
+  # the nametag will be split vertically and matched in smaller parts.
+  split_width: 30  # in pixels — width of each vertical split
+
+# ────────────────
+# 📸 Camera
+# ────────────────
+# Defines the region of the game window used for nametag/monster/rune/minimap detection.
+# This excludes the game's UI and title bar.
+
+camera:
+  y_start: 60     # ⬆️ Top boundary (in pixels)
+  y_end: 665      # ⬇️ Bottom boundary (in pixels)
+
+# ────────────────
+# 🧍 Character
+# ────────────────
+# Your character's size in pixels.
+# ⚠️ Only used if monster_detect.mode is set to "template_free" —
+#    you can ignore this if using other detection modes.
+
+character:
+  width: 100      # ↔️ Character width (in pixels)
+  height: 150     # ↕️ Character height (in pixels)
+
+# ────────────────────────────────
+# 🐌 Monster Detection
+# ────────────────────────────────
+# Automatically detect monsters around your character for targeting and attacks.
+monster_detect:
+  # Detection mode determines the method used to find monsters.
+  # Modes ranked from most to least computational cost:
+  #   - "color"         (most accurate but slowest)
+  #   - "grayscale"     (slow)
+  #   - "contour_only"  (fast, contour-based, a good balance)
+  #   - "template_free" (lightest and fastest, but likely to have many wrong detection)
+  # 💡 Feel free to test different modes to find what works best for your setup.
+  mode: "contour_only"         # 🧠 Options: "color", "grayscale", "contour_only", "template_free"
+  diff_thres: 0.8              # 📏 Diff threshold for template matching, [0.0 ~ 1.0] Higher = stricter match
+  search_box_margin: 50        # ➕ Additional margin(in pixels) around the attack box for monster searching
+  contour_blur: 5              # 🌫️ Gaussian blur kernel size used for contour smoothing (in "contour_only" mode).
+  with_enemy_hp_bar: True      # ❤️ Enable smarter detection using enemy HP bars.
+  hp_bar_color: [71, 204, 64]  # 💚 Enemy HP bar color (in BGR format)
+
+# ────────────────
+# 🧭 Route Following
+# ────────────────
+# The character follows a pre-defined route image (route*.png) using color-coded commands.
+
+route:
+  up_drag_duration: 1.0       # ⬆️ Hold 'up' key to climb ropes/ladders (in seconds)
+  down_drag_duration: 1.0     # ⬇️ Hold 'down' key to descend ropes/ladders (in seconds)
+  search_range: 10            # 🔍 Radius (in pixels) to search for the nearest route color around the player
+
+  # 🎨 Color-coded(RGB) actions for route navigation
+  color_code:
+    "255,0,0": "walk left"         # 🔴 Red
+    "0,0,255": "walk right"        # 🔵 Blue
+    "255,127,0": "jump left"       # 🟠 Orange
+    "0,255,255": "jump right"      # 🟦 Cyan
+    "127,255,0": "jump down"       # 💚 Lime
+    "255,0,255": "jump"            # 💜 Magenta
+    "127,127,127": "up"            # ⚪ Gray
+    "255,255,127": "down"          # 🟡 Light yellow
+    "0,255,127": "stop"            # 🟢 Light green
+    "255,255,0": "goal"            # 🟨 Yellow
+    "255,0,127": "teleport up"     # 🌸 Pink
+    "127,0,255": "teleport down"   # 🟪 Purple
+    "0,127,0": "teleport left"     # 🟩 Dark green
+    "139,69,19": "teleport right"  # 🟫 Brown
+
+# ────────────────────────────────
+# 🐶 Watchdog (Anti-Stuck System)
+# ────────────────────────────────
+# This feature monitors your character's movement.
+# If the player stays in the same spot for too long, the watchdog will "bark"
+# and trigger a random action (defined in `color_code`) to help break the stuck state.
+
+watchdog:
+  range: 3         # 🥶 Movement threshold (in pixels). If the player moves less than this, it's considered stuck.
+  timeout: 10      # ⏱️ Time limit (in seconds). If the player stays still for this long, a random action is triggered.
+
+# ────────────────
+# ⚠️ Rune Warning Detection
+# ────────────────
+# Detects the "Please remove the rune" message on screen.
+# When this warning appears, the bot will pause combat and start searching for the rune instead.
+rune_warning:
+  top_left: [513, 196]        # 🟦 Top-left corner of the rune warning message
+  bottom_right: [768, 236]    # 🟥 Bottom-right corner of the rune warning
+  diff_thres: 0.2             # 📏 Matching threshold [0.0 ~ 1.0], higher = stricter match
+
+# ────────────────
+# ✨ Rune Detection Box
+# ────────────────
+# This detects the glowing purple rune symbol on screen.
+# The box determines how big of a region to search in the game screen.
+rune_detect:
+  box_width: 120              # ↔️ Width of the detection region
+  box_height: 150             # ↕️ Height of the detection region
+  diff_thres: 0.1             # 📏 Match threshold [0.0 ~ 1.0], higher = stricter match
+
+# ────────────────
+# 🧭 Rune-Finding Behavior
+# ────────────────
+# Defines the bot’s strategy for searching and interacting with the rune.
+rune_find:
+  timeout: 1200               # ⏳ Maximum time (in seconds) to keep searching before giving up
+                              # If the timeout is reached, the bot will fallback to route_rest.png and rest.
+  near_rune_duration: 5       # 🕒 Duration to interact with rune when a positive detection occurs
+
+# ─────────────────────────────
+# 🧩 Rune Mini-Game Solver
+# ─────────────────────────────
+# When a rune is successfully triggered, a 4-arrow window appears.
+# The rune_solver will automatically detect and match the best arrow pattern,
+# then press the correct direction key to solve the mini-game.
+
+rune_solver:
+  arrow_box_size: 80           # 📐 Arrow icon size in pixels (e.g., 75x75 box)
+  arrow_box_interval: 170      # ↔️ Distance between arrows (horizontal spacing in pixels)
+  arrow_box_coord: [355, 355]  # 🎯 Top-left coordinate of the first (leftmost) arrow
+  arrow_box_diff_thres: 0.2    # 📏 Match threshold [0.0 ~ 1.0]
+                               #     ↪ If the match score of the first arrow is lower than this,
+                               #     the solver assumes the rune mini-game has started
+
+# ─────────────────────────────
+# 🗺️ Mini-Map
+# ─────────────────────────────
+# The minimap appears in the top-left corner of the game window.
+# It is used to estimate the player’s current location in the world.
+
+minimap:
+  player_color: [136, 255, 255]   # 🟡 BGR value of the yellow player dot on the minimap
+  debug_window_upscale: 4         # 🔍 Zoom factor for the route debug image (for visualization only)
+
+# ─────────────────────────────
+# 🚶‍♂️ Patrol Mode
+# ─────────────────────────────
+# Patrol Mode can be activated by passing the `--patrol` flag to the script.
+# In this mode, the player will walk back and forth and attack periodically.
+# It doesn't rely on monster detection or a minimap — just pure action!
+
+patrol:
+  range: [0.2, 0.8]               # ↔️ [0.0 ~ 1.0] Patrol boundaries (relative to screen width)
+                                  #     - 0.0 = Left edge of the game window
+                                  #     - 1.0 = Right edge
+                                  # The player will turn back once reaching these bounds.
+  turn_point_thres: 10            # 🔁 Number of consecutive frames required to confirm a turn point
+  patrol_attack_interval: 2.5     # 🕒 Time in seconds between each attack while patrolling
+
+# ─────────────────────────────
+# 🎥 Route Recorder
+# ─────────────────────────────
+# The route recorder is a standalone tool that helps generate `map.png` and `route*.png`.
+# It records the player's movement and actions, then saves them as a route map image.
+
+route_recoder:
+  blob_cooldown: 0.7        # ⏱️ Cooldown in seconds between recording actions like 'jump' or 'teleport'
+                            #     These actions are marked as a "blob" on the route map
+  map_padding: 30           # 🖤 Padding (in pixels) added as margin around the edge of the map
+
+# ─────────────────────────────
+# 🪟 Game Window
+# ─────────────────────────────
+# Basic information about the game window setup
+
+game_window:
+  title: "MapleStory Worlds-Artale (繁體中文版)"  # 🎮 Game window title (used to detect the correct window)
+  size: [752, 1282]                              # 📐 Game window size [height, width] in pixels
+
+# ────────────────
+# ⚙️ System Settings
+# ────────────────
+# Controls performance and behavior of core system threads.
+
+system:
+  fps_limit_main: 10                # 🚥 Main loop FPS – controls how fast the main thread runs
+  fps_limit_keyboard_controller: 30 # 🚥 Keyboard controller thread FPS
+  fps_limit_window_capturor: 15     # 🚥 Window capture thread FPS
+  fps_limit_route_recorder: 10      # 🚥 Route recorder FPS
+  key_debounce_interval: 1          # ⏱️ Cooldown (in seconds) between function key presses (e.g., F1, F2...)
+  show_debug_window: True           # 🐞 Show debug window (disable to save resources)

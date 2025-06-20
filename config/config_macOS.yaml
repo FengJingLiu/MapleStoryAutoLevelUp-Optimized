@@ -1,0 +1,13 @@
+# ====== macOS Configuration ======
+# The following configuration is only for macOS
+
+game_window:
+  title: "MapleStory Worlds"
+  size: [776, 1280]
+
+monster_detect:
+  hp_bar_color: [90, 201, 108] # (B,G,R)
+
+minimap:
+  player_color: [84, 255, 255] # BGR
+  debug_window_upscale: 2

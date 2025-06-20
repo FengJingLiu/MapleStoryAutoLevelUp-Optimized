@@ -18,13 +18,17 @@ class GameWindowCapturor:
     '''
     def __init__(self, cfg):
         self.cfg = cfg
-        self.window_title = cfg.game_window_title
+        self.window_title = cfg["game_window"]["title"]
         self.frame = None
         self.lock = threading.Lock()
 
         self.capture = WindowsCapture(window_name=self.window_title)
         self.capture.event(self.on_frame_arrived)
         self.capture.event(self.on_closed)
+
+        self.fps = 0
+        self.fps_limit = cfg["system"]["fps_limit_window_capturor"]
+        self.t_last_run = 0.0
 
         # Start capturing thread, blocking
         threading.Thread(target=self.capture.start, daemon=True).start()
@@ -33,7 +37,7 @@ class GameWindowCapturor:
         time.sleep(0.1)
 
         # Check is game windows size is as expected
-        if self.frame.shape[:2] != cfg.window_size:
+        if self.frame.shape[:2] != cfg["game_window"]["size"]:
             logger.error(f"Invalid window size: {self.frame.shape[:2]} (expected {cfg.window_size})")
             logger.error("Please use windowed mode & smallest resolution.")
             raise RuntimeError(f"Unexpected window size: {self.frame.shape[:2]}")
@@ -45,7 +49,7 @@ class GameWindowCapturor:
         '''
         with self.lock:
             self.frame = frame.frame_buffer
-        time.sleep(0.033)  # Cap FPS to ~30
+        self.limit_fps()
 
     def on_closed(self):
         '''
@@ -62,3 +66,18 @@ class GameWindowCapturor:
             if self.frame is None:
                 return None
             return cv2.cvtColor(self.frame, cv2.COLOR_BGRA2BGR)
+
+    def limit_fps(self):
+        '''
+        Limit FPS
+        '''
+        # If the loop finished early, sleep to maintain target FPS
+        target_duration = 1.0 / self.fps_limit  # seconds per frame
+        frame_duration = time.time() - self.t_last_run
+        if frame_duration < target_duration:
+            time.sleep(target_duration - frame_duration)
+
+        # Update FPS
+        self.fps = round(1.0 / (time.time() - self.t_last_run))
+        self.t_last_run = time.time()
+        # logger.info(f"FPS = {self.fps}")
