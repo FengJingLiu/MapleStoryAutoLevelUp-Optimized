@@ -3,9 +3,7 @@ Auto generate route map
 '''
 # Standard import
 import time
-import random
 import argparse
-import glob
 import sys
 import os
 import shutil
@@ -16,9 +14,9 @@ import cv2
 
 # local import
 from logger import logger
-from util import find_pattern_sqdiff, draw_rectangle, screenshot, nms, \
-                load_image, get_mask, get_minimap_loc_size, get_player_location_on_minimap, \
-                to_opencv_hsv, load_yaml, override_cfg
+from util import find_pattern_sqdiff, draw_rectangle, screenshot, \
+                get_minimap_loc_size, get_player_location_on_minimap, \
+                to_opencv_hsv, load_yaml, override_cfg, is_mac
 from KeyBoardListener import KeyBoardListener
 from GameWindowCapturor import GameWindowCapturor
 
@@ -94,7 +92,8 @@ class RouteRecorder():
         update_img_frame_debug
         '''
         cv2.imshow("Game Window Debug",
-                   self.img_frame_debug[self.cfg.camera_ceiling:self.cfg.camera_floor, :])
+                   self.img_frame_debug[self.cfg["camera"]["y_start"]:
+                                        self.cfg["camera"]["y_end"], :])
         # Update FPS timer
         self.t_last_frame = time.time()
 
@@ -191,6 +190,8 @@ class RouteRecorder():
             for k, v in cfg["route"]["color_code"].items()
         }
 
+        self.fps_limit = self.cfg["system"]["fps_limit_route_recorder"]
+
         # Check create new map directory
         map_dir = os.path.join("minimaps", args.new_map)
         if os.path.exists(map_dir):
@@ -249,7 +250,7 @@ class RouteRecorder():
         """
         Set all pixels in self.img_map to black if they match any color in color_code (assumed RGB).
         """
-        for rgb in self.cfg.color_code.keys():
+        for rgb in self.color_code.keys():
             bgr = (rgb[2], rgb[1], rgb[0])  # Convert RGB → BGR
             mask = np.all(img == bgr, axis=2)
             img[mask] = (0, 0, 0)
@@ -459,8 +460,8 @@ class RouteRecorder():
         # Resize img_route_debug for better visualization
         self.img_route_debug = cv2.resize(
                     self.img_route_debug, (0, 0),
-                    fx=self.cfg.minimap_upscale_factor,
-                    fy=self.cfg.minimap_upscale_factor,
+                    fx=self.cfg["minimap"]["debug_window_upscale"],
+                    fy=self.cfg["minimap"]["debug_window_upscale"],
                     interpolation=cv2.INTER_NEAREST)
         cv2.imshow("Route Map Debug", self.img_route_debug)
 
@@ -504,7 +505,7 @@ if __name__ == '__main__':
 
             # Cap FPS to save system resource
             frame_duration = time.time() - t_start
-            target_duration = 1.0 / routeRecorder.cfg.fps_limit
+            target_duration = 1.0 / routeRecorder.fps_limit
             if frame_duration < target_duration:
                 time.sleep(target_duration - frame_duration)
 
