@@ -174,9 +174,9 @@ monster_detect:
 
 # ────────────────
 # Auto change channel
-# "False": Off
-# "True": Change channel once other player is detected
-# "Pixel": Change channel once other player move set pixels in other_player_move_pixel
+# "": Off
+# "true": Change channel once other player is detected
+# "pixel": Change channel once other player move set pixels in other_player_move_pixel
 # ────────────────
 auto_change_channel: "pixel"
 other_player_move_pixel = 10  # only work when auto_change_channel == "pixel" 
