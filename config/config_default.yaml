@@ -207,7 +207,7 @@ route:
 # and trigger a random action (defined in `color_code`) to help break the stuck state.
 
 watchdog:
-  range: 3         # 🥶 Movement threshold (in pixels). If the player moves less than this, it's considered stuck.
+  range: 10         # 🥶 Movement threshold (in pixels). If the player moves less than this, it's considered stuck.
   timeout: 10      # ⏱️ Time limit (in seconds). If the player stays still for this long, a random action is triggered.
 
 # ────────────────
@@ -226,9 +226,9 @@ rune_warning:
 # This detects the glowing purple rune symbol on screen.
 # The box determines how big of a region to search in the game screen.
 rune_detect:
-  box_width: 120              # ↔️ Width of the detection region
+  box_width: 350              # ↔️ Width of the detection region
   box_height: 150             # ↕️ Height of the detection region
-  diff_thres: 0.1             # 📏 Match threshold [0.0 ~ 1.0], higher = stricter match
+  diff_thres: 0.2             # 📏 Match threshold [0.0 ~ 1.0], higher = stricter match
 
 # ────────────────
 # 🧭 Rune-Finding Behavior
@@ -237,7 +237,8 @@ rune_detect:
 rune_find:
   timeout: 1200               # ⏳ Maximum time (in seconds) to keep searching before giving up
                               # If the timeout is reached, the bot will fallback to route_rest.png and rest.
-  near_rune_duration: 5       # 🕒 Duration to interact with rune when a positive detection occurs
+  near_rune_duration: 10       # 🕒 Duration to interact with rune when a positive detection occurs
+  rune_trigger_cooldown: 0.3    # 🕒 Cooldown for 'up' key rune trigger
 
 # ─────────────────────────────
 # 🧩 Rune Mini-Game Solver

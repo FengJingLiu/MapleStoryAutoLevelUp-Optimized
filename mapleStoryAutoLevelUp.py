@@ -65,6 +65,7 @@ class MapleStoryBot:
         self.t_last_teleport = time.time() # Last teleport timer
         self.t_patrol_last_attack = time.time() # Last patrol attack timer
         self.t_last_attack = time.time() # Last attack timer for cooldown
+        self.t_last_rune_trigger = time.time() # Last time trigger rune
         # Patrol mode
         self.is_patrol_to_left = True # Patrol direction flag
         self.patrol_turn_point_cnt = 0 # Patrol tuning back counter
@@ -848,7 +849,7 @@ class MapleStoryBot:
             loc, score, _ = find_pattern_sqdiff(img_roi, img_rune, mask=mask)
             matches.append((i, loc, score, img_rune.shape))
 
-        # Matches box debug
+        # # Matches box debug
         # for i, (part_idx, loc, score, shape) in enumerate(matches):
         #     draw_rectangle(
         #         self.img_frame_debug,
@@ -1165,11 +1166,12 @@ class MapleStoryBot:
             self.loc_player_global = self.get_player_location_on_global_map()
 
         # Check whether a rune icon is near player
-        if self.is_rune_near_player():
+        if self.status == "finding_rune" and self.is_rune_near_player():
             self.switch_status("near_rune")
 
         # Check whether we entered the rune mini-game
-        if self.status == "near_rune" and (not self.args.disable_control):
+        if self.status == "near_rune" and (not self.args.disable_control) and \
+            time.time() - self.t_last_rune_trigger > self.cfg["rune_find"]["rune_trigger_cooldown"]:
             self.kb.set_command("stop") # stop character
             time.sleep(0.1) # Wait for character to stop
             self.kb.disable() # Disable kb thread during rune solving
@@ -1186,6 +1188,8 @@ class MapleStoryBot:
 
             # Restore kb thread
             self.kb.enable()
+
+            self.t_last_rune_trigger = time.time()
 
         # Get monster search box
         margin = self.cfg["monster_detect"]["search_box_margin"]
@@ -1204,7 +1208,10 @@ class MapleStoryBot:
         y1 = min(self.img_frame.shape[0], self.loc_player[1] + dy)
 
         # Get monsters in the search box
-        self.monster_info = self.get_monsters_in_range((x0, y0), (x1, y1))
+        if self.status == "hunting":
+            self.monster_info = self.get_monsters_in_range((x0, y0), (x1, y1))
+        else:
+            self.monster_info = []
 
         # Get attack direction
         if self.args.attack == "aoe_skill":
