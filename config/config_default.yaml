@@ -181,6 +181,7 @@ route:
   up_drag_duration: 1.0       # ⬆️ Hold 'up' key to climb ropes/ladders (in seconds)
   down_drag_duration: 1.0     # ⬇️ Hold 'down' key to descend ropes/ladders (in seconds)
   search_range: 10            # 🔍 Radius (in pixels) to search for the nearest route color around the player
+  jump_down_cooldown: 3.0     # ⏱️ Cooldown (in seconds) for 'jump down' action to prevent continuous descent
 
   # 🎨 Color-coded(RGB) actions for route navigation
   color_code:

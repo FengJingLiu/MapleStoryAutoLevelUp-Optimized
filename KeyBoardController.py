@@ -34,6 +34,7 @@ class KeyBoardController():
         self.t_last_down = 0.0
         self.t_last_toggle = 0.0
         self.t_last_screenshot = 0.0
+        self.t_last_jump_down = 0.0
         self.t_last_run = time.time()
         self.t_last_action = 0.0 # Last time character perform action(attack, cast spell, ...)
         self.t_last_buff_cast = [0] * len(self.cfg["buff_skill"]["keys"]) # Last time cast buff skill
@@ -224,11 +225,13 @@ class KeyBoardController():
                 pyautogui.keyUp("right")
 
             elif self.command == "jump down":
-                pyautogui.keyUp("right")
-                pyautogui.keyUp("left")
-                pyautogui.keyDown("down")
-                self.press_key(self.cfg["key"]["jump"])
-                pyautogui.keyUp("down")
+                if time.time() - self.t_last_jump_down > self.cfg["route"]["jump_down_cooldown"]:
+                    pyautogui.keyUp("right")
+                    pyautogui.keyUp("left")
+                    pyautogui.keyDown("down")
+                    self.press_key(self.cfg["key"]["jump"])
+                    pyautogui.keyUp("down")
+                    self.t_last_jump_down = time.time()
 
             elif self.command == "jump":
                 pyautogui.keyUp("left")
