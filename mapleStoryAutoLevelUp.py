@@ -8,6 +8,8 @@ import random
 import argparse
 import glob
 import sys
+import pyautogui
+import pygetwindow as gw
 
 # Library import
 import numpy as np
@@ -18,7 +20,7 @@ import yaml
 from logger import logger
 from util import find_pattern_sqdiff, draw_rectangle, screenshot, nms, \
                 load_image, get_mask, get_minimap_loc_size, get_player_location_on_minimap, \
-                is_mac, nms_matches, override_cfg, load_yaml
+                is_mac, nms_matches, override_cfg, load_yaml, get_all_other_player_locations_on_minimap
 from KeyBoardController import KeyBoardController
 if is_mac():
     from GameWindowCapturorForMac import GameWindowCapturor
@@ -1083,6 +1085,35 @@ class MapleStoryBot:
         # Update FPS timer
         self.t_last_frame = time.time()
 
+    def click_in_game_window(self, x, y):
+        game_window = gw.getWindowsWithTitle(self.cfg.game_window_title)[0]
+        win_left, win_top = game_window.left, game_window.top
+        pyautogui.click(win_left + x, win_top + y)
+        
+    def channel_change(self):
+        print("Start channel change process")
+        coords = [
+            (1140, 730),  # 伺服器選單按鈕
+            (1140, 666),  # 頻道按鈕
+            (877, 161),  # 任意頻道
+            (585, 420),  # 確定
+            (877, 395),  # 登入後選角色
+            (888, 275),  # 確定角色
+        ]
+        for i, (x, y) in enumerate(coords[:4]):
+            self.click_in_game_window(x, y)
+            time.sleep(1)
+        time.sleep(25)
+        self.click_in_game_window(*coords[4])
+        time.sleep(2)
+        self.click_in_game_window(*coords[5])
+        self.kb.enable()
+        self.kb.set_command("stop")
+        time.sleep(10) #ensure if there's no lagging during log in
+        self.click_in_game_window(*coords[4])
+        time.sleep(2)
+        self.click_in_game_window(*coords[5])
+
     def run_once(self):
         '''
         Process one game window frame
@@ -1158,6 +1189,56 @@ class MapleStoryBot:
                                 minimap_player_color=self.cfg["minimap"]["player_color"])
         if loc_player_minimap:
             self.loc_player_minimap = loc_player_minimap
+
+        # Get other player location on minimap & change channel
+        '''
+        Detect red dot (0,0,255) and calculate the center to define as other player position.
+
+        Needs improvement - current implementation calculates a single center value for all detected red dots. 
+        When multiple players appear at once, this reduces the perceived displacement. 
+        Future enhancement should cluster red dots into separate groups when multiple players are detected simultaneously.
+        '''
+        loc_other_players = get_all_other_player_locations_on_minimap(self.img_minimap)
+        if loc_other_players:
+            # Calculate center value
+            xs = [x for (x, y) in loc_other_players]
+            ys = [y for (x, y) in loc_other_players]
+            if len(xs) == 0 or len(ys) == 0:
+                return 
+            center_x = np.mean(xs)
+            center_y = np.mean(ys)
+            if np.isnan(center_x) or np.isnan(center_y):
+                return
+            center = (int(np.mean(xs)), int(np.mean(ys)))
+            #logger.warning(f"[RedDot] Center of mass = {center}")
+            
+            # Change channel
+            if self.cfg["auto_change_channel"] == "true":
+                logger.warning("Player detected, immediately change channel.")
+                self.kb.set_command("stop")
+                self.kb.disable()
+                time.sleep(1)
+                self.channel_change()
+                self.red_dot_center_prev = None
+                return
+            elif self.cfg["auto_change_channel"] == "pixel":
+                if self.red_dot_center_prev is not None:
+                    dx = abs(center[0] - self.red_dot_center_prev[0])
+                    dy = abs(center[1] - self.red_dot_center_prev[1])
+                    total = dx + dy
+                    logger.debug(f"[RedDot] Movement dx={dx}, dy={dy}, total={total}")
+                    if total > self.cfg["other_player_move_pixel"]:
+                        logger.warning(f"Other player movement > {self.cfg["other_player_move_pixel"]}px detected, triggering channel change.")
+                        self.kb.set_command("stop")
+                        self.kb.disable()
+                        time.sleep(1)
+                        self.channel_change() 
+                        self.red_dot_center_prev = None  
+                        return
+                else:
+                    self.red_dot_center_prev = center
+        else:
+            self.red_dot_center_prev = None  
 
         # Get player location on global map
         if self.args.patrol:

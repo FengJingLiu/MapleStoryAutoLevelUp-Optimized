@@ -373,6 +373,14 @@ def get_player_location_on_minimap(img_minimap, minimap_player_color=(136, 255, 
 
     return loc_player_minimap
 
+def get_all_other_player_locations_on_minimap(img_minimap, red_bgr=(0, 0, 255)):
+    red_bgr = tuple(map(int, red_bgr))
+    mask = cv2.inRange(img_minimap, red_bgr, red_bgr)
+    coords = cv2.findNonZero(mask)
+    if coords is None or len(coords) < 3:
+        return []
+    return [tuple(pt[0]) for pt in coords]  # List of (x, y)
+    
 def get_bar_ratio(img):
     '''
     Get HP/MP/EXP bar ratio with given bar image
