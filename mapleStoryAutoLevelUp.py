@@ -8,6 +8,8 @@ import random
 import argparse
 import glob
 import sys
+import pyautogui
+import pygetwindow as gw
 
 # Library import
 import numpy as np
