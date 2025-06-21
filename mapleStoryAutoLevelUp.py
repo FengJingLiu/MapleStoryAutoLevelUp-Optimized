@@ -1212,7 +1212,7 @@ class MapleStoryBot:
             #logger.warning(f"[RedDot] Center of mass = {center}")
             
             # Change channel
-            if self.cfg["auto_change_channelr"] == "true":
+            if self.cfg["auto_change_channel"] == "true":
                 logger.warning("Player detected, immediately change channel.")
                 self.kb.set_command("stop")
                 self.kb.disable()
@@ -1220,7 +1220,7 @@ class MapleStoryBot:
                 self.channel_change()
                 self.red_dot_center_prev = None
                 return
-            elif self.cfg["auto_change_channelr"] == "pixel":
+            elif self.cfg["auto_change_channel"] == "pixel":
                 if self.red_dot_center_prev is not None:
                     dx = abs(center[0] - self.red_dot_center_prev[0])
                     dy = abs(center[1] - self.red_dot_center_prev[1])
