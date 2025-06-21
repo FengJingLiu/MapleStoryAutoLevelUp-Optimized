@@ -179,7 +179,7 @@ monster_detect:
 # "pixel": Change channel once other player move set pixels in other_player_move_pixel
 # ────────────────
 auto_change_channel: "pixel"
-other_player_move_pixel = 10  # only work when auto_change_channel == "pixel" 
+other_player_move_pixel: 10  # only work when auto_change_channel == "pixel" 
 
 
 # ────────────────
