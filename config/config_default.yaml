@@ -173,6 +173,16 @@ monster_detect:
   hp_bar_color: [71, 204, 64]  # 💚 Enemy HP bar color (in BGR format)
 
 # ────────────────
+# Auto change channel
+# "False": Off
+# "True": Change channel once other player is detected
+# "Pixel": Change channel once other player move set pixels in other_player_move_pixel
+# ────────────────
+auto_change_channel: "pixel"
+other_player_move_pixel = 10  # only work when auto_change_channel == "pixel" 
+
+
+# ────────────────
 # 🧭 Route Following
 # ────────────────
 # The character follows a pre-defined route image (route*.png) using color-coded commands.
