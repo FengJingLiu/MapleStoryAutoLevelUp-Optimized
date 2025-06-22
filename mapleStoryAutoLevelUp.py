@@ -1086,7 +1086,7 @@ class MapleStoryBot:
         self.t_last_frame = time.time()
 
     def click_in_game_window(self, x, y):
-        game_window = gw.getWindowsWithTitle(self.cfg.game_window_title)[0]
+        game_window = gw.getWindowsWithTitle(self.cfg["game_window"]["title"])[0]
         win_left, win_top = game_window.left, game_window.top
         pyautogui.click(win_left + x, win_top + y)
         

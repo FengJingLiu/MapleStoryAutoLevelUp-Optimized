@@ -25,6 +25,7 @@ def is_windows():
 
 def load_yaml(path):
     with open(path, 'r', encoding='utf-8') as f:
+        logger.info(f"Load yaml: {path}")
         data = yaml.safe_load(f) or {}
         return convert_lists_to_tuples(data)
 
