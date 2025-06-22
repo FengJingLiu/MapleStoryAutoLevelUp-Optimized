@@ -188,9 +188,11 @@ class HealthMonitor:
                 # Check if need to heal (with cooldown)
                 if self.cfg["health_monitor"]["force_heal"]:
                     # Ignore cooldown and force keycontroller to heal first
-                    if (self.hp_ratio <= self.cfg["health_monitor"]["add_hp_ratio"]):
+                    if self.hp_ratio < self.cfg["health_monitor"]["add_hp_ratio"]:
+                        if not self.kb.is_need_force_heal:
+                            logger.info(f"[Health Monitor]: Force heal triggered, "
+                                        f"HP: {self.hp_ratio*100:.1f}%")
                         self.kb.is_need_force_heal = True
-                        logger.info(f"[Health Monitor]: Force heal triggered, HP: {self.hp_ratio*100:.1f}%")
                     else:
                         self.kb.is_need_force_heal = False
                 else:

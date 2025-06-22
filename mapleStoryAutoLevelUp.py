@@ -14,7 +14,6 @@ import pygetwindow as gw
 # Library import
 import numpy as np
 import cv2
-import yaml
 
 # Local import
 from logger import logger
