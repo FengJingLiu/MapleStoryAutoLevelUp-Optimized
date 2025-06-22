@@ -75,6 +75,7 @@ aoe_skill:
 
 health_monitor:
   enable: True             # ✅ Enable or disable health monitor
+  force_heal: False      # 🛡️ Heal first — stop attacking until HP is restored
   add_hp_ratio: 0.5        # ❤️ Drink HP potion when HP drops below this ratio [0.0 ~ 1.0]
   add_mp_ratio: 0.5        # 💙 Drink MP potion when MP drops below this ratio [0.0 ~ 1.0]
   add_hp_cooldown: 0.5     # 🕒 Seconds to wait between HP potions, prevent potion spam

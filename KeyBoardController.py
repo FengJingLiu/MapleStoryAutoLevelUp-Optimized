@@ -42,6 +42,7 @@ class KeyBoardController():
         self.is_enable = True
         self.is_need_screen_shot = False
         self.is_need_toggle = False
+        self.is_need_force_heal = False
         # Parameters
         self.debounce_interval = self.cfg["system"]["key_debounce_interval"]
         self.fps_limit = self.cfg["system"]["fps_limit_keyboard_controller"]
@@ -204,6 +205,11 @@ class KeyBoardController():
             if time.time() - self.t_last_down > self.cfg["route"]["down_drag_duration"]:
                 pyautogui.keyUp("down")
 
+            # Check if is needed to force health
+            if self.is_need_force_heal and \
+                not self.command in ["up", "down", "jump right", "jump left"]:
+                self.command = "add hp"
+
             if self.command == "walk left":
                 pyautogui.keyUp("right")
                 pyautogui.keyDown("left")
@@ -292,7 +298,7 @@ class KeyBoardController():
                 self.release_all_key()
                 self.command = ""  # Clear command after stopping
 
-            elif self.command == "heal":
+            elif self.command == "add hp":
                 self.press_key(self.cfg["key"]["add_hp"])
                 self.command = ""
 

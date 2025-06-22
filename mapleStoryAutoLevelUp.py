@@ -44,6 +44,7 @@ class MapleStoryBot:
         self.fps = 0 # Frame per second
         self.is_first_frame = True # first frame flag
         self.rune_detect_level = 0 # higher the level, lower the rune detect threshold
+        self.red_dot_center_prev = None # previous other player location in minimap
         # Coordinate (top-left coordinate)
         self.loc_nametag = (0, 0) # nametag location on game screen
         self.loc_minimap = (0, 0) # minimap location on game screen
@@ -1204,14 +1205,14 @@ class MapleStoryBot:
             xs = [x for (x, y) in loc_other_players]
             ys = [y for (x, y) in loc_other_players]
             if len(xs) == 0 or len(ys) == 0:
-                return 
+                return
             center_x = np.mean(xs)
             center_y = np.mean(ys)
             if np.isnan(center_x) or np.isnan(center_y):
                 return
             center = (int(np.mean(xs)), int(np.mean(ys)))
             #logger.warning(f"[RedDot] Center of mass = {center}")
-            
+
             # Change channel
             if self.cfg["auto_change_channel"] == "true":
                 logger.warning("Player detected, immediately change channel.")
@@ -1232,13 +1233,13 @@ class MapleStoryBot:
                         self.kb.set_command("stop")
                         self.kb.disable()
                         time.sleep(1)
-                        self.channel_change() 
-                        self.red_dot_center_prev = None  
+                        self.channel_change()
+                        self.red_dot_center_prev = None
                         return
                 else:
                     self.red_dot_center_prev = center
         else:
-            self.red_dot_center_prev = None  
+            self.red_dot_center_prev = None
 
         # Get player location on global map
         if self.args.patrol:
@@ -1429,8 +1430,7 @@ class MapleStoryBot:
             if not self.args.patrol and self.is_player_stuck():
                 command = self.get_random_action()
             elif command in ["up", "down", "jump right", "jump left"]:
-                pass # Don't attack or heal while character is on rope or jumping
-            # Note: HP/MP monitoring is now handled by separate HealthMonitor thread
+                pass # Don't attack while character is on rope or jumping
             elif attack_direction == "I don't care" and nearest_monster is not None and \
                 time.time() - self.t_last_attack > self.cfg["directional_attack"]["cooldown"]:
                 command = "attack"

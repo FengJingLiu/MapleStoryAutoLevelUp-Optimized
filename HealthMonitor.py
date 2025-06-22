@@ -186,11 +186,19 @@ class HealthMonitor:
                 current_time = time.time()
 
                 # Check if need to heal (with cooldown)
-                if (self.hp_ratio <= self.cfg["health_monitor"]["add_hp_ratio"] and
-                    current_time - self.last_heal_time > self.cfg["health_monitor"]["add_hp_cooldown"]):
-                    self._heal()
-                    self.last_heal_time = current_time
-                    logger.info(f"[Health Monitor]: Auto heal triggered, HP: {self.hp_ratio*100:.1f}%")
+                if self.cfg["health_monitor"]["force_heal"]:
+                    # Ignore cooldown and force keycontroller to heal first
+                    if (self.hp_ratio <= self.cfg["health_monitor"]["add_hp_ratio"]):
+                        self.kb.is_need_force_heal = True
+                        logger.info(f"[Health Monitor]: Force heal triggered, HP: {self.hp_ratio*100:.1f}%")
+                    else:
+                        self.kb.is_need_force_heal = False
+                else:
+                    if (self.hp_ratio <= self.cfg["health_monitor"]["add_hp_ratio"] and
+                        current_time - self.last_heal_time > self.cfg["health_monitor"]["add_hp_cooldown"]):
+                        self._heal()
+                        logger.info(f"[Health Monitor]: Auto heal triggered, HP: {self.hp_ratio*100:.1f}%")
+                        self.last_heal_time = current_time
 
                 # Check if need MP (with cooldown)
                 if (self.mp_ratio <= self.cfg["health_monitor"]["add_mp_ratio"] and
