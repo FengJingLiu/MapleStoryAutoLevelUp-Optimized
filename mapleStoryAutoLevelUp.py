@@ -199,7 +199,7 @@ class MapleStoryBot:
             img_roi = img_camera
             img_nametag = self.img_nametag_gray
         else:
-            logger.error(f"Unsupported nametag detection mode: {self.cfg["nametag"]["mode"]}")
+            logger.error(f"Unsupported nametag detection mode: {self.cfg['nametag']['mode']}")
             return
         # cv2.imshow("img_roi", img_roi)
         # cv2.imshow("img_nametag", img_nametag)
