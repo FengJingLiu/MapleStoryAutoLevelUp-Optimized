@@ -38,7 +38,7 @@ class GameWindowCapturor:
 
         # Check is game windows size is as expected
         if self.frame.shape[:2] != cfg["game_window"]["size"]:
-            logger.error(f"Invalid window size: {self.frame.shape[:2]} (expected {cfg.window_size})")
+            logger.error(f"Invalid window size: {self.frame.shape[:2]} (expected {cfg["game_window"]["size"]})")
             logger.error("Please use windowed mode & smallest resolution.")
             raise RuntimeError(f"Unexpected window size: {self.frame.shape[:2]}")
 
