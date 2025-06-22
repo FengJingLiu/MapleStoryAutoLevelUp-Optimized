@@ -175,13 +175,12 @@ monster_detect:
 
 # ────────────────
 # Auto change channel
+# ────────────────
 # "": Off
 # "true": Change channel once other player is detected
 # "pixel": Change channel once other player move set pixels in other_player_move_pixel
-# ────────────────
-auto_change_channel: "pixel"
+auto_change_channel: ""
 other_player_move_pixel: 10  # only work when auto_change_channel == "pixel" 
-
 
 # ────────────────
 # 🧭 Route Following
@@ -251,6 +250,7 @@ rune_find:
                               # If the timeout is reached, the bot will fallback to route_rest.png and rest.
   near_rune_duration: 10       # 🕒 Duration to interact with rune when a positive detection occurs
   rune_trigger_cooldown: 0.3    # 🕒 Cooldown for 'up' key rune trigger
+  rune_trigger_distance: 20
 
 # ─────────────────────────────
 # 🧩 Rune Mini-Game Solver
