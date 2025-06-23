@@ -132,6 +132,18 @@ The monster actions such as `hit`, `move`, `skill`, and `stand` are retained. Wh
 
 Once the download is complete, you can find the downloaded image in the `Monster/{MonsterName}` folder.
 
+## Auto Dice Roller
+An light-weighted auto-bot that help you roll the dice in character creation page.
+
+User can assign the desire attributes and let the script do the job for you
+
+```
+python AutoDiceRoller.py --attribute <STR,DEX,INT,LUK>
+
+Example: for creating a full-INT wizard character:
+python AutoDiceRoller.py --attribute 4,4,13,4
+```
+
 ## Legacy Version
 This project previously use full-size screenshot map for camera localization
 and route planning. However, I found that capturing player location from top-left corner minimap in the game is easier and more reliable.

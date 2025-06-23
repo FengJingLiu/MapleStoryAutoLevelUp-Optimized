@@ -8,8 +8,7 @@ import random
 import argparse
 import glob
 import sys
-import pyautogui
-import pygetwindow as gw
+
 
 # Library import
 import numpy as np
@@ -19,7 +18,8 @@ import cv2
 from logger import logger
 from util import find_pattern_sqdiff, draw_rectangle, screenshot, nms, \
                 load_image, get_mask, get_minimap_loc_size, get_player_location_on_minimap, \
-                is_mac, nms_matches, override_cfg, load_yaml, get_all_other_player_locations_on_minimap
+                is_mac, nms_matches, override_cfg, load_yaml, get_all_other_player_locations_on_minimap, \
+                click_in_game_window
 from KeyBoardController import KeyBoardController
 if is_mac():
     from GameWindowCapturorForMac import GameWindowCapturor
@@ -113,10 +113,20 @@ class MapleStoryBot:
         self.img_nametag_gray = load_image(f"nametag/{args.nametag}.png", cv2.IMREAD_GRAYSCALE)
 
         # Load rune images from rune/
-        self.img_rune_warning = load_image("rune/rune_warning.png", cv2.IMREAD_GRAYSCALE)
+        rune_ver = self.cfg["rune_warning"]["language"]
+        if rune_ver == "chinese":
+            self.img_rune_warning = load_image("rune/rune_warning.png", cv2.IMREAD_GRAYSCALE)
+        elif rune_ver == "english":
+            self.img_rune_warning = load_image("rune/rune_warning_eng.png", cv2.IMREAD_GRAYSCALE)
+        else:
+            logger.error(f"Unsupported rune warning version: {rune_ver}")
+
         self.img_runes = [load_image("rune/rune_1.png"),
                           load_image("rune/rune_2.png"),
                           load_image("rune/rune_3.png"),]
+        if rune_ver == "english":
+            self.img_runes[1] = load_image("rune/rune_2_eng.png")
+
         self.img_arrows = {
             "left":
                 [load_image("rune/arrow_left_1.png"),
@@ -649,10 +659,10 @@ class MapleStoryBot:
 
         # Debug
         # Draw attack detection range
-        draw_rectangle(
-            self.img_frame_debug, (x0, y0), (y1-y0, x1-x0),
-            (255, 0, 0), "Monster Detection Box"
-        )
+        # draw_rectangle(
+        #     self.img_frame_debug, (x0, y0), (y1-y0, x1-x0),
+        #     (255, 0, 0), "Monster Detection Box"
+        # )
 
         # Draw monsters bounding box
         for monster in monster_info:
@@ -800,6 +810,11 @@ class MapleStoryBot:
         '''
         x0, y0 = self.cfg["rune_warning"]["top_left"]
         x1, y1 = self.cfg["rune_warning"]["bottom_right"]
+
+        # Debug
+        draw_rectangle(
+            self.img_frame_debug, (x0, y0), (y1-y0, x1-x0),
+            (0, 0, 255), "")
         _, score, _ = find_pattern_sqdiff(
                         self.img_frame_gray[y0:y1, x0:x1],
                         self.img_rune_warning)
@@ -1092,13 +1107,13 @@ class MapleStoryBot:
         # Update FPS timer
         self.t_last_frame = time.time()
 
-    def click_in_game_window(self, x, y):
-        game_window = gw.getWindowsWithTitle(self.cfg["game_window"]["title"])[0]
-        win_left, win_top = game_window.left, game_window.top
-        pyautogui.click(win_left + x, win_top + y)
+
         
     def channel_change(self):
-        print("Start channel change process")
+        '''
+        channel_change
+        '''
+        logger.info("[channel_change] Start")
         coords = [
             (1140, 730),  # 伺服器選單按鈕
             (1140, 666),  # 頻道按鈕
@@ -1107,19 +1122,20 @@ class MapleStoryBot:
             (877, 395),  # 登入後選角色
             (888, 275),  # 確定角色
         ]
-        for i, (x, y) in enumerate(coords[:4]):
-            self.click_in_game_window(x, y)
+        window_title = self.cfg["game_window"]["title"]
+        for i, coord in enumerate(coords[:4]):
+            click_in_game_window(window_title, coord)
             time.sleep(1)
         time.sleep(25)
-        self.click_in_game_window(*coords[4])
+        click_in_game_window(window_title, coords[4])
         time.sleep(2)
-        self.click_in_game_window(*coords[5])
+        click_in_game_window(window_title, coords[5])
         self.kb.enable()
         self.kb.set_command("stop")
         time.sleep(10) #ensure if there's no lagging during log in
-        self.click_in_game_window(*coords[4])
+        click_in_game_window(window_title, coords[4])
         time.sleep(2)
-        self.click_in_game_window(*coords[5])
+        click_in_game_window(window_title, coords[5])
 
     def run_once(self):
         '''
@@ -1144,7 +1160,8 @@ class MapleStoryBot:
         # Get minimap coordinate and size on game window
         minimap_result = get_minimap_loc_size(self.img_frame)
         if minimap_result is None:
-            logger.warning("Failed to get minimap location and size.")
+            pass
+            # logger.warning("Failed to get minimap location and size.") # too verbose
         else:
             x, y, w, h = minimap_result
             self.loc_minimap = (x, y)

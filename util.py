@@ -11,6 +11,8 @@ import platform
 #
 import numpy as np
 import yaml
+import pyautogui
+import pygetwindow as gw
 
 # Local import
 from logger import logger
@@ -342,7 +344,7 @@ def get_minimap_loc_size(img_frame):
 
         return x_minimap, y_minimap, w_minimap, h_minimap
 
-    logger.warning("Minimap not found in the game frame.")
+    # logger.warning("Minimap not found in the game frame.")
     return None  # minimap not found
 
 def get_player_location_on_minimap(img_minimap, minimap_player_color=(136, 255, 255)):
@@ -365,7 +367,7 @@ def get_player_location_on_minimap(img_minimap, minimap_player_color=(136, 255, 
                         minimap_player_color)
     coords = cv2.findNonZero(mask)
     if coords is None or len(coords) < 4:
-        logger.warning(f"Fail to locate player location on minimap.")
+        # logger.warning(f"Fail to locate player location on minimap.")
         return None
 
     # Calculate the average location of the matching pixels
@@ -458,3 +460,11 @@ def nms_matches(matches, iou_thresh=0.0):
         i += 1
 
     return filtered
+
+def click_in_game_window(window_title, coord):
+    '''
+    Mouse click on a game window coordinate
+    '''
+    game_window = gw.getWindowsWithTitle(window_title)[0]
+    win_left, win_top = game_window.left, game_window.top
+    pyautogui.click(win_left + coord[0], win_top + coord[1])
