@@ -23,6 +23,11 @@ OpenCV4.11
 
 Note: this project DOES NOT support virtual environment(VM), it's only for recreational and academical use.
 
+## Support Server
+This project is mostly developed and tested on MapleStory Artale Taiwan Server
+
+It also supports N.A server, use '--cfg na' to load customized N.A config 
+
 ## Install dependency
 ```
 pip install -r requirements.txt
