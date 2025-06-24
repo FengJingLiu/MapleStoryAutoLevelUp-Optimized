@@ -113,7 +113,7 @@ class MapleStoryBot:
         self.img_nametag_gray = load_image(f"nametag/{args.nametag}.png", cv2.IMREAD_GRAYSCALE)
 
         # Load rune images from rune/
-        rune_ver = self.cfg["rune_warning"]["language"]
+        rune_ver = self.cfg["system"]["language"]
         if rune_ver == "chinese":
             self.img_rune_warning = load_image("rune/rune_warning.png", cv2.IMREAD_GRAYSCALE)
         elif rune_ver == "english":

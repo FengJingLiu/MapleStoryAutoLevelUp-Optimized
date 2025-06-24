@@ -68,3 +68,7 @@ rune_warning:
 system:
   server: "NA" # North America server
   language: "english"
+
+# Sent Email to user to get pass lie detector
+email:
+  enable: True

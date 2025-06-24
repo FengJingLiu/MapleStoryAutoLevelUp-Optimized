@@ -7,6 +7,11 @@ import cv2
 import datetime
 import os
 import platform
+import smtplib
+from email.message import EmailMessage
+import imaplib
+import mimetypes
+import email
 
 #
 import numpy as np
@@ -468,3 +473,54 @@ def click_in_game_window(window_title, coord):
     game_window = gw.getWindowsWithTitle(window_title)[0]
     win_left, win_top = game_window.left, game_window.top
     pyautogui.click(win_left + coord[0], win_top + coord[1])
+
+def send_email(email_addr, password,
+               to, subject, body, attachment_path):
+    '''
+    send_email
+    '''
+    msg = EmailMessage()
+    msg.set_content(body)
+    msg['Subject'] = subject
+    msg['From'] = email_addr
+    msg['To'] = to
+
+    # Attach PNG image
+    with open(attachment_path, 'rb') as f:
+        file_data = f.read()
+        maintype, subtype = mimetypes.guess_type(attachment_path)[0].split('/')
+        filename = f.name.split("/")[-1]
+        msg.add_attachment(file_data, maintype=maintype, subtype=subtype, filename=filename)
+
+    # Send Email
+    with smtplib.SMTP_SSL('smtp.gmail.com', 465) as smtp:
+        smtp.login(email_addr, password)
+        smtp.send_message(msg)
+        logger.info(f"[send_email] {subject} to {to}")
+
+def check_inbox(email_addr, password, token):
+    '''
+    Check inbox for replies containing the expected token in the subject
+    '''
+    imap = imaplib.IMAP4_SSL("imap.gmail.com")
+    imap.login(email_addr, password)
+    imap.select("inbox")
+
+    # IMAP search: only look for subjects that contain token
+    status, messages = imap.search(None, f'(SUBJECT "{token}")')
+    if status != "OK":
+        logger.error("Search failed")
+        imap.logout()
+        return None
+
+    for num in messages[0].split():
+        status, data = imap.fetch(num, '(RFC822)')
+        msg = email.message_from_bytes(data[0][1])
+        for part in msg.walk():
+            if part.get_content_type() == "text/plain":
+                body = part.get_payload(decode=True).decode()
+                imap.logout()
+                return body.strip()
+
+    imap.logout()
+    return None
