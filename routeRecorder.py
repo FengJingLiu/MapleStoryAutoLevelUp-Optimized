@@ -16,7 +16,7 @@ import cv2
 from logger import logger
 from util import find_pattern_sqdiff, draw_rectangle, screenshot, \
                 get_minimap_loc_size, get_player_location_on_minimap, \
-                to_opencv_hsv, load_yaml, override_cfg, is_mac
+                to_opencv_hsv, load_yaml, override_cfg, is_mac, load_image
 from KeyBoardListener import KeyBoardListener
 from GameWindowCapturor import GameWindowCapturor
 
@@ -204,6 +204,10 @@ class RouteRecorder():
         os.makedirs(map_dir) # Create new map directory
         logger.info(f"Created new directory: {map_dir}")
 
+        # Load exist map
+        if self.args.map != '':
+            self.img_map = load_image(f"{self.args.map}")
+
         # Start keyboard listener thread
         self.kb = KeyBoardListener(self.cfg)
 
@@ -261,7 +265,6 @@ class RouteRecorder():
         update_minimap
         '''
 
-
     def run_once(self):
         '''
         Process with one game window frame
@@ -287,14 +290,15 @@ class RouteRecorder():
             self.img_minimap = self.img_frame[y:y+h, x:x+w]
 
             # copy minimap to map
-            self.img_map = self.img_minimap.copy()
-            pad = self.cfg["route_recoder"]["map_padding"]
-            self.img_map = cv2.copyMakeBorder(
-                self.img_map,
-                top=pad, bottom=pad, left=pad, right=pad,
-                borderType=cv2.BORDER_CONSTANT,
-                value=(0, 0, 0)  # Black padding
-            )
+            if self.img_map is None:
+                self.img_map = self.img_minimap.copy()
+                pad = self.cfg["route_recoder"]["map_padding"]
+                self.img_map = cv2.copyMakeBorder(
+                    self.img_map,
+                    top=pad, bottom=pad, left=pad, right=pad,
+                    borderType=cv2.BORDER_CONSTANT,
+                    value=(0, 0, 0)  # Black padding
+                )
 
             # Replace player "yellow" dot to black on map
             self.replace_color_on_map(
@@ -325,9 +329,10 @@ class RouteRecorder():
             self.ensure_img_map_capacity(x, y, h, w)
 
             # Create mask where img_map is black
-            map_slice = self.img_map[y:y+h, x:x+w]
-            black_mask = np.all(map_slice == [0, 0, 0], axis=2)
-            map_slice[black_mask] = self.img_minimap[black_mask]
+            if self.args.map == '':
+                map_slice = self.img_map[y:y+h, x:x+w]
+                black_mask = np.all(map_slice == [0, 0, 0], axis=2)
+                map_slice[black_mask] = self.img_minimap[black_mask]
 
             # Replace player "yellow" dot to black on map
             self.replace_color_on_map(
@@ -484,6 +489,13 @@ if __name__ == '__main__':
         type=str,
         default='edit_me',
         help='Choose customized config yaml file in config/'
+    )
+
+    parser.add_argument(
+        '--map',
+        type=str,
+        default='',
+        help='use this map instead of creating a new one'
     )
 
     try:

@@ -227,7 +227,6 @@ watchdog:
 # Detects the "Please remove the rune" message on screen.
 # When this warning appears, the bot will pause combat and start searching for the rune instead.
 rune_warning:
-  language: "chinese"         # "english" "chinese"
   top_left: [513, 196]        # 🟦 Top-left corner of the rune warning message
   bottom_right: [768, 236]    # 🟥 Bottom-right corner of the rune warning
   diff_thres: 0.2             # 📏 Matching threshold [0.0 ~ 1.0], higher = stricter match
@@ -277,6 +276,7 @@ rune_solver:
 minimap:
   player_color: [136, 255, 255]   # 🟡 BGR value of the yellow player dot on the minimap
   debug_window_upscale: 4         # 🔍 Zoom factor for the route debug image (for visualization only)
+  offset: [0, 0]                  # 📐 Don't set this unless playing on N.A server
 
 # ─────────────────────────────
 # 🚶‍♂️ Patrol Mode
@@ -326,3 +326,5 @@ system:
   fps_limit_auto_dice_roller: 1     # 🚥 Auto rice roller FPS
   key_debounce_interval: 1          # ⏱️ Cooldown (in seconds) between function key presses (e.g., F1, F2...)
   show_debug_window: True           # 🐞 Show debug window (disable to save resources)
+  server: "TW"                      # "TW", "NA"
+  language: "chinese"               # "english" "chinese"

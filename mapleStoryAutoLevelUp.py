@@ -314,9 +314,11 @@ class MapleStoryBot:
         self.loc_minimap_global, score, _ = find_pattern_sqdiff(
                                         self.img_map,
                                         self.img_minimap)
+
+        x_offset, y_offset = self.cfg["minimap"]["offset"]
         loc_player_global = (
-            self.loc_minimap_global[0] + self.loc_player_minimap[0],
-            self.loc_minimap_global[1] + self.loc_player_minimap[1]
+            self.loc_minimap_global[0] + self.loc_player_minimap[0] + x_offset,
+            self.loc_minimap_global[1] + self.loc_player_minimap[1] + y_offset
         )
 
         # Draw local minimap rectangle
@@ -812,9 +814,9 @@ class MapleStoryBot:
         x1, y1 = self.cfg["rune_warning"]["bottom_right"]
 
         # Debug
-        draw_rectangle(
-            self.img_frame_debug, (x0, y0), (y1-y0, x1-x0),
-            (0, 0, 255), "")
+        # draw_rectangle(
+        #     self.img_frame_debug, (x0, y0), (y1-y0, x1-x0),
+        #     (0, 0, 255), "")
         _, score, _ = find_pattern_sqdiff(
                         self.img_frame_gray[y0:y1, x0:x1],
                         self.img_rune_warning)
@@ -1296,7 +1298,13 @@ class MapleStoryBot:
 
                 # Attempt to trigger rune
                 self.kb.press_key("up", 0.02)
-                time.sleep(1) # Wait for rune game to pop up
+
+                # Wait for rune game to pop up
+                if self.cfg["system"]["server"] == "NA":
+                    # N.A server needs wait longer for rune scene to pop up
+                    time.sleep(4)
+                else:
+                    time.sleep(1)
 
                 # If entered the game, start solving rune
                 if self.is_in_rune_game():
