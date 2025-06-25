@@ -540,10 +540,13 @@ def mask_route_colors(img_map, img_route, color_code):
     # Parse color_code keys to list of RGB tuples
     target_colors = [tuple(map(int, color_str.split(','))) for color_str in color_code.keys()]
 
-    # Create an empty mask
-    mask = np.zeros(img_map.shape[:2], dtype=bool)
+    # Ensure dimensions match
+    if img_map.shape[:2] != img_route.shape[:2]:
+        logger.warning(f"[mask_route_colors] Resizing img_map from {img_map.shape} to {img_route.shape}")
+        img_map = cv2.resize(img_map, (img_route.shape[1], img_route.shape[0]))
 
     # Build mask for each color
+    mask = np.zeros(img_map.shape[:2], dtype=bool)
     for color in target_colors:
         matches = np.all(img_map == color, axis=-1)
         mask |= matches
