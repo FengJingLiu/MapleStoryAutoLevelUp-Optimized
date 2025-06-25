@@ -350,7 +350,7 @@ class MapleStoryBot:
                 boxs.append((x, y, w, h))
 
         if not boxs:
-            return None  # red bar not found
+            return None, None  # red bar not found
 
         # Sort box by area
         boxs.sort(key=lambda box: box[2] * box[3], reverse=True)
