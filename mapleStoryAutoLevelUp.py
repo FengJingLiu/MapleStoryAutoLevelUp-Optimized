@@ -9,7 +9,6 @@ import argparse
 import glob
 import sys
 
-
 # Library import
 import numpy as np
 import cv2
@@ -19,13 +18,14 @@ from logger import logger
 from util import find_pattern_sqdiff, draw_rectangle, screenshot, nms, \
                 load_image, get_mask, get_minimap_loc_size, get_player_location_on_minimap, \
                 is_mac, nms_matches, override_cfg, load_yaml, get_all_other_player_locations_on_minimap, \
-                click_in_game_window
+                click_in_game_window, mask_route_colors, to_opencv_hsv
 from KeyBoardController import KeyBoardController
 if is_mac():
     from GameWindowCapturorForMac import GameWindowCapturor
 else:
     from GameWindowCapturor import GameWindowCapturor
 from HealthMonitor import HealthMonitor
+from profiler import Profiler
 
 class MapleStoryBot:
     '''
@@ -45,6 +45,7 @@ class MapleStoryBot:
         self.red_dot_center_prev = None # previous other player location in minimap
         # Coordinate (top-left coordinate)
         self.loc_nametag = (0, 0) # nametag location on game screen
+        self.loc_party_red_bar = (0, 0) # party red bar location on game screen
         self.loc_minimap = (0, 0) # minimap location on game screen
         self.loc_player = (0, 0) # player location on game screen
         self.loc_player_minimap = (0, 0) # player location on minimap
@@ -101,12 +102,18 @@ class MapleStoryBot:
             # Load route*.png from minimaps/
             route_files = sorted(glob.glob(f"minimaps/{args.map}/route*.png"))
             route_files = [p for p in route_files if not p.endswith("route_rest.png")]
-            self.img_routes = [
-                cv2.cvtColor(load_image(p), cv2.COLOR_BGR2RGB) for p in route_files
-            ]
+            self.img_routes = []
+            for route_file in route_files:
+                img = cv2.cvtColor(load_image(route_file), cv2.COLOR_BGR2RGB)
+                # Remove pixel in map that is color code
+                img = mask_route_colors(self.img_map, img, self.cfg["route"]["color_code"])
+                self.img_routes.append(img)
+
             # Load route_rest.png from minimaps/
             self.img_route_rest = cv2.cvtColor(
                 load_image(f"minimaps/{args.map}/route_rest.png"), cv2.COLOR_BGR2RGB)
+            self.img_route_rest = mask_route_colors(self.img_map, self.img_route_rest,
+                                                    self.cfg["route"]["color_code"])
 
         # Load player's name tag
         self.img_nametag = load_image(f"nametag/{args.nametag}.png")
@@ -178,6 +185,9 @@ class MapleStoryBot:
         if self.cfg["health_monitor"]["enable"]:
             self.health_monitor.start()
 
+        # Start profiler
+        self.profiler = Profiler(self.cfg)
+
     def get_player_location_by_nametag(self):
         '''
         Detects the player's location based on the nametag position in the game window.
@@ -208,6 +218,14 @@ class MapleStoryBot:
         elif self.cfg["nametag"]["mode"] == "grayscale":
             img_roi = img_camera
             img_nametag = self.img_nametag_gray
+        elif self.cfg["nametag"]["mode"] == "histogram_eq":
+            # Apply histogram equalization
+            img_nametag_eq = cv2.equalizeHist(self.img_nametag_gray)
+            img_camera_eq = cv2.equalizeHist(img_camera)
+
+            # Apply global (fixed) threshold
+            _, img_nametag = cv2.threshold(img_nametag_eq, 150, 255, cv2.THRESH_BINARY)
+            _, img_roi = cv2.threshold(img_camera_eq, 150, 255, cv2.THRESH_BINARY)
         else:
             logger.error(f"Unsupported nametag detection mode: {self.cfg['nametag']['mode']}")
             return
@@ -300,12 +318,56 @@ class MapleStoryBot:
                      self.loc_nametag[1] + self.img_nametag.shape[0] + 30),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
 
-        # Draw player center for debugging
-        cv2.circle(self.img_frame_debug,
-                loc_player, radius=3,
-                color=(0, 0, 255), thickness=-1)
-
         return loc_player
+
+    def get_player_location_by_party_red_bar(self):
+        '''
+        get_player_location_by_party_red_bar
+        '''
+        # Get camera area
+        img_camera = self.img_frame[
+            self.cfg["camera"]["y_start"]:self.cfg["camera"]["y_end"], :]
+
+        # Convert to HSV
+        img_hsv = cv2.cvtColor(img_camera, cv2.COLOR_BGR2HSV)
+        lower_red = to_opencv_hsv(self.cfg["party_red_bar"]["lower_red"])
+        upper_red = to_opencv_hsv(self.cfg["party_red_bar"]["upper_red"])
+        mask_red = cv2.inRange(img_hsv, lower_red, upper_red)
+        # cv2.imshow("mask_red", mask_red)
+
+        # Find contours on mask_red
+        contours, _ = cv2.findContours(mask_red, cv2.RETR_EXTERNAL,
+                                       cv2.CHAIN_APPROX_SIMPLE)
+
+        # Filter contour by specific geometry trait of red bar
+        boxs = []
+        for c in contours:
+            x, y, w, h = cv2.boundingRect(c)
+            area = cv2.contourArea(c)
+            fill_rate = float(area) / (h*w)
+            if 5 <= h <= 7 and 1 <= w <= 50 and 10 <= area and fill_rate >= 0.7:
+                # cv2.drawContours(self.img_frame_debug, [c], -1, (0, 255, 0), 1)
+                boxs.append((x, y, w, h))
+
+        if not boxs:
+            return None  # red bar not found
+
+        # Sort box by area
+        boxs.sort(key=lambda box: box[2] * box[3], reverse=True)
+
+        # Consider the biggest area as party red bar
+        x, y, w, h = boxs[0]
+
+        # Offset coordinate
+        loc_party_red_bar = (x, y + self.cfg["camera"]["y_start"])
+        loc_player = (loc_party_red_bar[0] + self.cfg["party_red_bar"]["offset"][0],
+                      loc_party_red_bar[1] + self.cfg["party_red_bar"]["offset"][1])
+
+        # visualize for debug
+        draw_rectangle(self.img_frame_debug, loc_party_red_bar,
+                    (h, w), (0, 255, 0), "party red bar", thickness=1, text_height=0.4)
+
+        return loc_player, loc_party_red_bar
 
     def get_player_location_on_global_map(self):
         '''
@@ -1025,9 +1087,11 @@ class MapleStoryBot:
 
     def get_random_action(self):
         '''
-        get_random_action
+        get_random_action - pick a random action except 'up'
         '''
-        action = random.choice(list(self.color_code.values()))
+        # Exclude the 'up' action
+        actions = [v for k, v in self.color_code.items() if v != 'up' and v != 'teleport up']
+        action = random.choice(actions)
         logger.warning(f"Perform random action: {action}")
         return action
 
@@ -1109,8 +1173,6 @@ class MapleStoryBot:
         # Update FPS timer
         self.t_last_frame = time.time()
 
-
-        
     def channel_change(self):
         '''
         channel_change
@@ -1143,6 +1205,9 @@ class MapleStoryBot:
         '''
         Process one game window frame
         '''
+
+        self.profiler.start()
+
         # Get window game raw frame
         self.frame = self.capture.get_frame()
         if self.frame is None:
@@ -1159,6 +1224,14 @@ class MapleStoryBot:
         self.img_frame = cv2.resize(self.frame, (1296, 759),
                                     interpolation=cv2.INTER_NEAREST)
 
+        # Grayscale game window
+        self.img_frame_gray = cv2.cvtColor(self.img_frame, cv2.COLOR_BGR2GRAY)
+
+        # Image for debug use
+        self.img_frame_debug = self.img_frame.copy()
+
+        self.profiler.mark("Image Preprocessing")
+
         # Get minimap coordinate and size on game window
         minimap_result = get_minimap_loc_size(self.img_frame)
         if minimap_result is None:
@@ -1168,12 +1241,7 @@ class MapleStoryBot:
             x, y, w, h = minimap_result
             self.loc_minimap = (x, y)
             self.img_minimap = self.img_frame[y:y+h, x:x+w]
-
-        # Grayscale game window
-        self.img_frame_gray = cv2.cvtColor(self.img_frame, cv2.COLOR_BGR2GRAY)
-
-        # Image for debug use
-        self.img_frame_debug = self.img_frame.copy()
+        self.profiler.mark("get_minimap_loc_size")
 
         # Get current route image
         if not self.args.patrol:
@@ -1201,13 +1269,34 @@ class MapleStoryBot:
             self.img_frame_debug[y_s+30*i:y_s+h+30*i, x_s:x_s+w] = \
                 self.img_frame[self.cfg["camera"]["y_end"]:, :][y:y+h, x:x+w]
 
+        self.profiler.mark("Health Monitor")
+
         # Check whether "Please remove runes" warning appears on screen
         if self.is_rune_warning():
             self.loc_rune = None
             self.switch_status("finding_rune") # Stop hunting and start find runes
 
+        self.profiler.mark("Rune Warning Detection")
+
         # Get player location in game window
-        self.loc_player = self.get_player_location_by_nametag()
+        if self.cfg["nametag"]["enable"]:
+            loc_player = self.get_player_location_by_nametag()
+        else:
+            loc_player, loc_party_red_bar = self.get_player_location_by_party_red_bar()
+            if loc_party_red_bar is not None:
+                self.loc_party_red_bar = loc_party_red_bar
+
+        # Update player location
+        if loc_player is not None:
+            self.loc_player = loc_player
+
+        # Draw player center for debugging
+        cv2.circle(self.img_frame_debug,
+                self.loc_player, radius=3,
+                color=(0, 0, 255), thickness=-1)
+
+
+        self.profiler.mark("Nametag Detection")
 
         # Get player location on minimap
         loc_player_minimap = get_player_location_on_minimap(
@@ -1215,6 +1304,8 @@ class MapleStoryBot:
                                 minimap_player_color=self.cfg["minimap"]["player_color"])
         if loc_player_minimap:
             self.loc_player_minimap = loc_player_minimap
+
+        self.profiler.mark("Player Location Detection")
 
         # Get other player location on minimap & change channel
         '''
@@ -1266,11 +1357,15 @@ class MapleStoryBot:
         else:
             self.red_dot_center_prev = None
 
+        self.profiler.mark("Other Player Location Detection")
+
         # Get player location on global map
         if self.args.patrol:
             self.loc_player_global = self.loc_player_minimap
         else:
             self.loc_player_global = self.get_player_location_on_global_map()
+
+        self.profiler.mark("Global Map Matching")
 
         # Check whether a rune icon is near player
         if self.status == "finding_rune":
@@ -1286,11 +1381,13 @@ class MapleStoryBot:
 
             dt = time.time() - self.t_last_rune_trigger
             dx = abs(self.loc_player[0] - self.loc_rune[0])
-            logger.info(f"[Near Rune] Distance to rune: {dx}")
+            dy = abs(self.loc_player[1] - self.loc_rune[1])
+            logger.info(f"[Near Rune] Player distance to rune: ({dx}, {dy})")
 
             # Check if close enough to trigger the rune
             if dt > self.cfg["rune_find"]["rune_trigger_cooldown"] and \
-                dx < self.cfg["rune_find"]["rune_trigger_distance"]:
+                dx < self.cfg["rune_find"]["rune_trigger_distance_x"] and \
+                dy < self.cfg["rune_find"]["rune_trigger_distance_y"]:
 
                 self.kb.set_command("stop") # stop character
                 time.sleep(0.1) # Wait for character to stop
@@ -1316,6 +1413,8 @@ class MapleStoryBot:
 
                 self.t_last_rune_trigger = time.time()
 
+        self.profiler.mark("Rune Detection")
+
         # Get monster search box
         margin = self.cfg["monster_detect"]["search_box_margin"]
         if self.args.attack == "aoe_skill":
@@ -1337,6 +1436,8 @@ class MapleStoryBot:
             self.monster_info = self.get_monsters_in_range((x0, y0), (x1, y1))
         else:
             self.monster_info = []
+
+        self.profiler.mark("Monster Detection")
 
         # Get attack direction
         if self.args.attack == "aoe_skill":
@@ -1515,6 +1616,8 @@ class MapleStoryBot:
         # send command to keyboard controller
         self.kb.set_command(command)
 
+        self.profiler.mark("Determine Command")
+
         # Debug: show current command on screen
         if command and len(command) > 0:
             cv2.putText(self.img_frame_debug, f"CMD: {command}",
@@ -1550,6 +1653,42 @@ class MapleStoryBot:
                         interpolation=cv2.INTER_NEAREST)
             cv2.imshow("Route Map Debug", self.img_route_debug)
 
+        self.profiler.mark("Debug Window Show")
+
+        # Print profiler result
+        if self.cfg["profiler"]["enable"] and \
+            self.profiler.total_frames % self.cfg["profiler"]["print_frequency"] == 0:
+            logger.info('\n' + self.profiler.report())
+
+def main(args):
+    '''
+    Main Function
+    '''
+    try:
+        mapleStoryBot = MapleStoryBot(args)
+    except Exception as e:
+        logger.error(f"MapleStoryBot Init failed: {e}")
+        sys.exit(1)
+    else:
+        while True:
+
+            t_start = time.time()
+
+            # Process one game window frame
+            mapleStoryBot.run_once()
+
+            # Exit if 'q' is pressed
+            key = cv2.waitKey(1) & 0xFF
+            if key == ord('q'):
+                break
+
+            # Cap FPS to save system resource
+            frame_duration = time.time() - t_start
+            target_duration = 1.0 / mapleStoryBot.cfg["system"]["fps_limit_main"]
+            if frame_duration < target_duration:
+                time.sleep(target_duration - frame_duration)
+
+        cv2.destroyAllWindows()
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
@@ -1602,27 +1741,6 @@ if __name__ == '__main__':
         help='Choose customized config yaml file in config/'
     )
 
-    try:
-        mapleStoryBot = MapleStoryBot(parser.parse_args())
-    except Exception as e:
-        logger.error(f"MapleStoryBot Init failed: {e}")
-        sys.exit(1)
-    else:
-        while True:
-            t_start = time.time()
+    args = parser.parse_args()
 
-            # Process one game window frame
-            mapleStoryBot.run_once()
-
-            # Exit if 'q' is pressed
-            key = cv2.waitKey(1) & 0xFF
-            if key == ord('q'):
-                break
-
-            # Cap FPS to save system resource
-            frame_duration = time.time() - t_start
-            target_duration = 1.0 / mapleStoryBot.cfg["system"]["fps_limit_main"]
-            if frame_duration < target_duration:
-                time.sleep(target_duration - frame_duration)
-
-        cv2.destroyAllWindows()
+    main(args)

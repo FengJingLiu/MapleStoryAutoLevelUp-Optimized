@@ -106,15 +106,30 @@ edge_teleport:
   color_code: [255, 127, 127]  # 🎨 RGB color code to represent platform edge
 
 # ────────────────
+# ❤️ Party Red Bar Detection
+# ────────────────
+# Detects your character's party red on on the game window to estimate player location.
+# This feature will only turn on when nametag.enable == False
+party_red_bar:
+  lower_red: [0, 60, 60]   # ❤️ HSV, darker red of party health bar
+  upper_red: [0, 100, 100] # ❤️ HSV, brighter red of party health bar
+
+  # 🎯 Offset from the top-left corner of the party red bar to the character center
+  offset: [20, 66]  # in pixels
+
+# ────────────────
 # 🏷️ NameTag Recognition
 # ────────────────
 # Detects your character's nametag on the game window to estimate player location.
+# This method is computational demending and unreliable in some map.
+# Using party red bar to locate player is almost always a better option
 
 nametag:
+  enable: False # Only switch back to 'True' when party red bar detection doesn't work for you
   # 🧪 Comparison mode for matching the nametag:
   #   - "grayscale": match using grayscale image
   #   - "white_mask": match using binarized image
-  mode: "grayscale"  # Options: "grayscale", "white_mask"
+  mode: "grayscale"  # Options: "grayscale", "white_mask", "histogram_eq"
 
   # 🎯 Offset from the top-left corner of the matched nametag to the character center
   offset: [-50, 30]  # in pixels
@@ -250,8 +265,8 @@ rune_find:
                               # If the timeout is reached, the bot will fallback to route_rest.png and rest.
   near_rune_duration: 10       # 🕒 Duration to interact with rune when a positive detection occurs
   rune_trigger_cooldown: 0.3    # 🕒 Cooldown for 'up' key rune trigger
-  rune_trigger_distance: 20
-
+  rune_trigger_distance_x: 20    # only press 'up' when player distance(in pixel) to the rune is close enough.
+  rune_trigger_distance_y: 200
 # ─────────────────────────────
 # 🧩 Rune Mini-Game Solver
 # ─────────────────────────────
@@ -313,7 +328,6 @@ game_window:
   title: "MapleStory Worlds-Artale (繁體中文版)"  # 🎮 Game window title (used to detect the correct window)
   size: [752, 1282]                              # 📐 Game window size [height, width] in pixels
 
-
 # ─────────────────────────────
 # 📩 Email
 # ─────────────────────────────
@@ -339,3 +353,12 @@ system:
   show_debug_window: True           # 🐞 Show debug window (disable to save resources)
   server: "TW"                      # "TW", "NA"
   language: "chinese"               # "english" "chinese"
+
+# ────────────────
+# ⚙️ Profiler
+# ────────────────
+# For FPS/performance debugging
+# When the FPS is lower than 10, please use profiler to find which code block is costing more time 
+profiler:
+  enable: False # To print the profiler result or not
+  print_frequency: 30 # Print profiler result for every 30 frames

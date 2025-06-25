@@ -138,7 +138,7 @@ def get_iou(box1, box2):
 
     return inter_area / union
 
-def screenshot(img, prefix="screenshot"):
+def screenshot(img, suffix="screenshot"):
     '''
     Save the given image as a screenshot file.
 
@@ -150,10 +150,10 @@ def screenshot(img, prefix="screenshot"):
     '''
 
     os.makedirs("screenshot", exist_ok=True)  # ensure directory exists
-    
+
     # Generate timestamp string
     timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    filename = f"screenshot/{prefix}_{timestamp}.png"
+    filename = f"screenshot/{timestamp}_{suffix}.png"
     cv2.imwrite(filename, img)
     logger.info(f"Screenshot saved: {filename}")
 
@@ -524,3 +524,24 @@ def check_inbox(email_addr, password, token):
 
     imap.logout()
     return None
+
+def mask_route_colors(img_map, img_route, color_code):
+    """
+    Masks all pixels in img_route where img_map contains any route color.
+    Pixels at those positions in img_route are set to black (0,0,0).
+    """
+    # Parse color_code keys to list of RGB tuples
+    target_colors = [tuple(map(int, color_str.split(','))) for color_str in color_code.keys()]
+
+    # Create an empty mask
+    mask = np.zeros(img_map.shape[:2], dtype=bool)
+
+    # Build mask for each color
+    for color in target_colors:
+        matches = np.all(img_map == color, axis=-1)
+        mask |= matches
+
+    # Apply mask to img_route (set those pixels to black)
+    img_route[mask] = (0, 0, 0)
+
+    return img_route

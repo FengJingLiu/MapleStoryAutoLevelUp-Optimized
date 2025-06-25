@@ -3,3 +3,4 @@ screenshot/
 *.log
 nametag/
 *.DS_Store
+*.prof

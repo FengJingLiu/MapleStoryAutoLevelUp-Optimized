@@ -6,7 +6,7 @@ An auto leveling up script for Maple Story Artale
 
 [▶ Watch demo on YouTube](https://www.youtube.com/watch?v=QeEXLHO8KN4)
 
-This work purely-based on Computer Vision technique, it doesn't required access game's memory. Instead, it detects image pattern(i.e., player nametag and monsters) on game window screen and send simulated keyboard command to the game to control player's character.
+This work purely-based on Computer Vision technique, it doesn't required access game's memory. Instead, it detects image pattern(i.e., player red health bar and monsters) on game window screen and send simulated keyboard command to the game to control player's character.
 
 ✅ No memory access required
 
@@ -36,9 +36,8 @@ pip install -r requirements.txt
 ## Preparation
 1. Run MapleStory and make sure the game is on windowed mode and game window size is resized to smallest
 2. Turn on minimap on the top-left corner of the game window
-3. Execute the script and press 'F2' to take a screenshot
-4. Edit saved screenshot, crop your character nametag, mark background green, and use it to replace name_tag.png
-5. Set up your own key-binding at config/config_edit_me.yaml
+3. Create a party in the game(press 'P' and click 'build'), and make sure a red bar shows on top of your character
+4. Set up your own key-binding at config/config_edit_me.yaml
 
 ## Run
 Run command
@@ -121,7 +120,7 @@ python routeRecorder.py --new_map <map_directory_name>
 | `F3` | Save current route map and start a new one |
 | `F4` | Save the current map to map.png            |
 
-## Auto Download Monster
+## Want to Make a New Monster? → Mob Maker
 
 You can find the names of the monsters to be added at the following website:
 

@@ -2,7 +2,7 @@ import logging
 import datetime
 
 # Create today's date string
-today_str = datetime.datetime.now().strftime("%Y-%m-%d")
+now_str = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
 
 # Create logger object
 logger = logging.getLogger()
@@ -12,7 +12,7 @@ logger.setLevel(logging.INFO)
 formatter = logging.Formatter('[%(asctime)s] %(levelname)s: %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
 
 # File handler
-file_handler = logging.FileHandler(f'maplestory_{today_str}.log', mode='w', encoding="utf-8")
+file_handler = logging.FileHandler(f'MSBot_{now_str}.log', mode='w', encoding="utf-8")
 file_handler.setFormatter(formatter)
 logger.addHandler(file_handler)
 
