@@ -35,8 +35,7 @@ class MapleStoryBot:
         '''
         Init MapleStoryBot
         '''
-        # self.cfg = Config # Configuration
-        self.args = args # User arguments
+        self.args = args # User args
         self.status = "hunting" # 'resting', 'finding_rune', 'near_rune'
         self.idx_routes = 0 # Index of route map
         self.monster_info = [] # monster information
@@ -1182,6 +1181,7 @@ class MapleStoryBot:
     def channel_change(self):
         '''
         channel_change
+        # TODO: need to create a new party after channel change
         '''
         logger.info("[channel_change] Start")
         coords = [
@@ -1476,7 +1476,7 @@ class MapleStoryBot:
             # Choose attack direction and nearest monster
             attack_direction = None
             nearest_monster = None
-            
+
             # Additional validation: check if monster is actually on the correct side
             def is_monster_on_correct_side(monster, direction):
                 if monster is None:
@@ -1485,12 +1485,12 @@ class MapleStoryBot:
                 mw, mh = monster["size"]
                 monster_center_x = mx + mw // 2
                 player_x = self.loc_player[0]
-                
+
                 if direction == "left":
                     return monster_center_x < player_x  # Monster should be left of player
                 else:  # direction == "right"
                     return monster_center_x > player_x  # Monster should be right of player
-            
+
             # Only choose direction if there's a clear winner and monster is on correct side
             if monster_left is not None and monster_right is None and is_monster_on_correct_side(monster_left, "left"):
                 attack_direction = "left"
@@ -1502,7 +1502,7 @@ class MapleStoryBot:
                 # Both sides have monsters, check distance and side validation
                 left_valid = is_monster_on_correct_side(monster_left, "left")
                 right_valid = is_monster_on_correct_side(monster_right, "right")
-                
+
                 if left_valid and not right_valid:
                     attack_direction = "left"
                     nearest_monster = monster_left
@@ -1516,7 +1516,7 @@ class MapleStoryBot:
                     attack_direction = "right"
                     nearest_monster = monster_right
                 # If both valid but distances too close, don't attack to avoid confusion
-            
+
             # Debug attack direction selection
             if monster_left is not None or monster_right is not None:
                 left_side_ok = is_monster_on_correct_side(monster_left, "left") if monster_left else False

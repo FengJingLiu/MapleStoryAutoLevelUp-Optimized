@@ -40,13 +40,20 @@ def save_yaml(data, path):
     with open(path, 'w', encoding='utf-8') as f:
         yaml.dump(data, f, default_flow_style=False)
 
-def override_cfg(cfg, cfg_override):
-    for k, v in cfg_override.items():
-        if isinstance(v, dict) and isinstance(cfg.get(k), dict):
-            cfg[k] = override_cfg(cfg.get(k, {}), v)
+def override_cfg(base, override):
+    '''
+    override_cfg
+    Return a new dictionary
+    '''
+    result = {}
+    for k in set(base) | set(override):
+        if k in base and k in override and isinstance(base[k], dict) and isinstance(override[k], dict):
+            result[k] = override_cfg(base[k], override[k])
+        elif k in override:
+            result[k] = override[k]
         else:
-            cfg[k] = v
-    return cfg
+            result[k] = base[k]
+    return result
 
 def convert_lists_to_tuples(obj):
     if isinstance(obj, list):
