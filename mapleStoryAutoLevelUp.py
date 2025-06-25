@@ -324,8 +324,14 @@ class MapleStoryBot:
         '''
         get_player_location_by_party_red_bar
         '''
+        # Zero out minimap area in the img_frame
+        img_frame = self.img_frame.copy()
+        x, y = self.loc_minimap
+        h, w = self.img_minimap.shape[:2]
+        img_frame[y:y+h, x:x+w] = 0
+
         # Get camera area
-        img_camera = self.img_frame[
+        img_camera = img_frame[
             self.cfg["camera"]["y_start"]:self.cfg["camera"]["y_end"], :]
 
         # Convert to HSV
