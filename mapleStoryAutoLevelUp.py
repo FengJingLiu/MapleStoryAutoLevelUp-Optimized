@@ -576,6 +576,17 @@ class MapleStoryBot:
 
         img_roi = self.img_frame[y0:y1, x0:x1]
 
+        # Shift player's location into ROI coordinate system
+        px, py = self.loc_player
+        px_in_roi = px - x0
+        py_in_roi = py - y0
+
+        # Define rectangle range around player (in ROI coordinate)
+        char_x_min = max(0, px_in_roi - self.cfg["character"]["width"] // 2)
+        char_x_max = min(img_roi.shape[1], px_in_roi + self.cfg["character"]["width"] // 2)
+        char_y_min = max(0, py_in_roi - self.cfg["character"]["height"] // 2)
+        char_y_max = min(img_roi.shape[0], py_in_roi + self.cfg["character"]["height"] // 2)
+
         monster_info = []
         for monster_name, monster_imgs in self.monsters.items():
             for img_monster, mask_monster in monster_imgs:
@@ -586,17 +597,6 @@ class MapleStoryBot:
                     black_mask = np.all(img_roi == [0, 0, 0], axis=2).astype(np.uint8) * 255
                     cv2.imshow("Black Pixel Mask", black_mask)
 
-                    # Shift player's location into ROI coordinate system
-                    px, py = self.loc_player
-                    px_in_roi = px - x0
-                    py_in_roi = py - y0
-
-                    # Define rectangle range around player (in ROI coordinate)
-                    char_x_min = max(0, px_in_roi - self.cfg["character"]["width"] // 2)
-                    char_x_max = min(img_roi.shape[1], px_in_roi + self.cfg["character"]["width"] // 2)
-                    char_y_min = max(0, py_in_roi - self.cfg["character"]["height"] // 2)
-                    char_y_max = min(img_roi.shape[0], py_in_roi + self.cfg["character"]["height"] // 2)
-
                     # Zero out mask inside this region (ignore player's own character)
                     black_mask[char_y_min:char_y_max, char_x_min:char_x_max] = 0
 
@@ -605,7 +605,6 @@ class MapleStoryBot:
                     # cv2.imshow("Black Mask", closed_mask)
 
                     # draw player character bounding box
-
                     draw_rectangle(
                         self.img_frame_debug, (char_x_min+x0, char_y_min+y0),
                         (self.cfg["character"]["height"], self.cfg["character"]["width"]),
@@ -630,6 +629,9 @@ class MapleStoryBot:
                     # Create masks (already grayscale)
                     mask_pattern = np.all(img_monster == [0, 0, 0], axis=2).astype(np.uint8) * 255
                     mask_roi = np.all(img_roi == [0, 0, 0], axis=2).astype(np.uint8) * 255
+
+                    # Zero out mask inside this region (ignore player's own character)
+                    mask_roi[char_y_min:char_y_max, char_x_min:char_x_max] = 0
 
                     # Apply Gaussian blur (soften the masks)
                     blur = self.cfg["monster_detect"]["contour_blur"]
