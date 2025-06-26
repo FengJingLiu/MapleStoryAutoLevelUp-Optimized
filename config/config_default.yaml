@@ -198,6 +198,14 @@ auto_change_channel: ""
 other_player_move_pixel: 10  # only work when auto_change_channel == "pixel" 
 
 # ────────────────
+# Return_if_no_potion
+# ────────────────
+is_use_return_if_no_potion:
+  enable: False
+  return_home_key: "Home"       # 🔁 Key to use return home scroll.
+  return_watch_dog_timeout: 3   # 🕒 Duration to detect HP is lower than "add_hp_ratio"
+
+# ────────────────
 # 🧭 Route Following
 # ────────────────
 # The character follows a pre-defined route image (route*.png) using color-coded commands.
