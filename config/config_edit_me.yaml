@@ -5,6 +5,8 @@
 
 # Note that you can create your own config_XXXXX.yaml and assign it to script by
 # adding this arguments: --cfg XXXXX
+
+# Note that you need to uncomment the WHOLE section(including header) of the configuration
 # -----------------------------------------
 
 # 🎯 KEY BINDINGS
@@ -17,6 +19,7 @@
 #   add_hp: "1"               # ❤️ Assign to HP potion hotkey. Match with your potion shortcut.
 #   add_mp: "2"               # 💧 Assign to MP potion hotkey. Match with your potion shortcut.
 #   return_home: "home"       # 🔁 Key to use return home scroll.
+#   party: "p"                # ⌨️ Party window shortcut
 
 # 🧙 BUFF SKILLS
 # Add keys for buffs you want to auto-cast. Match cooldowns with actual in-game durations.

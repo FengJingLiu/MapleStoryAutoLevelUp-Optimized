@@ -82,7 +82,7 @@ class MapleStoryBot:
             cfg = override_cfg(cfg, load_yaml("config/config_macOS.yaml"))
         # Override with user customized config
         self.cfg = override_cfg(cfg, load_yaml(f"config/config_{args.cfg}.yaml"))
-
+        # Dump config to log for debugging
         logger.debug(yaml.dump(self.cfg, sort_keys=False,
                      indent=2, default_flow_style=False))
 
@@ -168,6 +168,10 @@ class MapleStoryBot:
                 logger.error(f"No images found in monster/{monster_name}/{monster_name}*")
                 raise RuntimeError(f"No images found in monster/{monster_name}/{monster_name}*")
         logger.info(f"Loaded monsters: {list(self.monsters.keys())}")
+
+        # Load party window image
+        self.img_create_party_enable  = load_image("misc/party_button_create_enable.png")
+        self.img_create_party_disable = load_image("misc/party_button_create_disable.png")
 
         # Start keyboard controller thread
         self.kb = KeyBoardController(self.cfg, args)
@@ -766,6 +770,26 @@ class MapleStoryBot:
         self.status = new_status
         self.t_last_switch_status = time.time()
 
+    def get_img_frame(self):
+        '''
+        get_img_frame
+        '''
+        # Get window game raw frame
+        self.frame = self.capture.get_frame()
+        if self.frame is None:
+            logger.warning("Failed to capture game frame.")
+            return
+
+        # Make sure resolution is as expected
+        if self.cfg["game_window"]["size"] != self.frame.shape[:2]:
+            text = f"Unexpeted window size: {self.frame.shape[:2]} (expect {self.cfg['game_window']['size']})"
+            logger.error(text)
+            return
+
+        # Resize raw frame to (1296, 759)
+        return cv2.resize(self.frame, (1296, 759),
+                   interpolation=cv2.INTER_NEAREST)
+
     def solve_rune(self):
         '''
         Automatically solves the rune puzzle mini-game by recognizing directional arrows
@@ -788,10 +812,7 @@ class MapleStoryBot:
         while self.is_in_rune_game():
             for arrow_idx in [0,1,2,3]:
                 # Get lastest game screen frame buffer
-                self.frame = self.capture.get_frame()
-                # Resize game screen to 1296x759
-                self.img_frame = cv2.resize(self.frame, (1296, 759),
-                                            interpolation=cv2.INTER_NEAREST)
+                self.img_frame = self.get_img_frame()
 
                 # Crop arrow detection box
                 x0, y0 = self.cfg["rune_solver"]["arrow_box_coord"]
@@ -1013,9 +1034,7 @@ class MapleStoryBot:
             bool: True if the rune game is detected on screen, False otherwise.
         '''
         # Get lastest game screen frame buffer
-        self.frame = self.capture.get_frame()
-        # Resize game screen to 1296x759
-        self.img_frame = cv2.resize(self.frame, (1296, 759), interpolation=cv2.INTER_NEAREST)
+        self.img_frame = self.get_img_frame()
 
         # Crop arrow detection box
         x, y = self.cfg["rune_solver"]["arrow_box_coord"]
@@ -1181,6 +1200,33 @@ class MapleStoryBot:
         # Update FPS timer
         self.t_last_frame = time.time()
 
+    def ensure_is_in_party(self):
+        '''
+        ensure_is_in_party
+        '''
+        # open party window
+        self.kb.press_key(self.cfg["key"]["party"])
+
+        # Wait party window to show up
+        time.sleep(0.5)
+
+        # Update image frame
+        self.img_frame = self.get_img_frame()
+
+        # Find the 'create party' button
+        loc_enable, score_enable, _ = find_pattern_sqdiff(
+                        self.img_frame, self.img_create_party_enable)
+        if score_enable < self.cfg["party_red_bar"]["create_party_button_thres"]:
+            h, w = self.img_create_party_enable.shape[:2]
+            click_in_game_window(self.cfg["game_window"]["title"],
+                (loc_enable[0] + w // 2, loc_enable[1] + h // 2)
+            )
+        else:
+            logger.info("Cannot find create party button. Maybe player is in party already?")
+
+        # close party window
+        self.kb.press_key(self.cfg["key"]["party"])
+
     def channel_change(self):
         '''
         channel_change
@@ -1209,6 +1255,8 @@ class MapleStoryBot:
         click_in_game_window(window_title, coords[4])
         time.sleep(2)
         click_in_game_window(window_title, coords[5])
+        time.sleep(5)
+        self.ensure_is_in_party() # Make sure player is in party
 
     def terminate_threads(self):
         '''
@@ -1222,24 +1270,11 @@ class MapleStoryBot:
         '''
         Process one game window frame
         '''
-
+        # Start prfiler for performance debugging
         self.profiler.start()
 
-        # Get window game raw frame
-        self.frame = self.capture.get_frame()
-        if self.frame is None:
-            logger.warning("Failed to capture game frame.")
-            return
-
-        # Make sure resolution is as expected
-        if self.cfg["game_window"]["size"] != self.frame.shape[:2]:
-            text = f"Unexpeted window size: {self.frame.shape[:2]} (expect {self.cfg["game_window"]["size"]})"
-            logger.error(text)
-            return
-
-        # Resize raw frame to (1296, 759)
-        self.img_frame = cv2.resize(self.frame, (1296, 759),
-                                    interpolation=cv2.INTER_NEAREST)
+        # Get game window frame
+        self.img_frame = self.get_img_frame()
 
         # Grayscale game window
         self.img_frame_gray = cv2.cvtColor(self.img_frame, cv2.COLOR_BGR2GRAY)

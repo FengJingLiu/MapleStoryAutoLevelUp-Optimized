@@ -25,6 +25,7 @@ key:
   add_hp: "1"               # ❤️ Use HP potion. Set to "" to disable auto-healing
   add_mp: "2"               # 💧 Use MP potion. Set to "" to disable auto-mana
   return_home: "home"       # 🔁 Key to use return home scroll.
+  party: "p"                # ⌨️ Party window shortcut
 
 # ────────────────
 # 💫 Buff Skill
@@ -119,6 +120,7 @@ party_red_bar:
 
   # 🎯 Offset from the top-left corner of the party red bar to the character center
   offset: [20, 66]  # in pixels
+  create_party_button_thres: 0.1 # 📏 threshold for create party button matching
 
 # ────────────────
 # 🏷️ NameTag Recognition
