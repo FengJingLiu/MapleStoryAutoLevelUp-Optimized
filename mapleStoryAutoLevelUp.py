@@ -697,7 +697,7 @@ class MapleStoryBot:
                             "score": res[pt[1], pt[0]],
                     })
                 else:
-                    logger.error(f"Unexpected camera localization mode: {self.cfg["monster_detect"]["mode"]}")
+                    logger.error(f"Unexpected camera localization mode: {self.cfg['monster_detect']['mode']}")
                     return []
 
         # Apply Non-Maximum Suppression to monster detection
@@ -1397,7 +1397,7 @@ class MapleStoryBot:
                     total = dx + dy
                     logger.debug(f"[RedDot] Movement dx={dx}, dy={dy}, total={total}")
                     if total > self.cfg["other_player_move_pixel"]:
-                        logger.warning(f"Other player movement > {self.cfg["other_player_move_pixel"]}px detected, triggering channel change.")
+                        logger.warning(f"Other player movement > {self.cfg['other_player_move_pixel']}px detected, triggering channel change.")
                         self.kb.set_command("stop")
                         self.kb.disable()
                         time.sleep(1)
