@@ -16,6 +16,7 @@
 #   jump: "space"             # 🦘 Set to jump. No need to change unless you use a non-standard key.
 #   add_hp: "1"               # ❤️ Assign to HP potion hotkey. Match with your potion shortcut.
 #   add_mp: "2"               # 💧 Assign to MP potion hotkey. Match with your potion shortcut.
+#   return_home: "home"       # 🔁 Key to use return home scroll.
 
 # 🧙 BUFF SKILLS
 # Add keys for buffs you want to auto-cast. Match cooldowns with actual in-game durations.

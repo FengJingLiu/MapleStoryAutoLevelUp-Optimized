@@ -38,11 +38,12 @@ class MapleStoryBot:
         Init MapleStoryBot
         '''
         self.args = args # User args
-        self.status = "hunting" # 'resting', 'finding_rune', 'near_rune'
+        self.status = "hunting" # 'finding_rune', 'near_rune'
         self.idx_routes = 0 # Index of route map
         self.monster_info = [] # monster information
         self.fps = 0 # Frame per second
         self.is_first_frame = True # first frame flag
+        self.is_terminated = False # Close all object and thread if True
         self.red_dot_center_prev = None # previous other player location in minimap
         # Coordinate (top-left coordinate)
         self.loc_nametag = (0, 0) # nametag location on game screen
@@ -98,7 +99,6 @@ class MapleStoryBot:
             # Patrol mode doesn't need map or route
             self.img_map = None
             self.img_routes = []
-            self.img_route_rest = None
         else:
             # Load map.png from minimaps/
             self.img_map = load_image(f"minimaps/{args.map}/map.png",
@@ -112,12 +112,6 @@ class MapleStoryBot:
                 # Remove pixel in map that is color code
                 img = mask_route_colors(self.img_map, img, self.cfg["route"]["color_code"])
                 self.img_routes.append(img)
-
-            # Load route_rest.png from minimaps/
-            self.img_route_rest = cv2.cvtColor(
-                load_image(f"minimaps/{args.map}/route_rest.png"), cv2.COLOR_BGR2RGB)
-            self.img_route_rest = mask_route_colors(self.img_map, self.img_route_rest,
-                                                    self.cfg["route"]["color_code"])
 
         # Load player's name tag
         self.img_nametag = load_image(f"nametag/{args.nametag}.png")
@@ -191,6 +185,8 @@ class MapleStoryBot:
 
         # Start profiler
         self.profiler = Profiler(self.cfg)
+
+        logger.info("MapleStory Bot Init Done")
 
     def get_player_location_by_nametag(self):
         '''
@@ -1214,6 +1210,14 @@ class MapleStoryBot:
         time.sleep(2)
         click_in_game_window(window_title, coords[5])
 
+    def terminate_threads(self):
+        '''
+        terminate_and_wait_threads
+        '''
+        self.capture.is_terminated = True
+        self.health_monitor.is_terminated = True
+        logger.info(f"[terminate_threads] Terminated all threads")
+
     def run_once(self):
         '''
         Process one game window frame
@@ -1606,23 +1610,25 @@ class MapleStoryBot:
                 command = self.get_random_action()
 
             # If the HP is reduced switch to hurting (other player probably help solved the rune)
-            if  time.time() - self.health_monitor.last_hp_reduce_time < 3 and \
+            if  time.time() - self.health_monitor.t_last_hp_reduce < 3 and \
                 time.time() - self.t_last_switch_status > 3:
                 self.switch_status("hunting")
 
             # Check if finding rune timeout
             if time.time() - self.t_last_switch_status > self.cfg["rune_find"]["timeout"]:
-                self.switch_status("resting")
-                # TODO: terminate the script
+                if self.cfg["rune_find"]["timeout_action"] == "change_channel":
+                    # Change channel to avoid rune
+                    self.channel_change()
+                else:
+                    # Return home
+                    self.kb.press_key(self.cfg["key"]["return_home_key"])
+                    self.is_terminated = True
+                    self.kb.is_terminated = True
 
         elif self.status == "near_rune":
             # Stay in near_rune status for only a few seconds
             if time.time() - self.t_last_switch_status > self.cfg["rune_find"]["near_rune_duration"]:
                 self.switch_status("hunting")
-
-        elif self.status == "resting":
-            self.img_routes = [self.img_route_rest] # Set up resting route
-            self.idx_routes = 0
 
         else:
             logger.error(f"Unknown status: {self.status}")
@@ -1684,23 +1690,24 @@ def main(args):
         logger.error(f"MapleStoryBot Init failed: {e}")
         sys.exit(1)
     else:
-        while True:
+        while not mapleStoryBot.kb.is_terminated:
 
             t_start = time.time()
 
             # Process one game window frame
             mapleStoryBot.run_once()
 
-            # Exit if 'q' is pressed
-            key = cv2.waitKey(1) & 0xFF
-            if key == ord('q'):
-                break
+            # Draw image on debug window
+            cv2.waitKey(1)
 
             # Cap FPS to save system resource
             frame_duration = time.time() - t_start
             target_duration = 1.0 / mapleStoryBot.cfg["system"]["fps_limit_main"]
             if frame_duration < target_duration:
                 time.sleep(target_duration - frame_duration)
+
+        # Terminate all other threads
+        mapleStoryBot.terminate_threads()
 
         cv2.destroyAllWindows()
 
@@ -1766,6 +1773,5 @@ if __name__ == '__main__':
     # Set logger level
     if args.debug:
         logger.setLevel(logging.DEBUG)
-
 
     main(args)

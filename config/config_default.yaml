@@ -24,6 +24,7 @@ key:
   jump: "space"             # 🦘 Jump key
   add_hp: "1"               # ❤️ Use HP potion. Set to "" to disable auto-healing
   add_mp: "2"               # 💧 Use MP potion. Set to "" to disable auto-mana
+  return_home: "home"       # 🔁 Key to use return home scroll.
 
 # ────────────────
 # 💫 Buff Skill
@@ -75,12 +76,14 @@ aoe_skill:
 
 health_monitor:
   enable: True             # ✅ Enable or disable health monitor
-  force_heal: False      # 🛡️ Heal first — stop attacking until HP is restored
+  force_heal: False        # 🛡️ Heal first — stop attacking until HP is restored
   add_hp_ratio: 0.5        # ❤️ Drink HP potion when HP drops below this ratio [0.0 ~ 1.0]
   add_mp_ratio: 0.5        # 💙 Drink MP potion when MP drops below this ratio [0.0 ~ 1.0]
   add_hp_cooldown: 0.5     # 🕒 Seconds to wait between HP potions, prevent potion spam
   add_mp_cooldown: 0.5     # 🕒 Seconds to wait between MP potions, prevent potion spam
   fps_limit: 20            # 🚥 Loop rate for the health monitor thread
+  return_home_if_no_potion: False      # ✅ Use homing scroll when potion is used up
+  return_home_watch_dog_timeout: 3     # 🕒 Duration to detect HP is lower than "add_hp_ratio"
 
 # ────────────────
 # 🌀 Mage Teleport
@@ -197,13 +200,6 @@ monster_detect:
 auto_change_channel: ""
 other_player_move_pixel: 10  # only work when auto_change_channel == "pixel" 
 
-# ────────────────
-# Return_if_no_potion
-# ────────────────
-is_use_return_if_no_potion:
-  enable: False
-  return_home_key: "Home"       # 🔁 Key to use return home scroll.
-  return_watch_dog_timeout: 3   # 🕒 Duration to detect HP is lower than "add_hp_ratio"
 
 # ────────────────
 # 🧭 Route Following
@@ -271,6 +267,7 @@ rune_detect:
 rune_find:
   timeout: 1200               # ⏳ Maximum time (in seconds) to keep searching before giving up
                               # If the timeout is reached, the bot will fallback to route_rest.png and rest.
+  timeout_action: "change_channel" # "go_home"
   near_rune_duration: 10       # 🕒 Duration to interact with rune when a positive detection occurs
   rune_trigger_cooldown: 0.3    # 🕒 Cooldown for 'up' key rune trigger
   rune_trigger_distance_x: 20    # only press 'up' when player distance(in pixel) to the rune is close enough.

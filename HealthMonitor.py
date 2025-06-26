@@ -14,7 +14,7 @@ class HealthMonitor:
         self.cfg = cfg
         self.args = args
         self.kb = kb_controller
-        self.running = False
+        self.is_terminated = False
         self.enabled = True
         self.thread = None
 
@@ -24,9 +24,9 @@ class HealthMonitor:
         self.exp_ratio = 1.0
 
         # Timers
-        self.last_heal_time = 0
-        self.last_mp_time = 0
-        self.last_hp_reduce_time = 0
+        self.t_last_heal = 0
+        self.t_last_mp = 0
+        self.t_last_hp_reduce = 0
         self.t_last_run = 0
         self.t_hp_watch_dog = time.time()
 
@@ -47,8 +47,7 @@ class HealthMonitor:
         '''
         Start health monitoring thread
         '''
-        if not self.running:
-            self.running = True
+        if not self.is_terminated:
             self.thread = threading.Thread(target=self._monitor_loop, daemon=True)
             self.thread.start()
             logger.info("[Health Monitor]: Started")
@@ -57,7 +56,7 @@ class HealthMonitor:
         '''
         Stop health monitoring thread
         '''
-        self.running = False
+        self.is_terminated = True
         if self.thread:
             self.thread.join()
             logger.info("[Health Monitor]: Stopped")
@@ -167,30 +166,37 @@ class HealthMonitor:
         '''
         Main monitoring loop running in separate thread
         '''
-        while self.running:
+        while not self.is_terminated:
             try:
                 if not self.enabled or self.args.disable_control:
                     self.limit_fps()
                     continue
+
+                # Get current time
+                t_cur = time.time()
 
                 # Get current HP/MP ratios
                 hp_ratio, mp_ratio, exp_ratio = self.get_hp_mp_exp_ratio()
                 if hp_ratio is not None:
                     # Check if HP bar has reduced
                     if self.hp_ratio > hp_ratio:
-                        self.last_hp_reduce_time = time.time()
+                        self.t_last_hp_reduce = t_cur
                     self.hp_ratio = hp_ratio
                 if mp_ratio is not None:
                     self.mp_ratio = mp_ratio
                 if exp_ratio is not None:
                     self.exp_ratio = exp_ratio
 
-                current_time = time.time()
+                hp_thres = self.cfg["health_monitor"]["add_hp_ratio"]
+                mp_thres = self.cfg["health_monitor"]["add_mp_ratio"]
+                hp_cd    = self.cfg["health_monitor"]["add_hp_cooldown"]
+                mp_cd    = self.cfg["health_monitor"]["add_mp_cooldown"]
+                watchdog_timeout = self.cfg["health_monitor"]["return_home_watch_dog_timeout"]
 
                 # Check if need to heal (with cooldown)
                 if self.cfg["health_monitor"]["force_heal"]:
                     # Ignore cooldown and force keycontroller to heal first
-                    if self.hp_ratio < self.cfg["health_monitor"]["add_hp_ratio"]:
+                    if self.hp_ratio < hp_thres:
                         if not self.kb.is_need_force_heal:
                             logger.info(f"[Health Monitor]: Force heal triggered, "
                                         f"HP: {self.hp_ratio*100:.1f}%")
@@ -198,29 +204,30 @@ class HealthMonitor:
                     else:
                         self.kb.is_need_force_heal = False
                 else:
-                    if (self.hp_ratio <= self.cfg["health_monitor"]["add_hp_ratio"] and
-                        current_time - self.last_heal_time > self.cfg["health_monitor"]["add_hp_cooldown"]):
+                    if (self.hp_ratio <= hp_thres and
+                        t_cur - self.t_last_heal > hp_cd):
                         self._heal()
                         logger.info(f"[Health Monitor]: Auto heal triggered, HP: {self.hp_ratio*100:.1f}%")
-                        self.last_heal_time = current_time
+                        self.t_last_heal = t_cur
 
-                # Check if no potion and need_return
-                if self.cfg["is_use_return_if_no_potion"]["enable"]:
-                    if self.hp_ratio >= self.cfg["health_monitor"]["add_hp_ratio"]:
-                        self.t_hp_watch_dog = current_time
-                        self.kb.is_need_return = False
-                    dt_no_potion = current_time-self.t_hp_watch_dog
-                    if dt_no_potion> self.cfg.["return_watch_dog_timeout"] and self.hp_ratio <= self.cfg["health_monitor"]["add_hp_ratio"]:
-                        logger.info(f"[Health Monitor]: HP < {self.cfg["health_monitor"]["add_hp_ratio"]*100:.1f}% {self.cfg.["return_watch_dog_timeout"]} second, return home triggered.")
-                        self.kb.is_need_return = True
+                # Check if no HP potion and need to return home
+                if self.cfg["health_monitor"]["return_home_if_no_potion"]:
+                    if self.hp_ratio >= hp_thres:
+                        self.t_hp_watch_dog = t_cur # reset watchdog
                     else:
-                        self.kb.is_need_return = False
+                        # If watchdog timeout, use homing scroll to return home
+                        if t_cur - self.t_hp_watch_dog > watchdog_timeout:
+                            logger.warning(f"[Health Monitor]: HP({self.hp_ratio*100:.1f}%) < {hp_thres*100:.1f}% "
+                                           f"for {round(t_cur - self.t_hp_watch_dog, 2)} seconds.")
+                            logger.warning(f"[Health Monitor]: Return home because potion is used up.")
+                            self.kb.press_key(self.cfg["key"]["return_home"]) # Return home
+                            self.is_terminated = True # Terminate Health monitor
+                            self.kb.is_terminated = True # Terminate AutoBot
 
                 # Check if need MP (with cooldown)
-                if (self.mp_ratio <= self.cfg["health_monitor"]["add_mp_ratio"] and
-                    current_time - self.last_mp_time > self.cfg["health_monitor"]["add_mp_cooldown"]):
+                if (self.mp_ratio <= mp_thres and t_cur - self.t_last_mp > mp_cd):
                     self._add_mp()
-                    self.last_mp_time = current_time
+                    self.t_last_mp = t_cur
                     logger.info(f"[Health Monitor]: Auto MP triggered, MP: {self.mp_ratio*100:.1f}%")
 
                 # Sleep to avoid excessive CPU usage
