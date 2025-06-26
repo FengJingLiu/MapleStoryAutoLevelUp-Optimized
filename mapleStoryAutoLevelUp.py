@@ -8,10 +8,12 @@ import random
 import argparse
 import glob
 import sys
+import logging
 
 # Library import
 import numpy as np
 import cv2
+import yaml
 
 # Local import
 from logger import logger
@@ -79,6 +81,9 @@ class MapleStoryBot:
             cfg = override_cfg(cfg, load_yaml("config/config_macOS.yaml"))
         # Override with user customized config
         self.cfg = override_cfg(cfg, load_yaml(f"config/config_{args.cfg}.yaml"))
+
+        logger.debug(yaml.dump(self.cfg, sort_keys=False,
+                     indent=2, default_flow_style=False))
 
         # Parse color code
         self.color_code = {
@@ -1601,7 +1606,8 @@ class MapleStoryBot:
                 command = self.get_random_action()
 
             # If the HP is reduced switch to hurting (other player probably help solved the rune)
-            if time.time() - self.health_monitor.last_hp_reduce_time < 3:
+            if  time.time() - self.health_monitor.last_hp_reduce_time < 3 and \
+                time.time() - self.t_last_switch_status > 3:
                 self.switch_status("hunting")
 
             # Check if finding rune timeout
@@ -1749,6 +1755,17 @@ if __name__ == '__main__':
         help='Choose customized config yaml file in config/'
     )
 
+    parser.add_argument(
+        '--debug',
+        action="store_true",
+        help="Enable debug logging"
+    )
+
     args = parser.parse_args()
+
+    # Set logger level
+    if args.debug:
+        logger.setLevel(logging.DEBUG)
+
 
     main(args)

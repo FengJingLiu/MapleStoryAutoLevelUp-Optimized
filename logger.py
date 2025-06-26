@@ -20,3 +20,10 @@ logger.addHandler(file_handler)
 console_handler = logging.StreamHandler()
 console_handler.setFormatter(formatter)
 logger.addHandler(console_handler)
+
+
+def set_level(level):
+    """Change log level at runtime."""
+    logger.setLevel(level)
+    file_handler.setLevel(level)
+    console_handler.setLevel(level)
