@@ -43,7 +43,7 @@ class KeyBoardController():
         self.is_need_screen_shot = False
         self.is_need_toggle = False
         self.is_need_force_heal = False
-        self.is_need_return = False
+        self.is_terminated = False
         # Parameters
         self.debounce_interval = self.cfg["system"]["key_debounce_interval"]
         self.fps_limit = self.cfg["system"]["fps_limit_keyboard_controller"]
@@ -53,9 +53,11 @@ class KeyBoardController():
         if is_mac():
             self.toggle_key = keyboard.Key.ctrl
             self.screenshot_key = keyboard.Key.alt
+            self.terminate_key = keyboard.Key.esc
         else:
             self.toggle_key = keyboard.Key.f1
             self.screenshot_key = keyboard.Key.f2
+            self.terminate_key = keyboard.Key.esc
 
         # set up attack key
         self.attack_key = ""
@@ -89,6 +91,9 @@ class KeyBoardController():
                 if time.time() - self.t_last_screenshot > self.debounce_interval:
                     self.is_need_screen_shot = True
                     self.t_last_screenshot = time.time()
+            elif key == self.terminate_key:
+                self.is_terminated = True
+                logger.info(f"[on_press] User press terminate key")
 
     def toggle_enable(self):
         '''
@@ -180,7 +185,7 @@ class KeyBoardController():
         '''
         run
         '''
-        while True:
+        while not self.is_terminated:
             # Check if game window is active
             if not self.is_enable or not self.is_game_window_active():
                 self.limit_fps()
@@ -210,10 +215,6 @@ class KeyBoardController():
             if self.is_need_force_heal and \
                 not self.command in ["up", "down", "jump right", "jump left"]:
                 self.command = "add hp"
-
-            # Check if is needed to return
-            if self.is_need_return:
-                self.command = "return_home"
 
             if self.command == "walk left":
                 pyautogui.keyUp("right")
@@ -301,23 +302,19 @@ class KeyBoardController():
 
             elif self.command == "stop":
                 self.release_all_key()
-                self.command = ""  # Clear command after stopping
+                self.command = ""  # Reset command
 
             elif self.command == "add hp":
                 self.press_key(self.cfg["key"]["add_hp"])
-                self.command = ""
+                self.command = ""  # Reset command
 
             elif self.command == "add mp":
                 self.press_key(self.cfg["key"]["add_mp"])
-                self.command = ""
-                
-            elif self.command == "return_home":
-                self.press_key(self.cfg["is_use_return_if_no_potion"]["return_home_key"])
-                self.release_all_key()
-                self.disable()
-                self.command = ""
+                self.command = ""  # Reset command
 
             else:
                 pass
 
             self.limit_fps()
+
+        self.release_all_key() # Prevent key keep press down after termination
