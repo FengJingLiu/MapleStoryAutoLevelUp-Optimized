@@ -43,6 +43,7 @@ class KeyBoardController():
         self.is_need_screen_shot = False
         self.is_need_toggle = False
         self.is_need_force_heal = False
+        self.is_need_return = False
         # Parameters
         self.debounce_interval = self.cfg["system"]["key_debounce_interval"]
         self.fps_limit = self.cfg["system"]["fps_limit_keyboard_controller"]
@@ -210,6 +211,10 @@ class KeyBoardController():
                 not self.command in ["up", "down", "jump right", "jump left"]:
                 self.command = "add hp"
 
+            # Check if is needed to return
+            if self.is_need_return:
+                self.command = "return_home"
+
             if self.command == "walk left":
                 pyautogui.keyUp("right")
                 pyautogui.keyDown("left")
@@ -304,6 +309,12 @@ class KeyBoardController():
 
             elif self.command == "add mp":
                 self.press_key(self.cfg["key"]["add_mp"])
+                self.command = ""
+                
+            elif self.command == "return_home":
+                self.press_key(self.cfg["is_use_return_if_no_potion"]["return_home_key"])
+                self.release_all_key()
+                self.disable()
                 self.command = ""
 
             else:

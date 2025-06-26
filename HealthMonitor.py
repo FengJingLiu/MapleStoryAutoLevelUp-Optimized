@@ -28,6 +28,7 @@ class HealthMonitor:
         self.last_mp_time = 0
         self.last_hp_reduce_time = 0
         self.t_last_run = 0
+        self.t_hp_watch_dog = time.time()
 
         # Frame data (will be updated by main thread)
         self.img_frame = None
@@ -202,6 +203,18 @@ class HealthMonitor:
                         self._heal()
                         logger.info(f"[Health Monitor]: Auto heal triggered, HP: {self.hp_ratio*100:.1f}%")
                         self.last_heal_time = current_time
+
+                # Check if no potion and need_return
+                if self.cfg["is_use_return_if_no_potion"]["enable"]:
+                    if self.hp_ratio >= self.cfg["health_monitor"]["add_hp_ratio"]:
+                        self.t_hp_watch_dog = current_time
+                        self.kb.is_need_return = False
+                    dt_no_potion = current_time-self.t_hp_watch_dog
+                    if dt_no_potion> self.cfg.["return_watch_dog_timeout"] and self.hp_ratio <= self.cfg["health_monitor"]["add_hp_ratio"]:
+                        logger.info(f"[Health Monitor]: HP < {self.cfg["health_monitor"]["add_hp_ratio"]*100:.1f}% {self.cfg.["return_watch_dog_timeout"]} second, return home triggered.")
+                        self.kb.is_need_return = True
+                    else:
+                        self.kb.is_need_return = False
 
                 # Check if need MP (with cooldown)
                 if (self.mp_ratio <= self.cfg["health_monitor"]["add_mp_ratio"] and
