@@ -11,3 +11,7 @@ monster_detect:
 minimap:
   player_color: [84, 255, 255] # BGR
   debug_window_upscale: 2
+
+party_red_bar:
+  lower_red: [4, 80, 50] # ❤️ HSV, darker red of party health bar
+  upper_red: [5, 90, 90] # ❤️ HSV, brighter red of party health bar
