@@ -1710,6 +1710,10 @@ class MapleStoryBot:
 
         self.profiler.mark("Debug Window Show")
 
+        # Check FPS
+        if self.fps < 5:
+            logger.warning(f"FPS({self.fps}) is too low, AutoBot cannot run properly!")
+
         # Print profiler result
         if self.cfg["profiler"]["enable"] and \
             self.profiler.total_frames % self.cfg["profiler"]["print_frequency"] == 0:
