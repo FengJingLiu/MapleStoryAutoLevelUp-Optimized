@@ -97,8 +97,8 @@ class MapleStoryBot:
         # Set status to hunting for startup
         self.switch_status("hunting")
 
-        if args.patrol:
-            # Patrol mode doesn't need map or route
+        if args.patrol or args.aux:
+            # Patrol and aux mode doesn't need map or route
             self.img_map = None
             self.img_routes = []
         else:
@@ -192,9 +192,7 @@ class MapleStoryBot:
         # Start profiler
         self.profiler = Profiler(self.cfg)
 
-
         # Prepare video writer if need to record
-
         if args.record:
             # Make sure video/ exist
             os.makedirs("video", exist_ok=True)
@@ -1169,7 +1167,7 @@ class MapleStoryBot:
         )
 
         # Don't draw minimap in patrol mode
-        if self.args.patrol:
+        if self.args.patrol or self.args.aux:
             return
 
         # Compute crop region with boundary check
@@ -1311,7 +1309,7 @@ class MapleStoryBot:
         self.profiler.mark("get_minimap_loc_size")
 
         # Get current route image
-        if not self.args.patrol:
+        if not self.args.patrol and not self.args.aux:
             self.img_route = self.img_routes[self.idx_routes]
             self.img_route_debug = cv2.cvtColor(self.img_route, cv2.COLOR_RGB2BGR)
 
@@ -1361,7 +1359,6 @@ class MapleStoryBot:
         cv2.circle(self.img_frame_debug,
                 self.loc_player, radius=3,
                 color=(0, 0, 255), thickness=-1)
-
 
         self.profiler.mark("Nametag Detection")
 
@@ -1427,7 +1424,7 @@ class MapleStoryBot:
         self.profiler.mark("Other Player Location Detection")
 
         # Get player location on global map
-        if self.args.patrol:
+        if self.args.patrol or self.args.aux:
             self.loc_player_global = self.loc_player_minimap
         else:
             self.loc_player_global = self.get_player_location_on_global_map()
@@ -1616,6 +1613,9 @@ class MapleStoryBot:
             else:
                 command = "walk right"
 
+        elif self.args.aux:
+            command = ""
+
         else:
             # get color code from img_route
             color_code = self.get_nearest_color_code()
@@ -1719,7 +1719,7 @@ class MapleStoryBot:
             self.video_writer.write(self.img_frame_debug)
 
         # Resize img_route_debug for better visualization
-        if not self.args.patrol:
+        if not self.args.patrol and not self.args.aux:
             self.img_route_debug = cv2.resize(
                         self.img_route_debug, (0, 0),
                         fx=self.cfg["minimap"]["debug_window_upscale"],
@@ -1830,6 +1830,12 @@ if __name__ == '__main__':
         '--record',
         action="store_true",
         help="Record debug window"
+    )
+
+    parser.add_argument(
+        '--aux',
+        action="store_true",
+        help="Enable auxiliary mode, where bot only help with buff skill and potion drinking"
     )
 
     args = parser.parse_args()
