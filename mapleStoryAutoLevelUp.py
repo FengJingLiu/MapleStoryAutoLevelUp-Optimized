@@ -9,6 +9,8 @@ import argparse
 import glob
 import sys
 import logging
+import os
+import datetime
 
 # Library import
 import numpy as np
@@ -189,6 +191,19 @@ class MapleStoryBot:
 
         # Start profiler
         self.profiler = Profiler(self.cfg)
+
+
+        # Prepare video writer if need to record
+
+        if args.record:
+            # Make sure video/ exist
+            os.makedirs("video", exist_ok=True)
+            timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+            path = os.path.join("video", f"{timestamp}.mp4")
+            # Get video writer
+            fourcc = cv2.VideoWriter_fourcc(*'mp4v')  # mp4 codec
+            self.video_writer = cv2.VideoWriter(path, fourcc, 10, (1296, 759))
+            logger.info(f"Recording debug window to {path}")
 
         logger.info("MapleStory Bot Init Done")
 
@@ -1699,6 +1714,10 @@ class MapleStoryBot:
         # Show debug image on window
         self.update_img_frame_debug()
 
+        # Save debug window to video
+        if self.args.record:
+            self.video_writer.write(self.img_frame_debug)
+
         # Resize img_route_debug for better visualization
         if not self.args.patrol:
             self.img_route_debug = cv2.resize(
@@ -1710,9 +1729,9 @@ class MapleStoryBot:
 
         self.profiler.mark("Debug Window Show")
 
-        # Check FPS
-        if self.fps < 5:
-            logger.warning(f"FPS({self.fps}) is too low, AutoBot cannot run properly!")
+        # Check FPS, TODO: too verbose, only print if many frames has high latency
+        # if self.fps < 5:
+        #     logger.warning(f"FPS({self.fps}) is too low, AutoBot cannot run properly!")
 
         # Print profiler result
         if self.cfg["profiler"]["enable"] and \
@@ -1805,6 +1824,12 @@ if __name__ == '__main__':
         '--debug',
         action="store_true",
         help="Enable debug logging"
+    )
+
+    parser.add_argument(
+        '--record',
+        action="store_true",
+        help="Record debug window"
     )
 
     args = parser.parse_args()
