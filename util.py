@@ -396,24 +396,26 @@ def get_player_location_on_minimap(img_minimap, minimap_player_color=(136, 255, 
     return loc_player_minimap
 
 def get_all_other_player_locations_on_minimap(img_minimap, red_bgr=(0, 0, 255)):
+    '''
+    Detect red dot (0,0,255) and calculate the center to define as other player position.
+    '''
     red_bgr = tuple(map(int, red_bgr))
-    
     # 智能選擇容錯範圍：從較小開始，如果檢測不到就增加
     tolerances = [10, 20, 30, 40]  # 嘗試不同的容錯範圍
     
     for tolerance in tolerances:
         lower_bgr = tuple(max(0, c - tolerance) for c in red_bgr)
         upper_bgr = tuple(min(255, c + tolerance) for c in red_bgr)
-        
+
         # 使用範圍檢測
         mask = cv2.inRange(img_minimap, lower_bgr, upper_bgr)
         coords = cv2.findNonZero(mask)
-        
+
         if coords is not None and len(coords) >= 3:
             logger.debug(f"Found {len(coords)} red pixels with tolerance {tolerance}")
             logger.debug(f"Color range: {lower_bgr} to {upper_bgr}")
             return [tuple(pt[0]) for pt in coords]  # List of (x, y)
-    
+
     # 如果所有容錯範圍都檢測不到，記錄調試信息
     logger.debug(f"Red dot detection failed with all tolerances: {tolerances}")
     return []
@@ -594,7 +596,9 @@ def click_in_game_window(window_title, coord):
         game_window = gw.getWindowsWithTitle(window_title)[0]
         win_left, win_top = game_window.left, game_window.top
 
-    pyautogui.click(win_left + coord[0], win_top + coord[1])
+    loc_click = (win_left + coord[0], win_top + coord[1])
+    pyautogui.click(loc_click)
+    logger.info(f"[click_in_game_window] click at {loc_click}")
 
 def send_email(email_addr, password,
                to, subject, body, attachment_path):

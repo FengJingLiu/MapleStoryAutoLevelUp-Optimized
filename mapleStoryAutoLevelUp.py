@@ -78,6 +78,7 @@ class MapleStoryBot:
         self.t_last_attack = time.time() # Last attack timer for cooldown
         self.t_last_rune_trigger = time.time() # Last time trigger rune
         self.t_rune_finding_start = 0 # Start time of rune finding. Reset when 'channel_change' and 'solve_rune'.
+        self.t_last_minimap_update = time.time()
         # Patrol mode
         self.is_patrol_to_left = True # Patrol direction flag
         self.patrol_turn_point_cnt = 0 # Patrol tuning back counter
@@ -102,6 +103,8 @@ class MapleStoryBot:
             tuple(map(int, k.split(','))): v
             for k, v in cfg["route"]["color_code_up_down"].items()
         }
+
+        self.is_show_debug_window = self.cfg["system"]["show_debug_window"]
 
         # Set status to hunting for startup
         if args.aux:
@@ -184,9 +187,10 @@ class MapleStoryBot:
                 raise RuntimeError(f"No images found in monster/{monster_name}/{monster_name}*")
         logger.info(f"Loaded monsters: {list(self.monsters.keys())}")
 
-        # Load party window image
+        # Load misc image
         self.img_create_party_enable  = load_image("misc/party_button_create_enable.png")
         self.img_create_party_disable = load_image("misc/party_button_create_disable.png")
+        self.img_login_button = load_image("misc/login_button_cn.png")
 
         # Start keyboard controller thread
         self.kb = KeyBoardController(self.cfg, args)
@@ -207,6 +211,11 @@ class MapleStoryBot:
 
         # Prepare video writer if need to record
         if args.record:
+            if not self.is_show_debug_window:
+                text = "Please enable 'show_debug_window' in config.yaml to enable recording"
+                logger.error(text)
+                raise RuntimeError(text)
+
             # Make sure video/ exist
             os.makedirs("video", exist_ok=True)
             timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
@@ -1260,6 +1269,24 @@ class MapleStoryBot:
             thickness=2
         )
 
+        # Draw HP/MP/EXP bar on debug window
+        ratio_bars = [self.health_monitor.hp_ratio,
+                      self.health_monitor.mp_ratio,
+                      self.health_monitor.exp_ratio]
+        for i, bar_name in enumerate(["HP", "MP", "EXP"]):
+            x_s, y_s = (250, 90)
+            # Print bar ratio on debug window
+            cv2.putText(self.img_frame_debug,
+                        f"{bar_name}: {ratio_bars[i]*100:.1f}%",
+                        (x_s, y_s + 30*i),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0,0,255), 2)
+            # Draw bar on debug window
+            x_s, y_s = (410, 73)
+            # print(self.health_monitor.loc_size_bars)
+            x, y, w, h = self.health_monitor.loc_size_bars[i]
+            self.img_frame_debug[y_s+30*i:y_s+h+30*i, x_s:x_s+w] = \
+                self.img_frame[self.cfg["camera"]["y_end"]:, :][y:y+h, x:x+w]
+
     def update_img_frame_debug(self):
         '''
         update_img_frame_debug
@@ -1300,33 +1327,38 @@ class MapleStoryBot:
     def channel_change(self):
         '''
         channel_change
-        # TODO: need to create a new party after channel change
         '''
         logger.info("[channel_change] Start")
-        coords = [
-            (1140, 730),  # 伺服器選單按鈕
-            (1140, 666),  # 頻道按鈕
-            (877, 161),  # 任意頻道
-            (585, 420),  # 確定
-            (877, 395),  # 登入後選角色
-            (888, 275),  # 確定角色
-        ]
+
         window_title = self.cfg["game_window"]["title"]
-        for i, coord in enumerate(coords[:4]):
-            click_in_game_window(window_title, coord)
-            time.sleep(1)
-        time.sleep(25)
-        click_in_game_window(window_title, coords[4])
+        ui_coords = self.cfg["ui_coords"]
+        click_in_game_window(window_title, ui_coords["menu"])
+        time.sleep(1)
+        click_in_game_window(window_title, ui_coords["channel"])
+        time.sleep(1)
+        click_in_game_window(window_title, ui_coords["random_channel"])
+        time.sleep(1)
+        click_in_game_window(window_title, ui_coords["random_channel_confirm"])
+        time.sleep(1)
+
+        while self.get_login_button_location() is None:
+            self.img_frame = self.get_img_frame()
+            logger.info("Waiting for login button to show up...")
+            time.sleep(3)
+        time.sleep(3) # Wait screen to become brighter
+
+        # Click login button
+        click_in_game_window(window_title, self.get_login_button_location())
         time.sleep(2)
-        click_in_game_window(window_title, coords[5])
+
+        # Click "Select Character"
+        click_in_game_window(window_title, ui_coords["select_character"])
+        time.sleep(5)
+
         self.kb.enable()
         self.kb.set_command("none none none")
         self.kb.release_all_key()
-        time.sleep(10) #ensure if there's no lagging during log in
-        click_in_game_window(window_title, coords[4])
-        time.sleep(2)
-        click_in_game_window(window_title, coords[5])
-        time.sleep(5)
+
         self.ensure_is_in_party() # Make sure player is in party
 
         self.switch_status("hunting")
@@ -1341,6 +1373,135 @@ class MapleStoryBot:
         self.capture.is_terminated = True
         self.health_monitor.is_terminated = True
         logger.info(f"[terminate_threads] Terminated all threads")
+
+    def get_attack_direction(self, monster_left, monster_right):
+        '''
+        get_attack_direction
+        '''
+        # Compute distance for left
+        distance_left = float('inf')
+        if monster_left is not None:
+            mx, my = monster_left["position"]
+            mw, mh = monster_left["size"]
+            center_left = (mx + mw // 2, my + mh // 2)
+            distance_left = abs(center_left[0] - self.loc_player[0]) + \
+                            abs(center_left[1] - self.loc_player[1])
+        # Compute distance for right
+        distance_right = float('inf')
+        if monster_right is not None:
+            mx, my = monster_right["position"]
+            mw, mh = monster_right["size"]
+            center_right = (mx + mw // 2, my + mh // 2)
+            distance_right = abs(center_right[0] - self.loc_player[0]) + \
+                            abs(center_right[1] - self.loc_player[1])
+        # Choose attack direction and nearest monster
+        attack_direction = None
+        # nearest_monster = None
+
+        # Additional validation: check if monster is actually on the correct side
+        def is_monster_on_correct_side(monster, direction):
+            if monster is None:
+                return False
+            mx, my = monster["position"]
+            mw, mh = monster["size"]
+            monster_center_x = mx + mw // 2
+            player_x = self.loc_player[0]
+
+            if direction == "left":
+                return monster_center_x < player_x  # Monster should be left of player
+            else:  # direction == "right"
+                return monster_center_x > player_x  # Monster should be right of player
+
+        # Only choose direction if there's a clear winner and monster is on correct side
+        if monster_left is not None and monster_right is None and \
+            is_monster_on_correct_side(monster_left, "left"):
+            attack_direction = "left"
+            # nearest_monster = monster_left
+        elif monster_right is not None and monster_left is None and \
+            is_monster_on_correct_side(monster_right, "right"):
+            attack_direction = "right"
+            # nearest_monster = monster_right
+        elif monster_left is not None and monster_right is not None:
+            # Both sides have monsters, check distance and side validation
+            left_valid = is_monster_on_correct_side(monster_left, "left")
+            right_valid = is_monster_on_correct_side(monster_right, "right")
+
+            if left_valid and not right_valid:
+                attack_direction = "left"
+                # nearest_monster = monster_left
+            elif right_valid and not left_valid:
+                attack_direction = "right"
+                # nearest_monster = monster_right
+            elif left_valid and right_valid and distance_left < distance_right - 50:
+                attack_direction = "left"
+                # nearest_monster = monster_left
+            elif left_valid and right_valid and distance_right < distance_left - 50:
+                attack_direction = "right"
+                # nearest_monster = monster_right
+            # If both valid but distances too close, don't attack to avoid confusion
+
+        # Debug attack direction selection
+        if monster_left is not None or monster_right is not None:
+            left_side_ok = is_monster_on_correct_side(monster_left, "left") if monster_left else False
+            right_side_ok = is_monster_on_correct_side(monster_right, "right") if monster_right else False
+            debug_text = f"L:{distance_left:.0f}({left_side_ok}) R:{distance_right:.0f}({right_side_ok}) Dir:{attack_direction}"
+            cv2.putText(self.img_frame_debug, debug_text,
+                        (10, 450), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 2)
+        return attack_direction
+
+    def is_need_change_channel(self, loc_other_players):
+        '''
+        is_need_change_channel
+        '''
+        # Calculate center value
+        xs = [x for (x, _) in loc_other_players]
+        ys = [y for (_, y) in loc_other_players]
+        if len(xs) == 0 or len(ys) == 0:
+            return False
+        center_x, center_y = (np.mean(xs), np.mean(ys))
+        if np.isnan(center_x) or np.isnan(center_y):
+            return False
+        center = (int(np.mean(xs)), int(np.mean(ys)))
+        #logger.info(f"[is_need_change_channel] Center of mass = {center}")
+
+        # Change channel
+        if self.cfg["channel_change"]["mode"] == "true":
+            logger.warning("[is_need_change_channel] Player detected, immediately change channel.")
+            return True
+        elif self.cfg["channel_change"]["mode"] == "pixel":
+            if self.red_dot_center_prev is None:
+                self.red_dot_center_prev = center
+            else:
+                dx = abs(center[0] - self.red_dot_center_prev[0])
+                dy = abs(center[1] - self.red_dot_center_prev[1])
+                total = dx + dy
+                logger.debug(f"[is_need_change_channel] Movement dx={dx}, dy={dy}, total={total}")
+                thres = self.cfg["channel_change"]["other_player_move_thres"]
+                if total > thres:
+                    logger.warning(f"Other player movement > {thres} pixel detected. "
+                                "Trigger channel change.")
+                    return True
+        return False
+
+    def get_login_button_location(self):
+        '''
+        get_login_button_location
+        '''
+        # Extract the region where the login button should appear
+        x0, y0 = self.cfg["ui_coords"]["login_button_top_left"]
+        x1, y1 = self.cfg["ui_coords"]["login_button_bottom_right"]
+        img_roi = self.img_frame[y0:y1, x0:x1]
+
+        # Find the 'login' button
+        loc, score, _ = find_pattern_sqdiff(
+                        img_roi, self.img_login_button)
+        print(score)
+        if score < self.cfg["ui_coords"]["login_button_thres"]:
+            h, w = self.img_create_party_enable.shape[:2]
+            logger.info(f"[get_login_button_location] Found login button with score({score})")
+            return (x0 + loc[0] + w // 2, y0 + loc[1] + h // 2)
+        else:
+            return None
 
     def run_once(self):
         '''
@@ -1358,46 +1519,39 @@ class MapleStoryBot:
         self.img_frame_gray = cv2.cvtColor(self.img_frame, cv2.COLOR_BGR2GRAY)
 
         # Image for debug use
-        self.img_frame_debug = self.img_frame.copy()
+        if self.is_show_debug_window:
+            self.img_frame_debug = self.img_frame.copy()
 
         self.profiler.mark("Image Preprocessing")
 
         # Get minimap coordinate and size on game window
         minimap_result = get_minimap_loc_size(self.img_frame)
         if minimap_result is None:
-            pass
-            # logger.warning("Failed to get minimap location and size.") # too verbose
+            if time.time() - self.t_last_minimap_update > 30:
+                loc_login_button = self.get_login_button_location()
+                if loc_login_button:
+                    logger.info("Found login button on screen. Proceed to login.")
+                    click_in_game_window(self.cfg["game_window"]["title"],
+                                         loc_login_button)
+                    time.sleep(3)
+                    click_in_game_window(self.cfg["game_window"]["title"],
+                                         self.cfg["ui_coords"]["select_character"])
+                    time.sleep(2)
         else:
             x, y, w, h = minimap_result
             self.loc_minimap = (x, y)
             self.img_minimap = self.img_frame[y:y+h, x:x+w]
+            t_last_minimap_update = time.time() # update timer
         self.profiler.mark("get_minimap_loc_size")
 
         # Get current route image
         if not self.args.patrol and not self.args.aux:
             self.img_route = self.img_routes[self.idx_routes]
-            self.img_route_debug = cv2.cvtColor(self.img_route, cv2.COLOR_RGB2BGR)
+            if self.is_show_debug_window:
+                self.img_route_debug = cv2.cvtColor(self.img_route, cv2.COLOR_RGB2BGR)
 
         # Update health monitor with current frame
         self.health_monitor.update_frame(self.img_frame[self.cfg["camera"]["y_end"]:, :])
-
-        # Draw HP/MP/EXP bar on debug window
-        ratio_bars = [self.health_monitor.hp_ratio,
-                      self.health_monitor.mp_ratio,
-                      self.health_monitor.exp_ratio]
-        for i, bar_name in enumerate(["HP", "MP", "EXP"]):
-            x_s, y_s = (250, 90)
-            # Print bar ratio on debug window
-            cv2.putText(self.img_frame_debug,
-                        f"{bar_name}: {ratio_bars[i]*100:.1f}%",
-                        (x_s, y_s + 30*i),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0,0,255), 2)
-            # Draw bar on debug window
-            x_s, y_s = (410, 73)
-            # print(self.health_monitor.loc_size_bars)
-            x, y, w, h = self.health_monitor.loc_size_bars[i]
-            self.img_frame_debug[y_s+30*i:y_s+h+30*i, x_s:x_s+w] = \
-                self.img_frame[self.cfg["camera"]["y_end"]:, :][y:y+h, x:x+w]
 
         self.profiler.mark("Health Monitor")
 
@@ -1448,69 +1602,29 @@ class MapleStoryBot:
         self.profiler.mark("Player Location Detection")
 
         # Get other player location on minimap & change channel
-        '''
-        Detect red dot (0,0,255) and calculate the center to define as other player position.
 
-        Needs improvement - current implementation calculates a single center value for all detected red dots. 
-        When multiple players appear at once, this reduces the perceived displacement. 
-        Future enhancement should cluster red dots into separate groups when multiple players are detected simultaneously.
-        '''
 
         # Get other player color from config
         if is_mac():
             other_player_color = (20, 15, 228)
         else:
             other_player_color = (0, 0, 255)
-        
+
         # 調試：分析小地圖顏色（只在第一次執行時）
         # if self.is_first_frame:
         #     logger.info("Running minimap color analysis...")
         #     debug_minimap_colors(self.img_minimap, other_player_color)
-        
+
         loc_other_players = get_all_other_player_locations_on_minimap(self.img_minimap, other_player_color)
         # logger.info(f"loc_other_players: {loc_other_players}, other_player_color: {other_player_color}")
-        if loc_other_players:
-            # Calculate center value
-            xs = [x for (x, y) in loc_other_players]
-            ys = [y for (x, y) in loc_other_players]
-            if len(xs) == 0 or len(ys) == 0:
-                return
-            center_x = np.mean(xs)
-            center_y = np.mean(ys)
-            if np.isnan(center_x) or np.isnan(center_y):
-                return
-            center = (int(np.mean(xs)), int(np.mean(ys)))
-            #logger.warning(f"[RedDot] Center of mass = {center}")
-
-            # Change channel
-            if self.cfg["auto_change_channel"] == "true":
-                logger.warning("Player detected, immediately change channel.")
-                self.kb.set_command("none none none")
-                self.kb.release_all_key()
-                self.kb.disable()
-                time.sleep(1)
-                self.channel_change()
-                self.red_dot_center_prev = None
-                return
-            elif self.cfg["auto_change_channel"] == "pixel":
-                if self.red_dot_center_prev is not None:
-                    dx = abs(center[0] - self.red_dot_center_prev[0])
-                    dy = abs(center[1] - self.red_dot_center_prev[1])
-                    total = dx + dy
-                    logger.debug(f"[RedDot] Movement dx={dx}, dy={dy}, total={total}")
-                    if total > self.cfg["other_player_move_pixel"]:
-                        logger.warning(f"Other player movement > {self.cfg['other_player_move_pixel']}px detected, triggering channel change.")
-                        self.kb.set_command("none none none")
-                        self.kb.release_all_key()
-                        self.kb.disable()
-                        time.sleep(1)
-                        self.channel_change()
-                        self.red_dot_center_prev = None
-                        return
-                else:
-                    self.red_dot_center_prev = center
-        else:
+        if self.is_need_change_channel(loc_other_players):
+            self.kb.set_command("none none none")
+            self.kb.release_all_key()
+            self.kb.disable()
+            time.sleep(1)
+            self.channel_change()
             self.red_dot_center_prev = None
+            return
 
         self.profiler.mark("Other Player Location Detection")
 
@@ -1614,73 +1728,12 @@ class MapleStoryBot:
             # Get nearest monster to player
             monster_left  = self.get_nearest_monster(is_left = True)
             monster_right = self.get_nearest_monster(is_left = False)
-            # Compute distance for left
-            distance_left = float('inf')
-            if monster_left is not None:
-                mx, my = monster_left["position"]
-                mw, mh = monster_left["size"]
-                center_left = (mx + mw // 2, my + mh // 2)
-                distance_left = abs(center_left[0] - self.loc_player[0]) + \
-                                abs(center_left[1] - self.loc_player[1])
-            # Compute distance for right
-            distance_right = float('inf')
-            if monster_right is not None:
-                mx, my = monster_right["position"]
-                mw, mh = monster_right["size"]
-                center_right = (mx + mw // 2, my + mh // 2)
-                distance_right = abs(center_right[0] - self.loc_player[0]) + \
-                                abs(center_right[1] - self.loc_player[1])
-            # Choose attack direction and nearest monster
-            attack_direction = None
-            nearest_monster = None
+            # Determine attack direction
+            attack_direction = self.get_attack_direction(monster_left, monster_right)
 
-            # Additional validation: check if monster is actually on the correct side
-            def is_monster_on_correct_side(monster, direction):
-                if monster is None:
-                    return False
-                mx, my = monster["position"]
-                mw, mh = monster["size"]
-                monster_center_x = mx + mw // 2
-                player_x = self.loc_player[0]
-
-                if direction == "left":
-                    return monster_center_x < player_x  # Monster should be left of player
-                else:  # direction == "right"
-                    return monster_center_x > player_x  # Monster should be right of player
-
-            # Only choose direction if there's a clear winner and monster is on correct side
-            if monster_left is not None and monster_right is None and is_monster_on_correct_side(monster_left, "left"):
-                attack_direction = "left"
-                nearest_monster = monster_left
-            elif monster_right is not None and monster_left is None and is_monster_on_correct_side(monster_right, "right"):
-                attack_direction = "right"
-                nearest_monster = monster_right
-            elif monster_left is not None and monster_right is not None:
-                # Both sides have monsters, check distance and side validation
-                left_valid = is_monster_on_correct_side(monster_left, "left")
-                right_valid = is_monster_on_correct_side(monster_right, "right")
-
-                if left_valid and not right_valid:
-                    attack_direction = "left"
-                    nearest_monster = monster_left
-                elif right_valid and not left_valid:
-                    attack_direction = "right"
-                    nearest_monster = monster_right
-                elif left_valid and right_valid and distance_left < distance_right - 50:
-                    attack_direction = "left"
-                    nearest_monster = monster_left
-                elif left_valid and right_valid and distance_right < distance_left - 50:
-                    attack_direction = "right"
-                    nearest_monster = monster_right
-                # If both valid but distances too close, don't attack to avoid confusion
-
-            # Debug attack direction selection
-            if monster_left is not None or monster_right is not None:
-                left_side_ok = is_monster_on_correct_side(monster_left, "left") if monster_left else False
-                right_side_ok = is_monster_on_correct_side(monster_right, "right") if monster_right else False
-                debug_text = f"L:{distance_left:.0f}({left_side_ok}) R:{distance_right:.0f}({right_side_ok}) Dir:{attack_direction}"
-                cv2.putText(self.img_frame_debug, debug_text,
-                           (10, 450), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 2)
+        else:
+            logger.error(f"Unexpected attack mode: {self.args.attack}")
+            return
 
         cmd_left_right = "none"
         cmd_up_down = "none"
@@ -1708,12 +1761,10 @@ class MapleStoryBot:
                 cmd_left_right = "right"
 
             # Get action command
-            if (time.time() - self.t_patrol_last_attack > self.cfg["patrol"]["patrol_attack_interval"] and 
-                len(self.monster_info) > 0 and nearest_monster is not None):
-                # Check if monster is actually in attack range
-                if attack_direction is not None:
-                    cmd_action = "attack"
-                    self.t_patrol_last_attack = time.time()
+            if (time.time() - self.t_patrol_last_attack > self.cfg["patrol"]["patrol_attack_interval"] or \
+                attack_direction is not None):
+                cmd_action = "attack"
+                self.t_patrol_last_attack = time.time()
 
         elif self.args.aux:
             pass
@@ -1762,7 +1813,7 @@ class MapleStoryBot:
             # Perform a random action when player stuck
             if not self.args.patrol and self.is_player_stuck():
                 cmd_left_right, cmd_up_down, cmd_action = self.get_random_action()
-            elif attack_direction is not None and nearest_monster is not None and \
+            elif attack_direction is not None and \
                 time.time() - self.t_last_attack > self.cfg["directional_attack"]["cooldown"]:
                 cmd_action = "attack"
                 # Set up attack direction
@@ -1832,7 +1883,7 @@ class MapleStoryBot:
         ### Debug Windows ###
         #####################
         # Don't show debug window to save system resource
-        if not self.cfg["system"]["show_debug_window"]:
+        if not self.is_show_debug_window:
             return
 
         # Print text on debug image
@@ -1883,7 +1934,8 @@ def main(args):
             mapleStoryBot.run_once()
 
             # Draw image on debug window
-            cv2.waitKey(1)
+            if mapleStoryBot.is_show_debug_window:
+                cv2.waitKey(1)
 
             # Cap FPS to save system resource
             frame_duration = time.time() - t_start

@@ -28,7 +28,7 @@ buff_skill:
 # Smaller range -> you will fight monster in close-range combat
 # Larger range -> you will attack monster far away, but could hit nothing if it's set to large
 directional_attack:
-  cooldown: 0.2               # Magic claw
+  cooldown: 0.4               # Magic claw
 #   range_x: 320              # ↔️ Try reducing if you’re hitting unreachable monsters.
 #   range_y: 60               # ↕️
 

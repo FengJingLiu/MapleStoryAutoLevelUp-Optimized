@@ -187,7 +187,7 @@ monster_detect:
   #   - "template_free" (lightest and fastest, but likely to have many wrong detection)
   # 💡 Feel free to test different modes to find what works best for your setup.
   mode: "contour_only"         # 🧠 Options: "color", "grayscale", "contour_only", "template_free"
-  diff_thres: 0.8              # 📏 Diff threshold for template matching, [0.0 ~ 1.0] Higher = stricter match
+  diff_thres: 0.8              # 📏 Diff threshold for template matching, [0.0 ~ 1.0] Lower = stricter match
   search_box_margin: 50        # ➕ Additional margin(in pixels) around the attack box for monster searching
   contour_blur: 5              # 🌫️ Gaussian blur kernel size used for contour smoothing (in "contour_only" mode).
   with_enemy_hp_bar: True      # ❤️ Enable smarter detection using enemy HP bars.
@@ -199,9 +199,22 @@ monster_detect:
 # "": Off
 # "true": Change channel once other player is detected
 # "pixel": Change channel once other player move set pixels in other_player_move_pixel
-auto_change_channel: ""
-other_player_move_pixel: 10  # only work when auto_change_channel == "pixel" 
+channel_change:
+  mode: "pixel"
+  other_player_move_thres: 10  # only work when mode == "pixel"
 
+# ────────────────
+# 🧭 UI Coordinate
+# ────────────────
+ui_coords:
+  "menu": [1140, 730]
+  "channel": [1140, 666]
+  "random_channel": [877, 161]
+  "random_channel_confirm": [585, 420]
+  "select_character": [888, 275]
+  login_button_thres: 0.05 #
+  login_button_top_left: [838, 376] # top left corner of login button search ragne
+  login_button_bottom_right: [940, 432] # bottom right corner of login button search ragne
 
 # ────────────────
 # 🧭 Route Following
