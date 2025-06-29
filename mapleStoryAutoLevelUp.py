@@ -1699,7 +1699,7 @@ class MapleStoryBot:
 
         # Make sure player is in party
         if self.is_first_frame == True:
-            click_in_game_window(self.cfg["game_window"]["title"],(100,0))
+            click_in_game_window(self.cfg["game_window"]["title"],(100,5))
             self.ensure_is_in_party()
 
         # Enable cached location since second frame
