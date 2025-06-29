@@ -22,7 +22,7 @@ from logger import logger
 from util import find_pattern_sqdiff, draw_rectangle, screenshot, nms, \
                 load_image, get_mask, get_minimap_loc_size, get_player_location_on_minimap, \
                 is_mac, nms_matches, override_cfg, load_yaml, get_all_other_player_locations_on_minimap, \
-                click_in_game_window, mask_route_colors, to_opencv_hsv
+                click_in_game_window, mask_route_colors, to_opencv_hsv, activate_game_window
 from KeyBoardController import KeyBoardController
 if is_mac():
     from GameWindowCapturorForMac import GameWindowCapturor
@@ -181,7 +181,6 @@ class MapleStoryBot:
             self.kb.disable()
 
         # Start game window capturing thread
-        logger.info("Waiting for game window to activate, please click on game window")
         self.capture = GameWindowCapturor(self.cfg)
 
         # Start health monitoring thread
@@ -1697,6 +1696,12 @@ class MapleStoryBot:
         if self.kb.is_need_screen_shot:
             screenshot(self.img_frame)
             self.kb.is_need_screen_shot = False
+
+        # Make sure player is in party
+        if self.is_first_frame == True:
+            activate_game_window(self.cfg["game_window"]["title"])
+            time.sleep(0.3)
+            self.ensure_is_in_party()
 
         # Enable cached location since second frame
         self.is_first_frame = False
