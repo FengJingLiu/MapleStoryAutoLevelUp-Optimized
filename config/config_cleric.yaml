@@ -19,15 +19,16 @@ key:
 
 # 🧙 BUFF SKILLS
 # Add keys for buffs you want to auto-cast. Match cooldowns with actual in-game durations.
-# buff_skill:
-#   keys: ["a", "s"]          # ⌨️ Add one or more buff keys here (in order).
-#   cooldown: [180, 90]       # ⏱️ Set each skill’s cooldown (seconds). Be precise to avoid spamming.
+buff_skill:
+  keys: ["g"]          # ⌨️ Add one or more buff keys here (in order).
+  cooldown: [95]       # ⏱️ Set each skill’s cooldown (seconds). Be precise to avoid spamming.
 
 # ⚔️ DIRECTIONAL ATTACK SETTINGS
 # Tune these by observing the debug window.
 # Smaller range -> you will fight monster in close-range combat
 # Larger range -> you will attack monster far away, but could hit nothing if it's set to large
-# directional_attack:
+directional_attack:
+  cooldown: 0.2               # Magic claw
 #   range_x: 320              # ↔️ Try reducing if you’re hitting unreachable monsters.
 #   range_y: 60               # ↕️
 
@@ -38,7 +39,7 @@ aoe_skill:
   # range_x: 350               # ↔️ Try reducing if you’re hitting unreachable monsters.
   # range_y: 170               # ↕️
   # Holy light
-  range_x: 400               # ↔️ Try reducing if you’re hitting unreachable monsters.
+  range_x: 350               # ↔️ Try reducing if you’re hitting unreachable monsters.
   range_y: 170               # ↕️
 
 # ❤️ HEALTH MONITOR

@@ -22,7 +22,8 @@ from logger import logger
 from util import find_pattern_sqdiff, draw_rectangle, screenshot, nms, \
                 load_image, get_mask, get_minimap_loc_size, get_player_location_on_minimap, \
                 is_mac, nms_matches, override_cfg, load_yaml, get_all_other_player_locations_on_minimap, \
-                click_in_game_window, mask_route_colors, to_opencv_hsv, debug_minimap_colors, activate_game_window
+                click_in_game_window, mask_route_colors, to_opencv_hsv, debug_minimap_colors, \
+                activate_game_window, is_img_16_to_9
 
 from KeyBoardController import KeyBoardController
 if is_mac():
@@ -45,9 +46,11 @@ class MapleStoryBot:
         self.idx_routes = 0 # Index of route map
         self.monster_info = [] # monster information
         self.fps = 0 # Frame per second
+        self.red_dot_center_prev = None # previous other player location in minimap
+        # Flags
         self.is_first_frame = True # first frame flag
         self.is_terminated = False # Close all object and thread if True
-        self.red_dot_center_prev = None # previous other player location in minimap
+        self.is_on_ladder = False # Character is on ladder or not
         # Coordinate (top-left coordinate)
         self.loc_nametag = (0, 0) # nametag location on game screen
         self.loc_party_red_bar = (0, 0) # party red bar location on game screen
@@ -95,9 +98,16 @@ class MapleStoryBot:
             tuple(map(int, k.split(','))): v
             for k, v in cfg["route"]["color_code"].items()
         }
+        self.color_code_up_down = {
+            tuple(map(int, k.split(','))): v
+            for k, v in cfg["route"]["color_code_up_down"].items()
+        }
 
         # Set status to hunting for startup
-        self.switch_status("hunting")
+        if args.aux:
+            self.switch_status("aux")
+        else:
+            self.switch_status("hunting")
 
         if args.patrol or args.aux:
             # Patrol and aux mode doesn't need map or route
@@ -115,6 +125,7 @@ class MapleStoryBot:
                 img = cv2.cvtColor(load_image(route_file), cv2.COLOR_BGR2RGB)
                 # Remove pixel in map that is color code
                 img = mask_route_colors(self.img_map, img, self.cfg["route"]["color_code"])
+                img = mask_route_colors(self.img_map, img, self.cfg["route"]["color_code_up_down"])
                 self.img_routes.append(img)
 
         # Load player's name tag
@@ -183,7 +194,8 @@ class MapleStoryBot:
             self.kb.disable()
 
         # Start game window capturing thread
-        self.capture = GameWindowCapturor(self.cfg)
+        logger.info("Waiting for game window to activate, please click on game window")
+        self.capture = GameWindowCapturor(self.cfg, args)
 
         # Start health monitoring thread
         self.health_monitor = HealthMonitor(self.cfg, args, self.kb)
@@ -203,6 +215,14 @@ class MapleStoryBot:
             fourcc = cv2.VideoWriter_fourcc(*'mp4v')  # mp4 codec
             self.video_writer = cv2.VideoWriter(path, fourcc, 10, (1296, 759))
             logger.info(f"Recording debug window to {path}")
+
+        # Print mode on log
+        if args.patrol:
+            logger.info("Init AutoBot with patrol mode")
+        elif args.aux:
+            logger.info("Init AutoBot with aux mode")
+        else:
+            logger.info("Init AutoBot with auto mode")
 
         logger.info("MapleStory Bot Init Done")
 
@@ -456,20 +476,31 @@ class MapleStoryBot:
         y_max = min(h, y0 + self.cfg["route"]["search_range"])
 
         nearest = None
+        nearest_up_down = None
         min_dist = float('inf')
+        min_dist_up_down = float('inf')
         for y in range(y_min, y_max):
             for x in range(x_min, x_max):
                 pixel = tuple(self.img_route[y, x])  # (R, G, B)
-                if pixel in self.color_code:
-                    dist = abs(x - x0) + abs(y - y0)
-                    if dist < min_dist:
-                        min_dist = dist
-                        nearest = {
-                            "pixel": (x, y),
-                            "color": pixel,
-                            "action": self.color_code[pixel],
-                            "distance": dist
-                        }
+                dist = abs(x - x0) + abs(y - y0)
+                # Get nearest color
+                if pixel in self.color_code and dist < min_dist:
+                    nearest = {
+                        "pixel": (x, y),
+                        "color": pixel,
+                        "command": self.color_code[pixel],
+                        "distance": dist
+                    }
+                    min_dist = dist
+                # Get nearest color (up, dowm)
+                if pixel in self.color_code_up_down and dist < min_dist_up_down:
+                    nearest_up_down = {
+                        "pixel": (x, y),
+                        "color": pixel,
+                        "command": self.color_code_up_down[pixel],
+                        "distance": dist
+                    }
+                    min_dist_up_down = dist
 
         # Debug
         draw_rectangle(
@@ -490,19 +521,34 @@ class MapleStoryBot:
             )
             # Print color code on debug image
             cv2.putText(
-                self.img_frame_debug, f"Route Action: {nearest['action']}",
-                (720, 90),
+                self.img_frame_debug, f"Route Action: {nearest['command']}",
+                (650, 90),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255),
                 2, cv2.LINE_AA
             )
             cv2.putText(
                 self.img_frame_debug, f"Route Index: {self.idx_routes}",
-                (720, 120),
+                (650, 150),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255),
                 2, cv2.LINE_AA
             )
 
-        return nearest  # if not found return none
+        if nearest_up_down is not None:
+            cv2.putText(
+                self.img_frame_debug, f"Route Action: {nearest_up_down['command']}",
+                (650, 120),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255),
+                2, cv2.LINE_AA
+            )
+            cv2.line(
+                self.img_route_debug,
+                self.loc_player_global,  # start point
+                nearest_up_down["pixel"],# end point
+                (0, 0, 255),             # green line
+                1                        # thickness
+            )
+
+        return nearest, nearest_up_down  # if not found return none
 
     def get_nearest_monster(self, is_left = True, overlap_threshold=0.5):
         '''
@@ -794,11 +840,19 @@ class MapleStoryBot:
             logger.warning("Failed to capture game frame.")
             return
 
-        # Make sure resolution is as expected
-        if self.cfg["game_window"]["size"] != self.frame.shape[:2]:
-            text = f"Unexpeted window size: {self.frame.shape[:2]} (expect {self.cfg['game_window']['size']})"
-            logger.error(text)
-            return
+        # Make sure the window ratio is as expected
+        if self.args.aux:
+            if not is_img_16_to_9(self.frame, self.cfg): # Aux mode allow 16:9 resolution
+                text = f"Unexpeted window size: {self.frame.shape[:2]} (expect window ratio 16:9)"
+                logger.error(text)
+                return
+        else:
+            # Other mode only allow specific resolution
+            if self.cfg["game_window"]["size"] != self.frame.shape[:2]:
+                text = f"Unexpeted window size: {self.frame.shape[:2]} "\
+                       f"(expect {self.cfg['game_window']['size']})"
+                logger.error(text)
+                return
 
         # Resize raw frame to (1296, 759)
         return cv2.resize(self.frame, (1296, 759),
@@ -1130,11 +1184,11 @@ class MapleStoryBot:
         '''
         get_random_action - pick a random action except 'up' and teleport command
         '''
-        # Exclude the 'up' action
-        actions = [v for k, v in self.color_code.items() if v != 'up' and ('teleport' not in v)]
-        action = random.choice(actions)
-        logger.warning(f"Perform random action: {action}")
-        return action
+        cmd_left_right = random.choice(["left", "right", "none"])
+        cmd_up_down = random.choice(["down", "none"])
+        cmd_action = random.choice(["jump", "none"])
+        logger.warning(f"Perform random command: {cmd_left_right} {cmd_up_down} {cmd_action}")
+        return cmd_left_right, cmd_up_down, cmd_action
 
     def update_info_on_img_frame_debug(self):
         '''
@@ -1143,14 +1197,16 @@ class MapleStoryBot:
         # Print text at bottom left corner
         self.fps = round(1.0 / (time.time() - self.t_last_frame))
         text_y_interval = 23
-        text_y_start = 550
+        text_y_start = 520
         dt_screenshot = time.time() - self.kb.t_last_screenshot
+        h, w = self.frame.shape[:2]
         text_list = [
             f"FPS: {self.fps}",
             f"Status: {self.status}",
-            f"Resolution: {self.frame.shape[0]}x{self.frame.shape[1]}",
+            f"Resolution: {h}x{w}, Ratio: {round(w/h, 2)}",
             f"Press 'F1' to {'pause' if self.kb.is_enable else 'start'} Bot",
-            f"Press 'F2' to save screenshot{' : Saved' if dt_screenshot < 0.7 else ''}"]
+            f"Press 'F2' to save screenshot{' : Saved' if dt_screenshot < 0.7 else ''}",
+             "Press 'F12' to quit"]
         for idx, text in enumerate(text_list):
             cv2.putText(
                 self.img_frame_debug, text,
@@ -1264,7 +1320,8 @@ class MapleStoryBot:
         time.sleep(2)
         click_in_game_window(window_title, coords[5])
         self.kb.enable()
-        self.kb.set_command("stop")
+        self.kb.set_command("none none none")
+        self.kb.release_all_key()
         time.sleep(10) #ensure if there's no lagging during log in
         click_in_game_window(window_title, coords[4])
         time.sleep(2)
@@ -1293,7 +1350,9 @@ class MapleStoryBot:
         self.profiler.start()
 
         # Get game window frame
-        self.img_frame = self.get_img_frame()
+        img_frame = self.get_img_frame()
+        if img_frame is not None:
+            self.img_frame = img_frame
 
         # Grayscale game window
         self.img_frame_gray = cv2.cvtColor(self.img_frame, cv2.COLOR_BGR2GRAY)
@@ -1359,6 +1418,17 @@ class MapleStoryBot:
 
         # Update player location
         if loc_player is not None:
+            # Check if character is on ladder
+            dx = abs(loc_player[0] - self.loc_player[0])
+            dy = abs(loc_player[1] - self.loc_player[1])
+            if self.is_on_ladder:
+                if dx > 3: # Leave ladder if there is horizontal move
+                    self.is_on_ladder = False
+            else:
+                if dx < 3 and dy != 0:
+                    self.is_on_ladder = True
+            # logger.info((self.is_on_ladder, dx, dy))
+            # Update player location
             self.loc_player = loc_player
 
         # Draw player center for debugging
@@ -1415,7 +1485,8 @@ class MapleStoryBot:
             # Change channel
             if self.cfg["auto_change_channel"] == "true":
                 logger.warning("Player detected, immediately change channel.")
-                self.kb.set_command("stop")
+                self.kb.set_command("none none none")
+                self.kb.release_all_key()
                 self.kb.disable()
                 time.sleep(1)
                 self.channel_change()
@@ -1429,7 +1500,8 @@ class MapleStoryBot:
                     logger.debug(f"[RedDot] Movement dx={dx}, dy={dy}, total={total}")
                     if total > self.cfg["other_player_move_pixel"]:
                         logger.warning(f"Other player movement > {self.cfg['other_player_move_pixel']}px detected, triggering channel change.")
-                        self.kb.set_command("stop")
+                        self.kb.set_command("none none none")
+                        self.kb.release_all_key()
                         self.kb.disable()
                         time.sleep(1)
                         self.channel_change()
@@ -1477,7 +1549,8 @@ class MapleStoryBot:
                 dx < self.cfg["rune_find"]["rune_trigger_distance_x"] and \
                 dy < self.cfg["rune_find"]["rune_trigger_distance_y"]:
 
-                self.kb.set_command("stop") # stop character
+                self.kb.set_command("none none none")
+                self.kb.release_all_key()
                 time.sleep(0.1) # Wait for character to stop
                 self.kb.disable() # Disable kb thread during rune solving
 
@@ -1609,7 +1682,9 @@ class MapleStoryBot:
                 cv2.putText(self.img_frame_debug, debug_text,
                            (10, 450), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 2)
 
-        command = ""
+        cmd_left_right = "none"
+        cmd_up_down = "none"
+        cmd_action = "none"
         if self.args.patrol:
             x, y = self.loc_player
             h, w = self.img_frame.shape[:2]
@@ -1626,59 +1701,73 @@ class MapleStoryBot:
                 self.is_patrol_to_left = not self.is_patrol_to_left
                 self.patrol_turn_point_cnt = 0
 
-            # Set command for patrol mode
-            # Use proper attack range checking instead of just checking if monsters exist
+            # Get left-right command
+            if self.is_patrol_to_left:
+                cmd_left_right = "left"
+            else:
+                cmd_left_right = "right"
+
+            # Get action command
             if (time.time() - self.t_patrol_last_attack > self.cfg["patrol"]["patrol_attack_interval"] and 
                 len(self.monster_info) > 0 and nearest_monster is not None):
                 # Check if monster is actually in attack range
-                if attack_direction == "I don't care" or attack_direction == "left" or attack_direction == "right":
-                    command = "attack"
+                if attack_direction is not None:
+                    cmd_action = "attack"
                     self.t_patrol_last_attack = time.time()
-            elif self.is_patrol_to_left:
-                command = "walk left"
-            else:
-                command = "walk right"
 
         elif self.args.aux:
-            command = ""
+            pass
 
         else:
             # get color code from img_route
-            color_code = self.get_nearest_color_code()
-            if color_code:
-                if color_code["action"] == "goal":
-                    # Switch to next route map
-                    self.idx_routes = (self.idx_routes+1)%len(self.img_routes)
-                    logger.debug(f"Change to new route:{self.idx_routes}")
-                command = color_code["action"]
+            color_code, color_code_up_down = self.get_nearest_color_code()
+
+            # Use color_code and color_code_up_down to complement each other
+            # To prevent character stuck at the end of ladder, we use two color color pixels
+            # and let them complement with each other, to ensure smoothy ladder climbing
+            if color_code and color_code_up_down:
+                if color_code["distance"] < color_code_up_down["distance"]:
+                    cmd_left_right, cmd_up_down, cmd_action = color_code["command"].split()
+                    _, cmd, _ = color_code_up_down["command"].split()
+                    if cmd_up_down == "none" and self.is_on_ladder:
+                        cmd_up_down = cmd # only complement when player is on ladder
+                else:
+                    cmd_left_right, cmd_up_down, cmd_action = color_code_up_down["command"].split()
+                    cmd, _, _ = color_code["command"].split()
+                    if cmd_left_right == "none" and self.is_on_ladder:
+                        cmd_left_right = cmd # only complement when player is on ladder
+            elif color_code:
+                cmd_left_right, cmd_up_down, cmd_action = color_code["command"].split()
+            elif color_code_up_down:
+                cmd_left_right, cmd_up_down, cmd_action = color_code_up_down["command"].split()
+
+            # Change route map if reached goal
+            if cmd_action == "goal":
+                # Switch to next route map
+                self.idx_routes = (self.idx_routes+1)%len(self.img_routes)
+                logger.debug(f"Change to new route:{self.idx_routes}")
 
             # teleport away from edge to avoid falling off cliff
             if self.is_near_edge() and \
                 time.time() - self.t_last_teleport > self.cfg["teleport"]["cooldown"]:
-                command = command.replace("walk", "teleport")
+                cmd_action = "teleport"
                 self.t_last_teleport = time.time() # update timer
 
-        if self.cfg["key"]["teleport"] == "": # disable teleport skill
-            command = command.replace("teleport", "jump")
+        # replace teleport to jump if user doesn't set teleport key
+        if self.cfg["key"]["teleport"] == "" and cmd_action == "teleport":
+            cmd_action = "jump"
 
         # Special logic for each status, overwrite color code action
         if self.status == "hunting":
             # Perform a random action when player stuck
             if not self.args.patrol and self.is_player_stuck():
-                command = self.get_random_action()
-            elif command in ["up", "down", "jump right", "jump left"]:
-                pass # Don't attack while character is on rope or jumping
-            elif attack_direction == "I don't care" and nearest_monster is not None and \
+                cmd_left_right, cmd_up_down, cmd_action = self.get_random_action()
+            elif attack_direction is not None and nearest_monster is not None and \
                 time.time() - self.t_last_attack > self.cfg["directional_attack"]["cooldown"]:
-                command = "attack"
-                self.t_last_attack = time.time()
-            elif attack_direction == "left" and nearest_monster is not None and \
-                time.time() - self.t_last_attack > self.cfg["directional_attack"]["cooldown"]:
-                command = "attack left"
-                self.t_last_attack = time.time()
-            elif attack_direction == "right" and nearest_monster is not None and \
-                time.time() - self.t_last_attack > self.cfg["directional_attack"]["cooldown"]:
-                command = "attack right"
+                cmd_action = "attack"
+                # Set up attack direction
+                if attack_direction in ["left", "right"]:
+                    cmd_left_right = attack_direction
                 self.t_last_attack = time.time()
 
         elif self.status == "finding_rune":
@@ -1708,10 +1797,14 @@ class MapleStoryBot:
             if time.time() - self.t_last_switch_status > self.cfg["rune_find"]["near_rune_duration"]:
                 self.switch_status("hunting")
 
+        elif self.status == "aux": # only for aux mode
+            pass
+
         else:
             logger.error(f"Unknown status: {self.status}")
 
         # send command to keyboard controller
+        command = f"{cmd_left_right} {cmd_up_down} {cmd_action}"
         self.kb.set_command(command)
 
         self.profiler.mark("Determine Command")
@@ -1727,7 +1820,7 @@ class MapleStoryBot:
             self.kb.is_need_screen_shot = False
 
         # Make sure player is in party
-        if self.is_first_frame == True:
+        if self.is_first_frame is True:
             activate_game_window(self.cfg["game_window"]["title"])
             time.sleep(0.3)
             self.ensure_is_in_party()

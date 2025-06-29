@@ -11,12 +11,13 @@ import cv2
 
 # local import
 from logger import logger
+from util import is_img_16_to_9
 
 class GameWindowCapturor:
     '''
     GameWindowCapturor
     '''
-    def __init__(self, cfg):
+    def __init__(self, cfg, args):
         self.cfg = cfg
         self.window_title = cfg["game_window"]["title"]
         self.frame = None
@@ -37,10 +38,17 @@ class GameWindowCapturor:
         time.sleep(0.1)
 
         # Check is game windows size is as expected
-        if self.frame.shape[:2] != cfg["game_window"]["size"]:
-            logger.error(f"Invalid window size: {self.frame.shape[:2]} (expected {cfg['game_window']['size']})")
-            logger.error("Please use windowed mode & smallest resolution.")
-            raise RuntimeError(f"Unexpected window size: {self.frame.shape[:2]}")
+        if args.aux:
+            # Check is game windows ratio is 16:9
+            if not is_img_16_to_9(self.frame, cfg):
+                logger.error(f"Invalid window ratio: {self.frame.shape[:2]} (expected 16:9 window)")
+                logger.error("Please use windowed mode & smallest resolution.")
+                raise RuntimeError(f"Unexpected window ratio: {self.frame.shape[:2]}")
+        else:
+            if self.frame.shape[:2] != cfg["game_window"]["size"]:
+                logger.error(f"Invalid window size: {self.frame.shape[:2]} (expected {cfg['game_window']['size']})")
+                logger.error("Please use windowed mode & smallest resolution.")
+                raise RuntimeError(f"Unexpected window size: {self.frame.shape[:2]}")
 
     def on_frame_arrived(self, frame: Frame,
                          capture_control: InternalCaptureControl):

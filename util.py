@@ -18,12 +18,13 @@ import numpy as np
 import yaml
 import pyautogui
 import pygetwindow as gw
-import win32gui
-import win32con
 
 # macOS specific import
 if platform.system() == 'Darwin':
     import Quartz
+else:
+    import win32gui
+    import win32con
 
 # Local import
 from logger import logger
@@ -656,7 +657,8 @@ def mask_route_colors(img_map, img_route, color_code):
 
     # Ensure dimensions match
     if img_map.shape[:2] != img_route.shape[:2]:
-        logger.warning(f"[mask_route_colors] Resizing img_map from {img_map.shape} to {img_route.shape}")
+        logger.warning("[mask_route_colors] Resizing img_map from "
+                       f"{img_map.shape} to {img_route.shape}")
         img_map = cv2.resize(img_map, (img_route.shape[1], img_route.shape[0]))
 
     # Build mask for each color
@@ -671,11 +673,23 @@ def mask_route_colors(img_map, img_route, color_code):
     return img_route
 
 def activate_game_window(window_title):
-        hwnd = win32gui.FindWindow(None, window_title)
-        if hwnd == 0:
-            raise Exception(f"Cannot find window with title: {window_title}")
+    '''
+    activate_game_window
+    This function only support Windows OS
+    '''
+    hwnd = win32gui.FindWindow(None, window_title)
+    if hwnd == 0:
+        raise Exception(f"Cannot find window with title: {window_title}")
 
-        # Restore if minimized
-        win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
-        # Bring to foreground
-        win32gui.SetForegroundWindow(hwnd)
+    # Restore if minimized
+    win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
+    # Bring to foreground
+    win32gui.SetForegroundWindow(hwnd)
+
+def is_img_16_to_9(img, cfg):
+    """
+    Check if image aspect ratio is approximately 16:9.
+    """
+    tolerance = cfg["game_window"]["ratio_tolerance"]
+    h, w = img.shape[:2]
+    return abs(w/h - 16/9) <= tolerance

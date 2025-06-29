@@ -114,8 +114,6 @@ class HealthMonitor:
         # sort contours by x coordinate
         loc_size_bars = sorted(loc_size_bars, key=lambda bar: bar[0])
         if len(loc_size_bars) != 3:
-            # Disable warning because too verbose
-            # logger.warning(f"[Health Monitor]: HP/MP/EXP bar detection has an unexpected result:{loc_size_bars}")
             return (None, None, None)
 
         # Update loc_size_bars
