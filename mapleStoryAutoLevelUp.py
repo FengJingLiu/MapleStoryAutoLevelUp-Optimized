@@ -22,7 +22,8 @@ from logger import logger
 from util import find_pattern_sqdiff, draw_rectangle, screenshot, nms, \
                 load_image, get_mask, get_minimap_loc_size, get_player_location_on_minimap, \
                 is_mac, nms_matches, override_cfg, load_yaml, get_all_other_player_locations_on_minimap, \
-                click_in_game_window, mask_route_colors, to_opencv_hsv, activate_game_window
+                click_in_game_window, mask_route_colors, to_opencv_hsv, debug_minimap_colors, activate_game_window
+
 from KeyBoardController import KeyBoardController
 if is_mac():
     from GameWindowCapturorForMac import GameWindowCapturor
@@ -1384,7 +1385,20 @@ class MapleStoryBot:
         When multiple players appear at once, this reduces the perceived displacement. 
         Future enhancement should cluster red dots into separate groups when multiple players are detected simultaneously.
         '''
-        loc_other_players = get_all_other_player_locations_on_minimap(self.img_minimap)
+
+        # Get other player color from config
+        if is_mac():
+            other_player_color = (20, 15, 228)
+        else:
+            other_player_color = (0, 0, 255)
+        
+        # 調試：分析小地圖顏色（只在第一次執行時）
+        # if self.is_first_frame:
+        #     logger.info("Running minimap color analysis...")
+        #     debug_minimap_colors(self.img_minimap, other_player_color)
+        
+        loc_other_players = get_all_other_player_locations_on_minimap(self.img_minimap, other_player_color)
+        # logger.info(f"loc_other_players: {loc_other_players}, other_player_color: {other_player_color}")
         if loc_other_players:
             # Calculate center value
             xs = [x for (x, y) in loc_other_players]
