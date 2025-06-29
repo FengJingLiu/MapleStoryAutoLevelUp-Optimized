@@ -181,7 +181,6 @@ class MapleStoryBot:
             self.kb.disable()
 
         # Start game window capturing thread
-        logger.info("Waiting for game window to activate, please click on game window")
         self.capture = GameWindowCapturor(self.cfg)
 
         # Start health monitoring thread
@@ -1697,6 +1696,11 @@ class MapleStoryBot:
         if self.kb.is_need_screen_shot:
             screenshot(self.img_frame)
             self.kb.is_need_screen_shot = False
+
+        # Make sure player is in party
+        if self.is_first_frame == True:
+            click_in_game_window(self.cfg["game_window"]["title"],(100,0))
+            self.ensure_is_in_party()
 
         # Enable cached location since second frame
         self.is_first_frame = False
