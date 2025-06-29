@@ -22,7 +22,8 @@ from logger import logger
 from util import find_pattern_sqdiff, draw_rectangle, screenshot, nms, \
                 load_image, get_mask, get_minimap_loc_size, get_player_location_on_minimap, \
                 is_mac, nms_matches, override_cfg, load_yaml, get_all_other_player_locations_on_minimap, \
-                click_in_game_window, mask_route_colors, to_opencv_hsv, debug_minimap_colors
+                click_in_game_window, mask_route_colors, to_opencv_hsv, debug_minimap_colors, activate_game_window
+
 from KeyBoardController import KeyBoardController
 if is_mac():
     from GameWindowCapturorForMac import GameWindowCapturor
@@ -73,6 +74,7 @@ class MapleStoryBot:
         self.t_patrol_last_attack = time.time() # Last patrol attack timer
         self.t_last_attack = time.time() # Last attack timer for cooldown
         self.t_last_rune_trigger = time.time() # Last time trigger rune
+        self.t_rune_finding_start = 0 # Start time of rune finding. Reset when 'channel_change' and 'solve_rune'.
         # Patrol mode
         self.is_patrol_to_left = True # Patrol direction flag
         self.patrol_turn_point_cnt = 0 # Patrol tuning back counter
@@ -181,7 +183,6 @@ class MapleStoryBot:
             self.kb.disable()
 
         # Start game window capturing thread
-        logger.info("Waiting for game window to activate, please click on game window")
         self.capture = GameWindowCapturor(self.cfg)
 
         # Start health monitoring thread
@@ -1271,6 +1272,11 @@ class MapleStoryBot:
         time.sleep(5)
         self.ensure_is_in_party() # Make sure player is in party
 
+        self.switch_status("hunting")
+
+        # Clear rune finding timer after channel change
+        self.t_rune_finding_start = 0
+
     def terminate_threads(self):
         '''
         terminate_and_wait_threads
@@ -1446,6 +1452,11 @@ class MapleStoryBot:
 
         # Check whether a rune icon is near player
         if self.status == "finding_rune":
+
+            # Start timer when entering finding_rune status
+            if self.t_rune_finding_start == 0:
+                self.t_rune_finding_start = time.time()
+
             self.update_rune_location()
             if self.loc_rune is not None:
                 self.switch_status("near_rune")
@@ -1484,6 +1495,8 @@ class MapleStoryBot:
                 if self.is_in_rune_game():
                     self.solve_rune() # Blocking until runes solved
                     self.switch_status("hunting")
+                    # Clear rune finding timer after successful rune solving
+                    self.t_rune_finding_start = 0
 
                 # Restore kb thread
                 self.kb.enable()
@@ -1678,7 +1691,9 @@ class MapleStoryBot:
                 self.switch_status("hunting")
 
             # Check if finding rune timeout
-            if time.time() - self.t_last_switch_status > self.cfg["rune_find"]["timeout"]:
+            diff_timeout = time.time() - self.t_rune_finding_start
+            logger.info(f"diff_timeout: {diff_timeout}")
+            if diff_timeout > self.cfg["rune_find"]["timeout"]:
                 if self.cfg["rune_find"]["timeout_action"] == "change_channel":
                     # Change channel to avoid rune
                     self.channel_change()
@@ -1710,6 +1725,12 @@ class MapleStoryBot:
         if self.kb.is_need_screen_shot:
             screenshot(self.img_frame)
             self.kb.is_need_screen_shot = False
+
+        # Make sure player is in party
+        if self.is_first_frame == True:
+            activate_game_window(self.cfg["game_window"]["title"])
+            time.sleep(0.3)
+            self.ensure_is_in_party()
 
         # Enable cached location since second frame
         self.is_first_frame = False

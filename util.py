@@ -18,6 +18,12 @@ import numpy as np
 import yaml
 import pyautogui
 import pygetwindow as gw
+import win32gui
+import win32con
+
+# macOS specific import
+if platform.system() == 'Darwin':
+    import Quartz
 
 # Local import
 from logger import logger
@@ -535,12 +541,58 @@ def nms_matches(matches, iou_thresh=0.0):
 
     return filtered
 
+def get_window_region_mac(window_title):
+    '''
+    Get window region on macOS using Quartz
+    '''
+    window_list = Quartz.CGWindowListCopyWindowInfo(
+        Quartz.kCGWindowListOptionOnScreenOnly | Quartz.kCGWindowListExcludeDesktopElements,
+        Quartz.kCGNullWindowID
+    )
+    # Get all exist windows
+    all_titles = []
+    for window in window_list:
+        title = window.get(Quartz.kCGWindowName, '')
+        owner = window.get(Quartz.kCGWindowOwnerName, '')
+        if title:
+            all_titles.append(f"{title} (Owner: {owner})")
+    logger.debug(f"all_titles: {all_titles}")
+    for window in window_list:
+        if window.get(Quartz.kCGWindowName, '') == window_title:
+            bounds = window.get(Quartz.kCGWindowBounds, {})
+            return {
+                "left": int(bounds.get('X', 0)),
+                "top": int(bounds.get('Y', 0)),
+                "width": int(bounds.get('Width', 0)),
+                "height": int(bounds.get('Height', 0))
+            }
+    return None
+
+
 def click_in_game_window(window_title, coord):
     '''
     Mouse click on a game window coordinate
     '''
-    game_window = gw.getWindowsWithTitle(window_title)[0]
-    win_left, win_top = game_window.left, game_window.top
+    # game_window = gw.getWindowsWithTitle(window_title)[0]
+    # win_left, win_top = game_window.left, game_window.top
+
+    # If mac then coord / 2 and y position + 3
+    if is_mac():
+        coord = (coord[0] // 2, coord[1] // 2 + 10)
+
+    if is_mac():
+        # macOS implementation using Quartz
+        region = get_window_region_mac(window_title)
+        if region is None:
+            text = f"Cannot find window: {window_title}"
+            logger.error(text)
+            raise RuntimeError(text)
+        win_left, win_top = region["left"], region["top"]
+    else:
+        # Windows implementation using pygetwindow
+        game_window = gw.getWindowsWithTitle(window_title)[0]
+        win_left, win_top = game_window.left, game_window.top
+
     pyautogui.click(win_left + coord[0], win_top + coord[1])
 
 def send_email(email_addr, password,
@@ -617,3 +669,13 @@ def mask_route_colors(img_map, img_route, color_code):
     img_route[mask] = (0, 0, 0)
 
     return img_route
+
+def activate_game_window(window_title):
+        hwnd = win32gui.FindWindow(None, window_title)
+        if hwnd == 0:
+            raise Exception(f"Cannot find window with title: {window_title}")
+
+        # Restore if minimized
+        win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
+        # Bring to foreground
+        win32gui.SetForegroundWindow(hwnd)
