@@ -2,7 +2,7 @@
 
 An auto leveling up script for Maple Story Artale
 
-![Intro Animation](media/intro.gif)
+<img src="media/intro.gif" width="60%">
 
 [▶ Watch demo on YouTube](https://www.youtube.com/watch?v=QeEXLHO8KN4)
 
@@ -15,18 +15,16 @@ This work purely-based on Computer Vision technique, it doesn't required access 
 ✅ Simulates real keyboard input
 
 ## Environment
-Windows11
-
-Python3.12
-
-OpenCV4.11
+* Windows11
+* Python3.12
+* OpenCV4.11
 
 Note: this project DOES NOT support virtual environment(VM), it's only for recreational and academical use.
 
-## Support Server
+## Support MapleStory Version
 This project is mostly developed and tested on MapleStory Artale Taiwan Server
 
-It also supports N.A server, use '--cfg na' to load customized N.A config 
+It also supports global server, use '--cfg global' to load customized global config 
 
 ## Install dependency
 ```
@@ -164,3 +162,12 @@ python mapleStoryAutoLevelUp_legacy.py --map <name_of_the_map> --monsters <name_
 Exmaple:
 python mapleStoryAutoLevelUp_legacy.py --map lost_time_1 --monsters evolved_ghost --attack aoe_skill
 ```
+
+## ☕ Support the Developer
+
+If you find this project helpful, consider supporting the developer by buying me a coffee!
+
+> 💡 You can type in any amount you like — $1, $5, or $10 — whatever you're comfortable with.  
+> 💵 Tips are in **USD**, not NTD.
+
+[![Buy Me a Coffee](https://img.shields.io/badge/%F0%9F%92%96_Tip_me_$1_or_more-yellow?style=flat-square&logo=buymeacoffee)](https://www.buymeacoffee.com/kenyu910645)
