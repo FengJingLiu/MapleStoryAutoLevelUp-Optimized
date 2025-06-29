@@ -18,6 +18,8 @@ import numpy as np
 import yaml
 import pyautogui
 import pygetwindow as gw
+import win32gui
+import win32con
 
 # Local import
 from logger import logger
@@ -555,3 +557,13 @@ def mask_route_colors(img_map, img_route, color_code):
     img_route[mask] = (0, 0, 0)
 
     return img_route
+
+def activate_game_window(window_title):
+        hwnd = win32gui.FindWindow(None, window_title)
+        if hwnd == 0:
+            raise Exception(f"Cannot find window with title: {window_title}")
+
+        # Restore if minimized
+        win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
+        # Bring to foreground
+        win32gui.SetForegroundWindow(hwnd)
