@@ -213,7 +213,7 @@ class RouteRecorder():
 
         # Start game window capturing thread
         logger.info("Waiting for game window to activate, please click on game window")
-        self.capture = GameWindowCapturor(self.cfg)
+        self.capture = GameWindowCapturor(self.cfg, None)
 
     def ensure_img_map_capacity(self, x, y, h, w):
         '''

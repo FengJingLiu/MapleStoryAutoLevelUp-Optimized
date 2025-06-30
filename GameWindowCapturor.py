@@ -38,7 +38,7 @@ class GameWindowCapturor:
         time.sleep(0.1)
 
         # Check is game windows size is as expected
-        if args.aux:
+        if args is not None and args.aux:
             # Check is game windows ratio is 16:9
             if not is_img_16_to_9(self.frame, cfg):
                 logger.error(f"Invalid window ratio: {self.frame.shape[:2]} (expected 16:9 window)")
