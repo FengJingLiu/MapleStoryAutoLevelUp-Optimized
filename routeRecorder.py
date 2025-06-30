@@ -184,11 +184,16 @@ class RouteRecorder():
         # Override with user customized config
         self.cfg = override_cfg(cfg, load_yaml(f"config/config_{args.cfg}.yaml"))
 
-        # Parse color code
+        # Parse color_code
         self.color_code = {
             tuple(map(int, k.split(','))): v
             for k, v in cfg["route"]["color_code"].items()
         }
+        color_code_up_down = {
+            tuple(map(int, k.split(','))): v
+            for k, v in cfg["route"]["color_code_up_down"].items()
+        }
+        self.color_code.update(color_code_up_down) # Combine both dictionaries
 
         self.fps_limit = self.cfg["system"]["fps_limit_route_recorder"]
 
@@ -360,40 +365,40 @@ class RouteRecorder():
         key_press = self.kb.key_pressing
         if "space" in key_press:
             if "left" in key_press:
-                action = "jump left"
+                action = "left none jump"
             elif "right" in key_press:
-                action = "jump right"
+                action = "right none jump"
             elif "down" in key_press:
-                action = "jump down"
+                action = "none down jump"
             else:
-                action = "jump"
+                action = "none none jump"
             is_draw_blob = True
         elif "e" in key_press: # Teleport skill
             if "left" in key_press:
-                action = "teleport left"
+                action = "left none teleport"
             elif "right" in key_press:
-                action = "teleport right"
+                action = "right none teleport"
             elif "down" in key_press:
-                action = "teleport down"
+                action = "none down teleport"
             elif "up" in key_press:
-                action = "teleport up"
+                action = "none up teleport"
             else:
                 action = ""
             is_draw_blob = True
         elif "up" in key_press:
-            action = "up"
+            action = "none up none"
         elif "down" in key_press:
-            action = "down"
+            action = "none down none"
         elif "left" in key_press:
-            action = "walk left"
+            action = "left none none"
         elif "right" in key_press:
-            action = "walk right"
+            action = "right none none"
         else:
             action = ""
 
         # Check if need to change route
         if self.kb.is_pressed_func_key[2]: # 'F3' is pressed
-            action = "goal"
+            action = "none none goal"
             is_draw_blob = True
             self.kb.is_pressed_func_key[2] = False
         elif self.kb.is_pressed_func_key[0]: # 'F1' is pressed
@@ -434,7 +439,7 @@ class RouteRecorder():
                 self.loc_player_global_last = self.loc_player_global
 
         # Save route image if goal is drawn
-        if action == "goal":
+        if action == "none none goal":
             out_path = f"minimaps/{self.args.new_map}/route{self.idx_routes+1}.png"
             cv2.imwrite(out_path, self.img_route)
             self.idx_routes += 1
