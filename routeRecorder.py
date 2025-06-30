@@ -323,17 +323,22 @@ class RouteRecorder():
             h, w = self.img_minimap.shape[:2]
             self.img_minimap = self.img_frame[y:y+h, x:x+w]
 
+            # Create mask where pixels are not black
+            mask = np.any(self.img_minimap != [0, 0, 0], axis=2).astype(np.uint8)
+            mask = mask * 255
+
             # Perform template matching to find where the current minimap fits in the global map
             self.loc_minimap_global, score, _ = find_pattern_sqdiff(
                 self.img_map,
-                self.img_minimap
+                self.img_minimap,
+                mask=mask
             )
             x, y = self.loc_minimap_global
             h, w = self.img_minimap.shape[:2]
             # Ensure img_map is big enough to fit the newly explored region
             self.ensure_img_map_capacity(x, y, h, w)
 
-            # Create mask where img_map is black
+            # Update map
             if self.args.map == '':
                 map_slice = self.img_map[y:y+h, x:x+w]
                 black_mask = np.all(map_slice == [0, 0, 0], axis=2)
