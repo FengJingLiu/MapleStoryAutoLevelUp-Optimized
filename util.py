@@ -163,7 +163,11 @@ def screenshot(img, suffix="screenshot"):
     - Saves the image to the "screenshot/" directory with the current timestamp as filename.
     '''
 
-    os.makedirs("screenshot", exist_ok=True)  # ensure directory exists
+    if img is None:
+        return
+
+    # ensure directory exists
+    os.makedirs("screenshot", exist_ok=True)
 
     # Generate timestamp string
     timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
