@@ -155,8 +155,13 @@ class KeyBoardController():
                     return True
             return False
         else:
-            active_window = gw.getActiveWindow()
-            return active_window is not None and self.window_title in active_window.title
+            try:
+                active_window = gw.getActiveWindow()
+                if not active_window:
+                    return False
+                return self.window_title in active_window.title
+            except Exception as e:
+                return False
 
     def release_all_key(self):
         '''
