@@ -39,7 +39,7 @@ class GameWindowCapturor:
     '''
     GameWindowCapturor for macOS
     '''
-    def __init__(self, cfg):
+    def __init__(self, cfg, args):
         self.cfg = cfg
         self.frame = None
         self.lock = threading.Lock()
