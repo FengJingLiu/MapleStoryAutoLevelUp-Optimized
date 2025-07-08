@@ -15,7 +15,10 @@ eng_to_cn:
   north_forest_training_ground_2: 北部森林訓練場2
   north_forest_training_ground_8: 北部森林訓練場8
   pig_shores: 肥肥海岸
-  the_path_of_time_1_for_mage: 時間之路1
+  the_path_of_time_1_for_mage: 時間之路1(需瞬移)
+  garden_of_green_2: 藍光庭園2
+  garden_of_red_2: 紅光庭園2
+  foggy_forest_for_mage: 濃霧森林(需瞬移)
   # monster
   angel_monkey: 天使猴
   black_axe_stump: 黑斧木妖
@@ -35,6 +38,9 @@ eng_to_cn:
   wild_kargo: 魔龍
   wind_single_eye_beast: 風獨眼獸
   zombie_mushroom: 殭屍菇菇
+  grupin: 藍獨角獅
+  red_cellion: 紅獨角獅
+  the_book_ghost: 書靈
 
 # Register mobs in each maps
 map_mobs_mapping:
@@ -53,3 +59,6 @@ map_mobs_mapping:
   north_forest_training_ground_8: [wind_single_eye_beast]
   pig_shores: [pig, ribbon_pig]
   the_path_of_time_1_for_mage: [evolved_ghost]
+  garden_of_green_2: [grupin]
+  garden_of_red_2: [red_cellion]
+  foggy_forest_for_mage: [the_book_ghost]
