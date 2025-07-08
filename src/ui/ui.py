@@ -16,7 +16,7 @@ from PySide6.QtWidgets import (
     QSizePolicy, QComboBox, QListWidgetItem, QScrollArea
 )
 from PySide6.QtGui import QTextCharFormat, QColor, QTextCursor, QPixmap, QImage
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Signal
 
 # Local import
 from src.utils.logger import logger
@@ -32,6 +32,8 @@ class MainWindow(QMainWindow):
     '''
     MainWindow
     '''
+    request_close = Signal()
+
     def __init__(self, controller=None):
         super().__init__()
         self.controller = controller # autoBotController
@@ -96,6 +98,9 @@ class MainWindow(QMainWindow):
 
         # Load previous stored UI state
         self.load_ui_state()
+
+        # Signal
+        self.request_close.connect(self.close)
 
     def setup_main_tab(self):
         '''

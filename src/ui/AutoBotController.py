@@ -3,7 +3,7 @@ from argparse import Namespace
 import sys
 
 # Pyside
-from PySide6.QtCore import Signal, QObject
+from PySide6.QtCore import Signal, QObject, QTimer
 
 #  Local Import
 from src.engine.MapleStoryAutoLevelUp import MapleStoryAutoBot
@@ -50,8 +50,6 @@ class AutoBotController(QObject):
         # Monitor function keys
         self.kb_listener = KeyBoardListener(is_autobot=True)
 
-
-
     def toggle_enable(self):
         '''
         toggle_enable
@@ -72,7 +70,7 @@ class AutoBotController(QObject):
         self.kb_listener.register_func_key_handler('f1', ui.button_start_pause.click)
         self.kb_listener.register_func_key_handler('f2', ui.button_screenshot.click)
         self.kb_listener.register_func_key_handler('f3', ui.button_record.click)
-        # self.kb_listener.register_func_key_handler('f12', ui.closeEvent)
+        self.kb_listener.register_func_key_handler('f12', lambda: ui.request_close.emit())
 
     def start_bot(self, cfg_path):
         '''
