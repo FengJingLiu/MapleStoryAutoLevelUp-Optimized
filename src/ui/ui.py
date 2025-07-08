@@ -52,7 +52,8 @@ class MainWindow(QMainWindow):
 
         # Window Settings
         self.setWindowTitle("MapleStory AutoLevelUp")
-        self.setMinimumSize(600, 400)
+        self.setMinimumSize(500, 800)
+        self.resize(500, 800) # Set a default starting size
 
         # Setup tabs
         self.tabs = QTabWidget()
@@ -70,28 +71,28 @@ class MainWindow(QMainWindow):
         # Change tabs signals
         self.tabs.currentChanged.connect(self.on_tab_changed)
 
-        # # Put tab widget to layout
-        # layout = QVBoxLayout()
-        # layout.addWidget(self.tabs)
-        # container = QWidget()
-        # container.setLayout(layout)
-        # self.setCentralWidget(container)
-
-        # Original layout with tabs
+        # Put tab widget to layout
         layout = QVBoxLayout()
         layout.addWidget(self.tabs)
+        container = QWidget()
+        container.setLayout(layout)
+        self.setCentralWidget(container)
 
-        # Content container that holds the layout
-        content = QWidget()
-        content.setLayout(layout)
+        # # Original layout with tabs
+        # layout = QVBoxLayout()
+        # layout.addWidget(self.tabs)
 
-        # Wrap in a scroll area
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setWidget(content)
+        # # Content container that holds the layout
+        # content = QWidget()
+        # content.setLayout(layout)
 
-        # Set scroll area as central widget
-        self.setCentralWidget(scroll)
+        # # Wrap in a scroll area
+        # scroll = QScrollArea()
+        # scroll.setWidgetResizable(True)
+        # scroll.setWidget(content)
+
+        # # Set scroll area as central widget
+        # self.setCentralWidget(scroll)
 
         # Load previous stored UI state
         self.load_ui_state()
