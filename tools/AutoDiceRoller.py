@@ -170,7 +170,8 @@ class AutoDiceRoller:
             # Check if is equal to target
             is_jackpot = True
             for i, (val, score) in enumerate(attibutes_info):
-                if self.args.attribute[i] != val:
+                target = self.args.attribute[i]
+                if target is not None and target != val:
                     is_jackpot = False
 
             # Stop rolling dice if reach target
@@ -187,24 +188,32 @@ class AutoDiceRoller:
         self.update_img_frame_debug()
 
 def parse_and_validate_attributes(attr_str):
-    '''
-    Check if user passed in attribute is reasonable
-    '''
-    try:
-        values = list(map(int, attr_str.split(',')))
-    except ValueError:
-        raise argparse.ArgumentTypeError("All attributes must be integers.")
-
-    if len(values) != 4:
+    raw_values = attr_str.split(',')
+    if len(raw_values) != 4:
         raise argparse.ArgumentTypeError("You must provide exactly 4 attributes: STR,DEX,INT,LUK")
 
-    if not all(4 <= v <= 13 for v in values):
-        raise argparse.ArgumentTypeError("Each attribute must be between 4 and 13.")
+    parsed = []
+    total_known = 0
+    unknown_count = 0
 
-    if sum(values) != 25:
-        raise argparse.ArgumentTypeError("Total attribute points must sum up to 25.")
+    for v in raw_values:
+        if v.strip() == '?':
+            parsed.append(None)
+            unknown_count += 1
+        else:
+            try:
+                val = int(v)
+            except ValueError:
+                raise argparse.ArgumentTypeError(f"Invalid attribute value: {v}")
+            if not (4 <= val <= 13):
+                raise argparse.ArgumentTypeError("Each attribute must be between 4 and 13.")
+            parsed.append(val)
+            total_known += val
 
-    return values
+    if unknown_count > 0 and (total_known > 25 or total_known + 4 * unknown_count > 25):
+        raise argparse.ArgumentTypeError("Impossible to satisfy sum of 25 with current values.")
+
+    return parsed
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
