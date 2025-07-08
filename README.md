@@ -132,6 +132,8 @@ python -m tools.AutoDiceRoller --attribute <STR,DEX,INT,LUK>
 
 Example: for creating a full-INT wizard character:
 python -m tools.AutoDiceRoller --attribute 4,4,13,4
+支援問號模糊能力值
+python -m tools.AutoDiceRoller --attribute 4,4,?,?
 ```
 
 ## Legacy Version
