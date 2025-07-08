@@ -744,7 +744,7 @@ class MapleStoryAutoBot:
                 elif self.cfg["monster_detect"]["mode"] == "template_free":
                     # Generate mask where pixel is exactly (0,0,0)
                     black_mask = np.all(img_roi == [0, 0, 0], axis=2).astype(np.uint8) * 255
-                    cv2.imshow("Black Pixel Mask", black_mask)
+                    # cv2.imshow("Black Pixel Mask", black_mask)
 
                     # Zero out mask inside this region (ignore player's own character)
                     black_mask[char_y_min:char_y_max, char_x_min:char_x_max] = 0
@@ -995,8 +995,9 @@ class MapleStoryAutoBot:
                     (0, 0, 255), str(round(best_score, 2))
                 )
                 # Update debug window
-                self.update_img_frame_debug()
-                cv2.waitKey(1)
+                if not self.is_ui:
+                    self.update_img_frame_debug()
+                    cv2.waitKey(1)
 
                 # For logging
                 screenshot(self.img_frame_debug, "solve_rune")
