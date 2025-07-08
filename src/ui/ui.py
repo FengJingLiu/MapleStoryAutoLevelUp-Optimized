@@ -13,7 +13,7 @@ from PySide6.QtWidgets import (
     QApplication, QMainWindow, QPushButton, QLabel, QVBoxLayout, QWidget,
     QCheckBox, QListWidget, QFileDialog, QHBoxLayout, QLineEdit,
     QPlainTextEdit, QTabWidget, QGroupBox, QFormLayout,
-    QSizePolicy, QComboBox, QListWidgetItem
+    QSizePolicy, QComboBox, QListWidgetItem, QScrollArea
 )
 from PySide6.QtGui import QTextCharFormat, QColor, QTextCursor, QPixmap, QImage
 from PySide6.QtCore import Qt
@@ -70,12 +70,28 @@ class MainWindow(QMainWindow):
         # Change tabs signals
         self.tabs.currentChanged.connect(self.on_tab_changed)
 
-        # Put tab widget to layout
+        # # Put tab widget to layout
+        # layout = QVBoxLayout()
+        # layout.addWidget(self.tabs)
+        # container = QWidget()
+        # container.setLayout(layout)
+        # self.setCentralWidget(container)
+
+        # Original layout with tabs
         layout = QVBoxLayout()
         layout.addWidget(self.tabs)
-        container = QWidget()
-        container.setLayout(layout)
-        self.setCentralWidget(container)
+
+        # Content container that holds the layout
+        content = QWidget()
+        content.setLayout(layout)
+
+        # Wrap in a scroll area
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setWidget(content)
+
+        # Set scroll area as central widget
+        self.setCentralWidget(scroll)
 
         # Load previous stored UI state
         self.load_ui_state()
@@ -571,7 +587,7 @@ class MainWindow(QMainWindow):
 
         # Validate the file name
         if "config_default.yaml" in path or "config_data.yaml" in path or \
-           "config_macOS.yaml" in path or "config_global.yaml" in path:
+           "config_macOS.yaml" in path:
             error_label.setText(f"{path} cannot be loaded as customized yaml")
             error_label.setVisible(True)
             return

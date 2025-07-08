@@ -39,10 +39,11 @@ class GameWindowCapturor:
     '''
     GameWindowCapturor for macOS
     '''
-    def __init__(self, cfg, args):
+    def __init__(self, cfg):
         self.cfg = cfg
         self.frame = None
         self.lock = threading.Lock()
+        self.is_terminated = False
 
         self.window_title = cfg["game_window"]["title"]
 
@@ -68,7 +69,7 @@ class GameWindowCapturor:
         '''
         開始螢幕擷取，並不斷更新 frame。
         '''
-        while True:
+        while not self.is_terminated:
             # Update self.region
             self.update_window_region()
 
@@ -77,6 +78,13 @@ class GameWindowCapturor:
 
             # Limit FPS to save systme resources
             self.limit_fps()
+
+    def stop(self):
+        '''
+        Stop capturing thread
+        '''
+        self.is_terminated = True
+        logger.info("[GameWindowCapturor] Terminated")
 
     def update_window_region(self):
         '''
