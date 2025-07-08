@@ -1,31 +1,26 @@
 '''
-KeyBoardListener
+KeyBoardListener for routeRecorder.py
 '''
 # Standard Import
 import threading
 import time
 
-import pyautogui
 import pygetwindow as gw
 from pynput import keyboard
 
 # Local import
-from logger import logger
-
-pyautogui.PAUSE = 0  # remove delay
+from src.utils.logger import logger
 
 class KeyBoardListener():
     '''
     KeyBoardListener
     '''
-    def __init__(self, cfg):
+    def __init__(self, cfg=None, is_autobot=True):
         self.cfg = cfg
         self.t_last_run = time.time()
         self.is_enable = True
-        self.window_title = cfg["game_window"]["title"]
         self.debounce_interval = 1 # second
-        self.is_need_screen_shot = False
-        self.is_need_toggle = False
+        self.is_terminated = False
         self.fps = 0
         self.fps_limit = 30
         self.key_pressing = [] # record the key pressed by user
@@ -33,7 +28,6 @@ class KeyBoardListener():
 
         # Timer
         self.t_func_key = [0]*12 # 'F1', 'F2', .... 'F12'
-
 
         # Keys
         self.movement_keys = {
@@ -47,12 +41,31 @@ class KeyBoardListener():
             getattr(keyboard.Key, f"f{i+1}"): i for i in range(12)
         }
 
+        self.func_key_handlers = {
+            f"f{i}": self.do_nothing for i in range(1, 13)
+        }
+
         # Start keyboard control thread
-        threading.Thread(target=self.run, daemon=True).start()
+        if is_autobot:
+            threading.Thread(target=self.run_for_autobot, daemon=True).start()
+        else:
+            self.cfg = cfg
+            self.window_title = cfg["game_window"]["title"]
+            threading.Thread(target=self.run_for_route_recorder, daemon=True).start()
 
         listener = keyboard.Listener(on_press=self.on_press,
                                      on_release=self.on_release)
         listener.start()
+
+    def do_nothing(self):
+        pass
+
+    def register_func_key_handler(self, key: str, handler: callable):
+        key = key.lower()
+        if key in self.func_key_handlers:
+            self.func_key_handlers[key] = handler
+        else:
+            logger.warning(f"[KeyBoardListener] '{key}' is not a supported function key.")
 
     def on_release(self, key):
         '''
@@ -68,7 +81,6 @@ class KeyBoardListener():
         if k in self.key_pressing:
             self.key_pressing.remove(k)
 
-
     def on_press(self, key):
         '''
         Handle key press events.
@@ -81,7 +93,8 @@ class KeyBoardListener():
             if key in self.func_keys:
                 idx = self.func_keys[key]
                 if time.time() - self.t_func_key[idx] > self.debounce_interval:
-                    self.is_pressed_func_key[idx] = True
+                    self.is_pressed_func_key[idx] = True # Polling
+                    self.func_key_handlers.get(key.name.lower())()
                     self.t_func_key[idx] = time.time()
 
             k = self.movement_keys.get(key, None)
@@ -107,6 +120,12 @@ class KeyBoardListener():
         enable keyboard controlller
         '''
         self.is_enable = True
+
+    def stop(self):
+        '''
+        Stop keyboard listener thread
+        '''
+        self.is_terminated = True
 
     def is_game_window_active(self):
         '''
@@ -134,14 +153,23 @@ class KeyBoardListener():
         self.t_last_run = time.time()
         # logger.info(f"FPS = {self.fps}")
 
-    def run(self):
+    def run_for_route_recorder(self):
         '''
         run
         '''
-        while True:
+        while not self.is_terminated:
             # Check if game window is active
             if not self.is_enable or not self.is_game_window_active():
                 self.limit_fps()
                 continue
 
             self.limit_fps()
+
+    def run_for_autobot(self):
+        '''
+        run
+        '''
+        while not self.is_terminated:
+            self.limit_fps()
+
+        logger.info("[KeyBoardListener] Terminated")

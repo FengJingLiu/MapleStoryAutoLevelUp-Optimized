@@ -13,12 +13,14 @@ import numpy as np
 import cv2
 
 # local import
-from logger import logger
-from util import find_pattern_sqdiff, draw_rectangle, screenshot, \
-                get_minimap_loc_size, get_player_location_on_minimap, \
-                to_opencv_hsv, load_yaml, override_cfg, is_mac, load_image
-from KeyBoardListener import KeyBoardListener
-from GameWindowCapturor import GameWindowCapturor
+from src.utils.logger import logger
+from src.utils.common import (
+    find_pattern_sqdiff, draw_rectangle, screenshot,
+    get_minimap_loc_size, get_player_location_on_minimap,
+    to_opencv_hsv, load_yaml, override_cfg, is_mac, load_image,
+)
+from src.input.KeyBoardListener import KeyBoardListener
+from src.input.GameWindowCapturor import GameWindowCapturor
 
 class RouteRecorder():
     '''
@@ -148,6 +150,28 @@ class RouteRecorder():
                 component_mask = (labels == i)
                 self.img_map[component_mask] = replace_color
 
+    def get_img_frame(self):
+        '''
+        get_img_frame
+        '''
+        # Get window game raw frame
+        self.frame = self.capture.get_frame()
+        if self.frame is None:
+            logger.warning("Failed to capture game frame.")
+            return
+
+        # Make sure the window ratio is as expected
+        if self.cfg["game_window"]["size"] != self.frame.shape[:2]:
+            text = f"Unexpeted window size: {self.frame.shape[:2]} "\
+                    f"(expect {self.cfg['game_window']['size']})\n"
+            text += "Please use windowed mode & smallest resolution."
+            logger.error(text)
+            return
+
+        # Resize raw frame to (1296, 759)
+        return cv2.resize(self.frame, (1296, 759),
+                   interpolation=cv2.INTER_NEAREST)
+
     def __init__(self, args):
         '''
         Init MapleStoryBot
@@ -214,11 +238,11 @@ class RouteRecorder():
             self.img_map = load_image(f"{self.args.map}")
 
         # Start keyboard listener thread
-        self.kb = KeyBoardListener(self.cfg)
+        self.kb = KeyBoardListener(self.cfg, is_autobot=False)
 
         # Start game window capturing thread
         logger.info("Waiting for game window to activate, please click on game window")
-        self.capture = GameWindowCapturor(self.cfg, None)
+        self.capture = GameWindowCapturor(self.cfg)
 
     def ensure_img_map_capacity(self, x, y, h, w):
         '''
@@ -275,10 +299,11 @@ class RouteRecorder():
         Process with one game window frame
         '''
         # Get lastest game screen frame buffer
-        self.frame = self.capture.get_frame()
-
-        # Resize game screen to 1296x759
-        self.img_frame = cv2.resize(self.frame, (1296, 759), interpolation=cv2.INTER_NEAREST)
+        img_frame = self.get_img_frame()
+        if img_frame is None:
+            return -1 # Wait for game window to be ready
+        else:
+            self.img_frame = img_frame
 
         # Image for debug use
         self.img_frame_debug = self.img_frame.copy()
@@ -497,7 +522,7 @@ if __name__ == '__main__':
     parser.add_argument(
         '--cfg',
         type=str,
-        default='edit_me',
+        default='custom',
         help='Choose customized config yaml file in config/'
     )
 

@@ -6,8 +6,8 @@ import os
 
 # Local import
 sys.path.append(os.path.abspath(os.path.join(__file__, "../../")))
-from logger import logger
-from util import check_inbox, send_email
+from src.utils.logger import logger
+from src.utils.common import check_inbox, send_email
 
 SENDER_EMAIL = "maplestoryautolevelup@gmail.com"
 PASSWORD = "REMOVED_GMAIL_APP_PASSWORD"

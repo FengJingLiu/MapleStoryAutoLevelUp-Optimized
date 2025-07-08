@@ -3,6 +3,14 @@
 # Put your own setting in config_edit_me.yaml instead.
 # --------------------------------------
 
+# ────────────────
+# 🔁 Bot
+# ────────────────
+bot:
+  mode: "normal" # "normal", "aux", "patrol"
+  attack: "directional" # "aoe_skill" "directional"
+  map: "" # Please refer to config/config_data.yaml
+
 # ────────────────────────────────
 # 🎮 Keyboard Mapping
 # ────────────────────────────────
@@ -67,6 +75,7 @@ directional_attack:
 aoe_skill:
   range_x: 400               # ↔️ Horizontal skill range (in pixels)
   range_y: 170               # ↕️ Vertical skill range (in pixels)
+  cooldown: 0.05             # TODO: Currently just a filler
 
 # ────────────────
 # ❤️ Health Monitor
@@ -78,13 +87,13 @@ aoe_skill:
 health_monitor:
   enable: True             # ✅ Enable or disable health monitor
   force_heal: False        # 🛡️ Heal first — stop attacking until HP is restored
-  add_hp_ratio: 0.5        # ❤️ Drink HP potion when HP drops below this ratio [0.0 ~ 1.0]
-  add_mp_ratio: 0.5        # 💙 Drink MP potion when MP drops below this ratio [0.0 ~ 1.0]
+  add_hp_percent: 50       # ❤️ Drink HP potion when HP drops below this ratio [0.0 ~ 1.0]
+  add_mp_percent: 50       # 💙 Drink MP potion when MP drops below this ratio [0.0 ~ 1.0]
   add_hp_cooldown: 0.5     # 🕒 Seconds to wait between HP potions, prevent potion spam
   add_mp_cooldown: 0.5     # 🕒 Seconds to wait between MP potions, prevent potion spam
   fps_limit: 20            # 🚥 Loop rate for the health monitor thread
   return_home_if_no_potion: False      # ✅ Use homing scroll when potion is used up
-  return_home_watch_dog_timeout: 3     # 🕒 Duration to detect HP is lower than "add_hp_ratio"
+  return_home_watch_dog_timeout: 3     # 🕒 Duration to detect HP is lower than "add_hp_percent"
 
 # ────────────────
 # 🌀 Mage Teleport
@@ -131,6 +140,8 @@ party_red_bar:
 
 nametag:
   enable: False # Only switch back to 'True' when party red bar detection doesn't work for you
+  name: "example" # Load nametag/<name>.png as nametag template
+
   # 🧪 Comparison mode for matching the nametag:
   #   - "grayscale": match using grayscale image
   #   - "white_mask": match using binarized image
@@ -200,7 +211,7 @@ monster_detect:
 # "true": Change channel once other player is detected
 # "pixel": Change channel once other player move set pixels in other_player_move_pixel
 channel_change:
-  mode: "pixel"
+  mode: ""
   other_player_move_thres: 10  # only work when mode == "pixel"
 
 # ────────────────
@@ -373,7 +384,6 @@ system:
   fps_limit_route_recorder: 10      # 🚥 Route recorder FPS
   fps_limit_auto_dice_roller: 1     # 🚥 Auto rice roller FPS
   key_debounce_interval: 1          # ⏱️ Cooldown (in seconds) between function key presses (e.g., F1, F2...)
-  show_debug_window: True           # 🐞 Show debug window (disable to save resources)
   server: "TW"                      # "TW", "NA"
   language: "chinese"               # "english" "chinese"
 

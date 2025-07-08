@@ -6,22 +6,23 @@ python mapleStoryAutoLevelUp.py --map cloud_balcony --monster brown_windup_bear,
 import time
 import threading
 
+# Libarary Import
 from windows_capture import WindowsCapture, Frame, InternalCaptureControl
 import cv2
 
 # local import
-from logger import logger
-from util import is_img_16_to_9
+from src.utils.logger import logger
 
 class GameWindowCapturor:
     '''
     GameWindowCapturor
     '''
-    def __init__(self, cfg, args):
+    def __init__(self, cfg):
         self.cfg = cfg
         self.window_title = cfg["game_window"]["title"]
         self.frame = None
         self.lock = threading.Lock()
+        self.is_terminated = False
 
         self.capture = WindowsCapture(window_name=self.window_title)
         self.capture.event(self.on_frame_arrived)
@@ -31,24 +32,10 @@ class GameWindowCapturor:
         self.fps_limit = cfg["system"]["fps_limit_window_capturor"]
         self.t_last_run = 0.0
 
-        # Start capturing thread, blocking
-        threading.Thread(target=self.capture.start, daemon=True).start()
+        # Start capturing thread
+        self.capture_control = self.capture.start_free_threaded()
 
-        # Wait 0.1 second for frame to load
-        time.sleep(0.1)
-
-        # Check is game windows size is as expected
-        if args is not None and args.aux:
-            # Check is game windows ratio is 16:9
-            if not is_img_16_to_9(self.frame, cfg):
-                logger.error(f"Invalid window ratio: {self.frame.shape[:2]} (expected 16:9 window)")
-                logger.error("Please use windowed mode & smallest resolution.")
-                raise RuntimeError(f"Unexpected window ratio: {self.frame.shape[:2]}")
-        else:
-            if self.frame.shape[:2] != cfg["game_window"]["size"]:
-                logger.error(f"Invalid window size: {self.frame.shape[:2]} (expected {cfg['game_window']['size']})")
-                logger.error("Please use windowed mode & smallest resolution.")
-                raise RuntimeError(f"Unexpected window size: {self.frame.shape[:2]}")
+        logger.info("[GameWindowCapturor] Init done")
 
     def on_frame_arrived(self, frame: Frame,
                          capture_control: InternalCaptureControl):
@@ -63,7 +50,7 @@ class GameWindowCapturor:
         '''
         Capture closed callback.
         '''
-        logger.warning("Capture session closed.")
+        logger.warning("[GameWindowCapturor] closed.")
         cv2.destroyAllWindows()
 
     def get_frame(self):
@@ -74,6 +61,13 @@ class GameWindowCapturor:
             if self.frame is None:
                 return None
             return cv2.cvtColor(self.frame, cv2.COLOR_BGRA2BGR)
+
+    def stop(self):
+        '''
+        Stop capturing thread
+        '''
+        self.capture_control.stop()
+        logger.info("[GameWindowCapturor] Terminated")
 
     def limit_fps(self):
         '''

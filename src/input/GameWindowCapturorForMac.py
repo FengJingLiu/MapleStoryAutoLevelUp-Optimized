@@ -9,7 +9,7 @@ import numpy as np
 import Quartz
 
 # Local import
-from logger import logger
+from src.utils.logger import logger
 
 def get_window_region(window_title):
     window_list = Quartz.CGWindowListCopyWindowInfo(

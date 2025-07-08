@@ -6,10 +6,10 @@ import datetime
 import cv2
 import numpy as np
 # Local import
-from logger import logger
+from src.utils.logger import logger
 from GameWindowCapturor import GameWindowCapturor
 from config.config import Config
-from util import draw_rectangle, load_image, find_pattern_sqdiff, get_mask
+from src.utils.common import draw_rectangle, load_image, find_pattern_sqdiff, get_mask
 
 class MapScanner:
     '''

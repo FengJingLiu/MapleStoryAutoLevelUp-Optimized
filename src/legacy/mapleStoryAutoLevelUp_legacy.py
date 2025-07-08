@@ -15,8 +15,8 @@ import cv2
 
 # local import
 from config.legacy.config_legacy import Config
-from logger import logger
-from util import find_pattern_sqdiff, draw_rectangle, screenshot, nms, load_image, get_mask
+from src.utils.logger import logger
+from src.utils.common import find_pattern_sqdiff, draw_rectangle, screenshot, nms, load_image, get_mask
 from KeyBoardController import KeyBoardController
 from GameWindowCapturorSelector import GameWindowCapturor
 

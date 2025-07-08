@@ -2,7 +2,7 @@ import time
 from collections import defaultdict
 
 # Local improt
-from logger import logger
+from src.utils.logger import logger
 
 class Profiler:
     '''

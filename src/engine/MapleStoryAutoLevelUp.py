@@ -11,6 +11,7 @@ import sys
 import logging
 import os
 import datetime
+import threading
 
 # Library import
 import numpy as np
@@ -18,39 +19,54 @@ import cv2
 import yaml
 
 # Local import
-from logger import logger
-from util import find_pattern_sqdiff, draw_rectangle, screenshot, nms, \
-                load_image, get_mask, get_minimap_loc_size, get_player_location_on_minimap, \
-                is_mac, nms_matches, override_cfg, load_yaml, get_all_other_player_locations_on_minimap, \
-                click_in_game_window, mask_route_colors, to_opencv_hsv, debug_minimap_colors, \
-                activate_game_window, is_img_16_to_9
+from src.utils.logger import logger
+from src.utils.common import (find_pattern_sqdiff, draw_rectangle, screenshot, nms,
+    load_image, get_mask, get_minimap_loc_size, get_player_location_on_minimap,
+    is_mac, nms_matches, override_cfg, load_yaml, get_all_other_player_locations_on_minimap,
+    click_in_game_window, mask_route_colors, to_opencv_hsv, debug_minimap_colors,
+    activate_game_window, is_img_16_to_9,
+)
 
-from KeyBoardController import KeyBoardController
+from src.input.KeyBoardController import KeyBoardController
+from src.input.KeyBoardListener import KeyBoardListener
 if is_mac():
-    from GameWindowCapturorForMac import GameWindowCapturor
+    from src.input.GameWindowCapturorForMac import GameWindowCapturor
 else:
-    from GameWindowCapturor import GameWindowCapturor
-from HealthMonitor import HealthMonitor
-from profiler import Profiler
+    from src.input.GameWindowCapturor import GameWindowCapturor
+from src.engine.HealthMonitor import HealthMonitor
+from src.engine.Profiler import Profiler
 
-class MapleStoryBot:
+class MapleStoryAutoBot:
     '''
-    MapleStoryBot
+    MapleStoryAutoBot
     '''
     def __init__(self, args):
         '''
-        Init MapleStoryBot
+        Init MapleStoryAutoBot
         '''
         self.args = args # User args
+        self.cfg = None # Configuration
         self.status = "hunting" # 'finding_rune', 'near_rune'
         self.idx_routes = 0 # Index of route map
         self.monster_info = [] # monster information
         self.fps = 0 # Frame per second
         self.red_dot_center_prev = None # previous other player location in minimap
+        self.video_writer = None # For video recording feature
+        self.color_code = {} # For color code instruction
+        self.color_code_up_down = {} # Color code only contain 'up' and 'down'
+        self.monsters = {}
+        self.thread_auto_bot = None # thread for running autobot
+        # Signals (for UI)
+        self.image_debug_signal = None
+        self.route_map_viz_signal = None
         # Flags
         self.is_first_frame = True # first frame flag
         self.is_terminated = False # Close all object and thread if True
         self.is_on_ladder = False # Character is on ladder or not
+        self.is_show_debug_window = args.viz_window #
+        self.is_need_show_debug_window = args.viz_window #
+        self.is_disable_control = args.disable_control
+        self.is_ui = args.is_ui # Whether is using UI framework to invoke engine 
         # Coordinate (top-left coordinate)
         self.loc_nametag = (0, 0) # nametag location on game screen
         self.loc_party_red_bar = (0, 0) # party red bar location on game screen
@@ -82,74 +98,16 @@ class MapleStoryBot:
         # Patrol mode
         self.is_patrol_to_left = True # Patrol direction flag
         self.patrol_turn_point_cnt = 0 # Patrol tuning back counter
-
-        # Load defautl yaml config
-        cfg = load_yaml("config/config_default.yaml")
-        # Override with platform config
-        if is_mac():
-            cfg = override_cfg(cfg, load_yaml("config/config_macOS.yaml"))
-        # Override with user customized config
-        self.cfg = override_cfg(cfg, load_yaml(f"config/config_{args.cfg}.yaml"))
-        # Dump config to log for debugging
-        logger.debug(yaml.dump(self.cfg, sort_keys=False,
-                     indent=2, default_flow_style=False))
-
-        # Parse color code
-        self.color_code = {
-            tuple(map(int, k.split(','))): v
-            for k, v in cfg["route"]["color_code"].items()
-        }
-        self.color_code_up_down = {
-            tuple(map(int, k.split(','))): v
-            for k, v in cfg["route"]["color_code_up_down"].items()
-        }
-
-        self.is_show_debug_window = self.cfg["system"]["show_debug_window"]
-
-        # Set status to hunting for startup
-        if args.aux:
-            self.switch_status("aux")
-        else:
-            self.switch_status("hunting")
-
-        if args.patrol or args.aux:
-            # Patrol and aux mode doesn't need map or route
-            self.img_map = None
-            self.img_routes = []
-        else:
-            # Load map.png from minimaps/
-            self.img_map = load_image(f"minimaps/{args.map}/map.png",
-                                      cv2.IMREAD_COLOR)
-            # Load route*.png from minimaps/
-            route_files = sorted(glob.glob(f"minimaps/{args.map}/route*.png"))
-            route_files = [p for p in route_files if not p.endswith("route_rest.png")]
-            self.img_routes = []
-            for route_file in route_files:
-                img = cv2.cvtColor(load_image(route_file), cv2.COLOR_BGR2RGB)
-                # Remove pixel in map that is color code
-                img = mask_route_colors(self.img_map, img, self.cfg["route"]["color_code"])
-                img = mask_route_colors(self.img_map, img, self.cfg["route"]["color_code_up_down"])
-                self.img_routes.append(img)
-
-        # Load player's name tag
-        self.img_nametag = load_image(f"nametag/{args.nametag}.png")
-        self.img_nametag_gray = load_image(f"nametag/{args.nametag}.png", cv2.IMREAD_GRAYSCALE)
-
-        # Load rune images from rune/
-        rune_ver = self.cfg["system"]["language"]
-        if rune_ver == "chinese":
-            self.img_rune_warning = load_image("rune/rune_warning.png", cv2.IMREAD_GRAYSCALE)
-        elif rune_ver == "english":
-            self.img_rune_warning = load_image("rune/rune_warning_eng.png", cv2.IMREAD_GRAYSCALE)
-        else:
-            logger.error(f"Unsupported rune warning version: {rune_ver}")
-
-        self.img_runes = [load_image("rune/rune_1.png"),
-                          load_image("rune/rune_2.png"),
-                          load_image("rune/rune_3.png"),]
-        if rune_ver == "english":
-            self.img_runes[1] = load_image("rune/rune_2_eng.png")
-
+        # Images
+        self.img_map = None
+        self.img_routes = []
+        self.img_rune_warning = None
+        self.img_runes = []
+        self.img_nametag = None
+        self.img_nametag_gray = None
+        self.img_create_party_enable = None
+        self.img_create_party_disable = None
+        self.img_login_button = None
         self.img_arrows = {
             "left":
                 [load_image("rune/arrow_left_1.png"),
@@ -168,72 +126,189 @@ class MapleStoryBot:
                 load_image("rune/arrow_down_2.png"),
                 load_image("rune/arrow_down_3.png"),],
         }
+        # Database
+        self.data = load_yaml("config/config_data.yaml")
+        # Threads & Objects
+        self.kb = None # Keyboard controller
+        self.capture = None # Game window capturor
+        self.health_monitor = None # Health monitor
+        self.profiler = None # Profiler, for performance issue debugging
 
-        # Load monsters images from monster/{monster_name}
-        self.monsters = {}
-        for monster_name in args.monsters.split(","):
-            imgs = []
-            for file in glob.glob(f"monster/{monster_name}/{monster_name}*.png"):
-                # Add original image
-                img = load_image(file)
-                imgs.append((img, get_mask(img, (0, 255, 0))))
-                # Add flipped image
-                img_flip = cv2.flip(img, 1)
-                imgs.append((img_flip, get_mask(img_flip, (0, 255, 0))))
-            if imgs:
-                self.monsters[monster_name] = imgs
-            else:
-                logger.error(f"No images found in monster/{monster_name}/{monster_name}*")
-                raise RuntimeError(f"No images found in monster/{monster_name}/{monster_name}*")
-        logger.info(f"Loaded monsters: {list(self.monsters.keys())}")
+    def update_signals(self, image_debug_signal, route_map_viz_signal):
+        '''
+        Update signal from UI framework.
+        For debug window viz
+        '''
+        self.image_debug_signal = image_debug_signal
+        self.route_map_viz_signal = route_map_viz_signal
+
+    def load_config(self, cfg):
+        '''
+        load_config
+        '''
+        # Parse color code in config
+        self.color_code = {
+            tuple(map(int, k.split(','))): v
+            for k, v in cfg["route"]["color_code"].items()
+        }
+        self.color_code_up_down = {
+            tuple(map(int, k.split(','))): v
+            for k, v in cfg["route"]["color_code_up_down"].items()
+        }
+
+        # Set status to hunting for startup
+        if cfg["bot"]["mode"] == "aux":
+            self.switch_status("aux")
+        else:
+            self.switch_status("hunting")
+
+        if cfg["bot"]["mode"] == "normal":
+            map_name = cfg['bot']['map']
+            # Check if the map is supported in config_data.yaml
+            if map_name not in self.data["map_mobs_mapping"]:
+                text = f"Invalid map name: {map_name}. "\
+                        "Not supported in config/config_data.yaml."
+                logger.error(text)
+                return -1
+                # raise RuntimeError(text)
+
+            # Load map.png from minimaps/
+            self.img_map = load_image(f"minimaps/{map_name}/map.png",
+                                      cv2.IMREAD_COLOR)
+            # Load route*.png from minimaps/
+            route_files = sorted(glob.glob(f"minimaps/{map_name}/route*.png"))
+            route_files = [p for p in route_files if not p.endswith("route_rest.png")]
+            self.img_routes = []
+            for route_file in route_files:
+                img = cv2.cvtColor(load_image(route_file), cv2.COLOR_BGR2RGB)
+                # Remove pixel in map that is color code
+                img = mask_route_colors(self.img_map, img, cfg["route"]["color_code"])
+                img = mask_route_colors(self.img_map, img, cfg["route"]["color_code_up_down"])
+                self.img_routes.append(img)
+
+            # Load monsters images from monster/<monster_name>
+            for monster_name in self.data["map_mobs_mapping"][map_name]:
+                imgs = []
+                for file in glob.glob(f"monster/{monster_name}/{monster_name}*.png"):
+                    # Add original image
+                    img = load_image(file)
+                    imgs.append((img, get_mask(img, (0, 255, 0))))
+                    # Add flipped image
+                    img_flip = cv2.flip(img, 1)
+                    imgs.append((img_flip, get_mask(img_flip, (0, 255, 0))))
+                if imgs:
+                    self.monsters[monster_name] = imgs
+                else:
+                    logger.error(f"No images found in monster/{monster_name}/{monster_name}*")
+                    return -1
+                    # raise RuntimeError(f"No images found in monster/{monster_name}/{monster_name}*")
+            logger.info(f"Loaded monsters: {list(self.monsters.keys())}")
+
+        # Load player's name tag
+        if cfg["nametag"]["enable"]:
+            self.img_nametag = load_image(f"nametag/{cfg["nametag"]["name"]}.png")
+            self.img_nametag_gray = load_image(f"nametag/{cfg["nametag"]["name"]}.png",
+                                               cv2.IMREAD_GRAYSCALE)
+
+        # Load rune images from rune/
+        rune_ver = cfg["system"]["language"]
+        if rune_ver == "chinese":
+            self.img_rune_warning = load_image("rune/rune_warning.png",
+                                               cv2.IMREAD_GRAYSCALE)
+        elif rune_ver == "english":
+            self.img_rune_warning = load_image("rune/rune_warning_eng.png",
+                                               cv2.IMREAD_GRAYSCALE)
+        else:
+            logger.error(f"Unsupported rune warning version: {rune_ver}")
+
+        self.img_runes = [load_image("rune/rune_1.png"),
+                          load_image("rune/rune_2.png"),
+                          load_image("rune/rune_3.png"),]
+        if rune_ver == "english":
+            self.img_runes[1] = load_image("rune/rune_2_eng.png")
 
         # Load misc image
+        # TODO: english version
         self.img_create_party_enable  = load_image("misc/party_button_create_enable.png")
         self.img_create_party_disable = load_image("misc/party_button_create_disable.png")
-        self.img_login_button = load_image("misc/login_button_cn.png")
+        self.img_login_button = load_image("misc/login_button_cn.png") # TODO eng version
 
+        # Print mode on log
+        logger.info(f"[load_config] Config AutoBot as {cfg['bot']['mode']} mode")
+
+        # Update cfg
+        self.cfg = cfg
+
+        return 0 # load successfully
+
+    def start(self):
+        '''
+        Start all threads
+        '''
         # Start keyboard controller thread
-        self.kb = KeyBoardController(self.cfg, args)
-        if args.disable_control:
-            self.kb.disable()
+        self.kb = KeyBoardController(self.cfg)
+        if self.is_disable_control:
+            self.kb.disable() # Disable keyboard controller for debugging
 
         # Start game window capturing thread
-        logger.info("Waiting for game window to activate, please click on game window")
-        self.capture = GameWindowCapturor(self.cfg, args)
+        logger.info("Waiting for game window to activate,"
+                    "please click on game window")
+        self.capture = GameWindowCapturor(self.cfg)
 
         # Start health monitoring thread
-        self.health_monitor = HealthMonitor(self.cfg, args, self.kb)
-        if self.cfg["health_monitor"]["enable"]:
+        self.health_monitor = HealthMonitor(self.cfg, self.kb)
+        if self.cfg["health_monitor"]["enable"] and \
+            not self.is_disable_control:
             self.health_monitor.start()
 
         # Start profiler
         self.profiler = Profiler(self.cfg)
 
+        # Start Auto Bot main thread
+        self.thread_auto_bot = threading.Thread(target=self.loop)
+        self.thread_auto_bot.start()
+
+        logger.info("[MapleStoryAutoBot] Started")
+
+    def pause(self):
+        '''
+        Terminate thread except main thread
+        '''
+        self.terminate_threads()
+
+    def enable_viz(self):
+        self.is_need_show_debug_window = True
+        logger.debug("[enable_viz] is_show_debug_window = True")
+
+    def disable_viz(self):
+        self.is_need_show_debug_window = False
+        logger.debug("[disable_viz] is_show_debug_window = False")
+
+    def start_record(self):
+        '''
+        Start record
+        '''
         # Prepare video writer if need to record
-        if args.record:
-            if not self.is_show_debug_window:
-                text = "Please enable 'show_debug_window' in config.yaml to enable recording"
-                logger.error(text)
-                raise RuntimeError(text)
+        if not self.is_show_debug_window:
+            self.enable_viz()
 
-            # Make sure video/ exist
-            os.makedirs("video", exist_ok=True)
-            timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-            path = os.path.join("video", f"{timestamp}.mp4")
-            # Get video writer
-            fourcc = cv2.VideoWriter_fourcc(*'mp4v')  # mp4 codec
-            self.video_writer = cv2.VideoWriter(path, fourcc, 10, (1296, 759))
-            logger.info(f"Recording debug window to {path}")
+        # Make sure video/ exist
+        os.makedirs("video", exist_ok=True)
+        timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        path = os.path.join("video", f"{timestamp}.mp4")
 
-        # Print mode on log
-        if args.patrol:
-            logger.info("Init AutoBot with patrol mode")
-        elif args.aux:
-            logger.info("Init AutoBot with aux mode")
-        else:
-            logger.info("Init AutoBot with auto mode")
+        # Get video writer
+        fourcc = cv2.VideoWriter_fourcc(*'mp4v')  # mp4 codec
+        self.video_writer = cv2.VideoWriter(path, fourcc, 10, (1296, 759))
 
-        logger.info("MapleStory Bot Init Done")
+        logger.info(f"[start_record] Record video to {path}")
+
+    def stop_record(self):
+        '''
+        Stop Record
+        '''
+        self.video_writer = None
+        logger.info("[stop_record] Stop recording")
 
     def get_player_location_by_nametag(self):
         '''
@@ -579,14 +654,14 @@ class MapleStoryBot:
             dict or None: The nearest monster's info dict, or None if no valid match.
         '''
         # Get attack box
-        if self.args.attack == "aoe_skill":
+        if self.cfg["bot"]["attack"] == "aoe_skill":
             dx = self.cfg["aoe_skill"]["range_x"] // 2
             dy = self.cfg["aoe_skill"]["range_y"] // 2
             x0 = max(0, self.loc_player[0] - dx)
             x1 = min(self.img_frame.shape[1], self.loc_player[0] + dx)
             y0 = max(0, self.loc_player[1] - dy)
             y1 = min(self.img_frame.shape[0], self.loc_player[1] + dy)
-        elif self.args.attack == "directional":
+        elif self.cfg["bot"]["attack"] == "directional":
             if is_left:
                 x0 = self.loc_player[0] - self.cfg["directional_attack"]["range_x"]
                 x1 = self.loc_player[0]
@@ -596,7 +671,7 @@ class MapleStoryBot:
             y0 = self.loc_player[1] - self.cfg["directional_attack"]["range_y"] // 2
             y1 = y0 + self.cfg["directional_attack"]["range_y"]
         else:
-            logger.error(f"Unsupported attack mode: {self.args.attack}")
+            logger.error(f"Unsupported attack mode: {self.cfg["bot"]["attack"]}")
             return None
 
         # Draw attack box on debug window
@@ -664,7 +739,7 @@ class MapleStoryBot:
         monster_info = []
         for monster_name, monster_imgs in self.monsters.items():
             for img_monster, mask_monster in monster_imgs:
-                if self.args.patrol:
+                if self.cfg["bot"]["mode"] == "patrol":
                     pass # Don't detect monster using template in patrol mode
                 elif self.cfg["monster_detect"]["mode"] == "template_free":
                     # Generate mask where pixel is exactly (0,0,0)
@@ -850,16 +925,18 @@ class MapleStoryBot:
             return
 
         # Make sure the window ratio is as expected
-        if self.args.aux:
+        if self.cfg["bot"]["mode"] == "aux":
             if not is_img_16_to_9(self.frame, self.cfg): # Aux mode allow 16:9 resolution
-                text = f"Unexpeted window size: {self.frame.shape[:2]} (expect window ratio 16:9)"
+                text = f"Unexpeted window size: {self.frame.shape[:2]} (expect window ratio 16:9)\n"
+                text += "Please use windowed mode & smallest resolution."
                 logger.error(text)
                 return
         else:
             # Other mode only allow specific resolution
             if self.cfg["game_window"]["size"] != self.frame.shape[:2]:
                 text = f"Unexpeted window size: {self.frame.shape[:2]} "\
-                       f"(expect {self.cfg['game_window']['size']})"
+                       f"(expect {self.cfg['game_window']['size']})\n"
+                text += "Please use windowed mode & smallest resolution."
                 logger.error(text)
                 return
 
@@ -925,7 +1002,7 @@ class MapleStoryBot:
                 screenshot(self.img_frame_debug, "solve_rune")
 
                 # Press the key for 0.5 second
-                if not self.args.disable_control:
+                if not self.is_disable_control:
                     self.kb.press_key(best_direction, 0.5)
                 time.sleep(1)
 
@@ -981,7 +1058,7 @@ class MapleStoryBot:
         x0, y0 = self.cfg["rune_warning"]["top_left"]
         x1, y1 = self.cfg["rune_warning"]["bottom_right"]
 
-        # Debug
+        # Debugre
         # draw_rectangle(
         #     self.img_frame_debug, (x0, y0), (y1-y0, x1-x0),
         #     (0, 0, 255), "")
@@ -993,6 +1070,15 @@ class MapleStoryBot:
             return True
         else:
             return False
+
+    def screenshot_img_frame(self):
+        '''
+        Save self.img_frame
+        '''
+        if self.img_frame is None:
+            logger.error("[screenshot_img_frame] Failed, game window is not available")
+        else:
+            screenshot(self.img_frame)
 
     def update_rune_location(self):
         '''
@@ -1233,7 +1319,7 @@ class MapleStoryBot:
         )
 
         # Don't draw minimap in patrol mode
-        if self.args.patrol or self.args.aux:
+        if self.cfg["bot"]["mode"] in ["patrol", "aux"]:
             return
 
         # Compute crop region with boundary check
@@ -1270,14 +1356,14 @@ class MapleStoryBot:
         )
 
         # Draw HP/MP/EXP bar on debug window
-        ratio_bars = [self.health_monitor.hp_ratio,
-                      self.health_monitor.mp_ratio,
-                      self.health_monitor.exp_ratio]
+        percent_bars = [self.health_monitor.hp_percent,
+                      self.health_monitor.mp_percent,
+                      self.health_monitor.exp_percent]
         for i, bar_name in enumerate(["HP", "MP", "EXP"]):
             x_s, y_s = (250, 90)
             # Print bar ratio on debug window
             cv2.putText(self.img_frame_debug,
-                        f"{bar_name}: {ratio_bars[i]*100:.1f}%",
+                        f"{bar_name}: {percent_bars[i]:.1f}%",
                         (x_s, y_s + 30*i),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0,0,255), 2)
             # Draw bar on debug window
@@ -1368,10 +1454,18 @@ class MapleStoryBot:
 
     def terminate_threads(self):
         '''
-        terminate_and_wait_threads
+        terminate all threads
         '''
-        self.capture.is_terminated = True
-        self.health_monitor.is_terminated = True
+        # Terminate keyboard controller
+        if self.kb is not None:
+            self.kb.is_terminated = True
+        # Terminate game window capturor
+        if self.capture is not None:
+            self.capture.stop()
+        # Terminate health monitor
+        if self.health_monitor is not None:
+            self.health_monitor.stop()
+        self.is_terminated = True
         logger.info(f"[terminate_threads] Terminated all threads")
 
     def get_attack_direction(self, monster_left, monster_right):
@@ -1495,7 +1589,6 @@ class MapleStoryBot:
         # Find the 'login' button
         loc, score, _ = find_pattern_sqdiff(
                         img_roi, self.img_login_button)
-        print(score)
         if score < self.cfg["ui_coords"]["login_button_thres"]:
             h, w = self.img_create_party_enable.shape[:2]
             logger.info(f"[get_login_button_location] Found login button with score({score})")
@@ -1510,9 +1603,19 @@ class MapleStoryBot:
         # Start prfiler for performance debugging
         self.profiler.start()
 
+        # Check if need viz window
+        self.is_show_debug_window = self.is_need_show_debug_window
+        if not self.is_show_debug_window:
+            self.img_frame_debug = None
+            self.img_route_debug = None
+
         # Get game window frame
         img_frame = self.get_img_frame()
-        if img_frame is not None:
+        if img_frame is None:
+            if not is_mac():
+                activate_game_window(self.cfg["game_window"]["title"])
+            return -1 # Wait for game window to be ready
+        else:
             self.img_frame = img_frame
 
         # Grayscale game window
@@ -1539,22 +1642,23 @@ class MapleStoryBot:
                     time.sleep(2)
         else:
             x, y, w, h = minimap_result
-            
+
             # Apply minimap position offset (adjust these values as needed)
             # Positive values move right and down, negative values move left and up
+            # TODO: change h,w as well
             x_offset = 1  # Move 2 pixels to the right
             y_offset = 1  # Move 2 pixels down
-            
+
             x += x_offset
             y += y_offset
-            
+
             self.loc_minimap = (x, y)
             self.img_minimap = self.img_frame[y:y+h, x:x+w]
             t_last_minimap_update = time.time() # update timer
         self.profiler.mark("get_minimap_loc_size")
 
         # Get current route image
-        if not self.args.patrol and not self.args.aux:
+        if self.cfg["bot"]["mode"] == "normal":
             self.img_route = self.img_routes[self.idx_routes]
             if self.is_show_debug_window:
                 self.img_route_debug = cv2.cvtColor(self.img_route, cv2.COLOR_RGB2BGR)
@@ -1638,7 +1742,7 @@ class MapleStoryBot:
         self.profiler.mark("Other Player Location Detection")
 
         # Get player location on global map
-        if self.args.patrol or self.args.aux:
+        if self.cfg["bot"]["mode"] in ["patrol", "aux"]:
             self.loc_player_global = self.loc_player_minimap
         else:
             self.loc_player_global = self.get_player_location_on_global_map()
@@ -1658,7 +1762,7 @@ class MapleStoryBot:
                 logger.info(abs(self.loc_player[0] - self.loc_rune[0]))
 
         # Check whether we entered the rune mini-game
-        if self.status == "near_rune" and (not self.args.disable_control):
+        if self.status == "near_rune" and (not self.is_disable_control):
             # Update rune location
             self.update_rune_location()
 
@@ -1703,15 +1807,15 @@ class MapleStoryBot:
 
         # Get monster search box
         margin = self.cfg["monster_detect"]["search_box_margin"]
-        if self.args.attack == "aoe_skill":
+        if self.cfg["bot"]["attack"] == "aoe_skill":
             dx = self.cfg["aoe_skill"]["range_x"] // 2 + margin
             dy = self.cfg["aoe_skill"]["range_y"] // 2 + margin
-        elif self.args.attack == "directional":
+        elif self.cfg["bot"]["attack"] == "directional":
             dx = self.cfg["directional_attack"]["range_x"] + margin
             dy = self.cfg["directional_attack"]["range_y"] + margin
         else:
-            logger.error(f"Unsupported attack mode: {self.args.attack}")
-            return
+            logger.error(f"Unsupported attack mode: {self.cfg["bot"]["attack"]}")
+            return -1
         x0 = max(0, self.loc_player[0] - dx)
         x1 = min(self.img_frame.shape[1], self.loc_player[0] + dx)
         y0 = max(0, self.loc_player[1] - dy)
@@ -1726,14 +1830,14 @@ class MapleStoryBot:
         self.profiler.mark("Monster Detection")
 
         # Get attack direction
-        if self.args.attack == "aoe_skill":
+        if self.cfg["bot"]["attack"] == "aoe_skill":
             if len(self.monster_info) == 0:
                 attack_direction = None
             else:
                 attack_direction = "I don't care"
             nearest_monster = self.get_nearest_monster()
 
-        elif self.args.attack == "directional":
+        elif self.cfg["bot"]["attack"] == "directional":
             # Get nearest monster to player
             monster_left  = self.get_nearest_monster(is_left = True)
             monster_right = self.get_nearest_monster(is_left = False)
@@ -1741,13 +1845,13 @@ class MapleStoryBot:
             attack_direction = self.get_attack_direction(monster_left, monster_right)
 
         else:
-            logger.error(f"Unexpected attack mode: {self.args.attack}")
-            return
+            logger.error(f"Unexpected attack mode: {self.cfg["bot"]["attack"]}")
+            return -1
 
         cmd_left_right = "none"
         cmd_up_down = "none"
         cmd_action = "none"
-        if self.args.patrol:
+        if self.cfg["bot"]["mode"] == "patrol":
             x, y = self.loc_player
             h, w = self.img_frame.shape[:2]
             loc_player_ratio = float(x)/float(w)
@@ -1775,7 +1879,7 @@ class MapleStoryBot:
                 cmd_action = "attack"
                 self.t_patrol_last_attack = time.time()
 
-        elif self.args.aux:
+        elif self.cfg["bot"]["mode"] == "aux":
             pass
 
         else:
@@ -1820,7 +1924,7 @@ class MapleStoryBot:
         # Special logic for each status, overwrite color code action
         if self.status == "hunting":
             # Perform a random action when player stuck
-            if not self.args.patrol and self.is_player_stuck():
+            if not self.cfg["bot"]["mode"] == "patrol" and self.is_player_stuck():
                 cmd_left_right, cmd_up_down, cmd_action = self.get_random_action()
             elif attack_direction is not None and \
                 time.time() - self.t_last_attack > self.cfg["directional_attack"]["cooldown"]:
@@ -1841,7 +1945,7 @@ class MapleStoryBot:
 
             # Check if finding rune timeout
             diff_timeout = time.time() - self.t_rune_finding_start
-            logger.info(f"diff_timeout: {diff_timeout}")
+            logger.debug(f"diff_timeout: {round(diff_timeout, 2)}")
             if diff_timeout > self.cfg["rune_find"]["timeout"]:
                 if self.cfg["rune_find"]["timeout_action"] == "change_channel":
                     # Change channel to avoid rune
@@ -1874,11 +1978,6 @@ class MapleStoryBot:
             cv2.putText(self.img_frame_debug, f"CMD: {command}",
                        (10, 480), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
 
-        # Check if need to save screenshot
-        if self.kb.is_need_screen_shot:
-            screenshot(self.img_frame)
-            self.kb.is_need_screen_shot = False
-
         # Make sure player is in party
         if self.is_first_frame and not is_mac():
             activate_game_window(self.cfg["game_window"]["title"])
@@ -1893,28 +1992,35 @@ class MapleStoryBot:
         #####################
         # Don't show debug window to save system resource
         if not self.is_show_debug_window:
-            return
+            return 0 # frame done
 
         # Print text on debug image
         self.update_info_on_img_frame_debug()
 
         # Show debug image on window
-        self.update_img_frame_debug()
+        if not self.is_ui:
+            cv2.imshow("Game Window Debug",
+                self.img_frame_debug[self.cfg["camera"]["y_start"]:
+                                     self.cfg["camera"]["y_end"], :])
 
         # Save debug window to video
-        if self.args.record:
+        if self.video_writer:
             self.video_writer.write(self.img_frame_debug)
 
         # Resize img_route_debug for better visualization
-        if not self.args.patrol and not self.args.aux:
+        if self.cfg["bot"]["mode"] == "normal":
             self.img_route_debug = cv2.resize(
                         self.img_route_debug, (0, 0),
                         fx=self.cfg["minimap"]["debug_window_upscale"],
                         fy=self.cfg["minimap"]["debug_window_upscale"],
                         interpolation=cv2.INTER_NEAREST)
-            cv2.imshow("Route Map Debug", self.img_route_debug)
+            if not self.is_ui:
+                cv2.imshow("Route Map Debug", self.img_route_debug)
 
         self.profiler.mark("Debug Window Show")
+
+        # Update FPS timer
+        self.t_last_frame = time.time()
 
         # Check FPS, TODO: too verbose, only print if many frames has high latency
         # if self.fps < 5:
@@ -1925,37 +2031,99 @@ class MapleStoryBot:
             self.profiler.total_frames % self.cfg["profiler"]["print_frequency"] == 0:
             logger.info('\n' + self.profiler.report())
 
-def main(args):
-    '''
-    Main Function
-    '''
-    try:
-        mapleStoryBot = MapleStoryBot(args)
-    except Exception as e:
-        logger.error(f"MapleStoryBot Init failed: {e}")
-        sys.exit(1)
-    else:
-        while not mapleStoryBot.kb.is_terminated:
+        return 0 # frame done
+
+    def loop(self):
+        '''
+        Auto Bot main loop
+        '''
+        while not self.kb.is_terminated:
 
             t_start = time.time()
 
             # Process one game window frame
-            mapleStoryBot.run_once()
+            ret = self.run_once()
 
-            # Draw image on debug window
-            if mapleStoryBot.is_show_debug_window:
-                cv2.waitKey(1)
+            # Only proceed if the frame is valid
+            if ret == 0:
+                # Draw image on debug window
+                if self.is_show_debug_window:
+                    if self.is_ui:
+                        self.image_debug_signal.emit(
+                            self.img_frame_debug[
+                                self.cfg["camera"]["y_start"]:
+                                self.cfg["camera"]["y_end"], :].copy())
+                        self.route_map_viz_signal.emit(
+                            self.img_route_debug.copy())
+                    else:
+                        cv2.waitKey(1)
+            else:
+                pass
+                # logger.warning("Skipped debug window update due to invalid frame.")
 
             # Cap FPS to save system resource
             frame_duration = time.time() - t_start
-            target_duration = 1.0 / mapleStoryBot.cfg["system"]["fps_limit_main"]
+            target_duration = 1.0 / self.cfg["system"]["fps_limit_main"]
             if frame_duration < target_duration:
                 time.sleep(target_duration - frame_duration)
 
-        # Terminate all other threads
-        mapleStoryBot.terminate_threads()
+def main(args):
+    '''
+    This main function works as a fake autoBotController
+    This function will only be called when the using terminal to
+    run this script
+    '''
+    #####################
+    ### Init Auto Bot ###
+    #####################
+    try:
+        mapleStoryAutoBot = MapleStoryAutoBot(args)
+    except Exception as e:
+        logger.error(f"MapleStoryAutoBot Init failed: {e}")
+        sys.exit(1)
+    else:
+        logger.info("MapleStoryAutoBot Init Successfully")
 
-        cv2.destroyAllWindows()
+    ####################
+    ### Apply Config ###
+    ####################
+    # Load defautl yaml config
+    cfg = load_yaml("config/config_default.yaml")
+    # Override with platform config
+    if is_mac():
+        cfg = override_cfg(cfg, load_yaml("config/config_macOS.yaml"))
+    # Override with user customized config
+    cfg = override_cfg(cfg, load_yaml(f"config/config_{args.cfg}.yaml"))
+    # Dump config to log for debugging
+    logger.debug(yaml.dump(cfg, sort_keys=False,
+                 indent=2, default_flow_style=False))
+    # autoBot load config
+    mapleStoryAutoBot.load_config(cfg)
+
+    #####################
+    ### Start AutoBot ###
+    #####################
+    mapleStoryAutoBot.start() # Start all threads in autoBot
+
+    # Start record game window for debugging
+    if args.record:
+        mapleStoryAutoBot.start_record()
+
+    kb_listener = KeyBoardListener(is_autobot=True)
+    kb_listener.register_func_key_handler('f1', mapleStoryAutoBot.kb.toggle_enable)
+    kb_listener.register_func_key_handler('f2', mapleStoryAutoBot.screenshot_img_frame)
+    kb_listener.register_func_key_handler('f12', mapleStoryAutoBot.terminate_threads)
+
+    # While loop
+    while not mapleStoryAutoBot.is_terminated:
+        time.sleep(0.1)
+
+    #########################
+    ### Terminate AutoBot ###
+    #########################
+    mapleStoryAutoBot.terminate_threads() # Terminate all threads
+
+    cv2.destroyAllWindows()
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
@@ -1966,45 +2134,9 @@ if __name__ == '__main__':
     )
 
     parser.add_argument(
-        '--patrol',
-        action='store_true',
-        help='Enable patrol mode'
-    )
-
-    # Argument to specify map name
-    parser.add_argument(
-        '--map',
-        type=str,
-        default='lost_time_1',
-        help='Specify the map name'
-    )
-
-    parser.add_argument(
-        "--monsters",
-        type=str,
-        default="evolved_ghost",
-        help="Specify which monsters to load, comma-separated"
-             "(e.g., --monsters green_mushroom,zombie_mushroom)"
-    )
-
-    parser.add_argument(
-        '--attack',
-        type=str,
-        default='directional',
-        help='Choose attack method, "directional", "aoe_skill"'
-    )
-
-    parser.add_argument(
-        '--nametag',
-        type=str,
-        default='example',
-        help='Choose nametag png file in nametag/'
-    )
-
-    parser.add_argument(
         '--cfg',
         type=str,
-        default='edit_me',
+        default='custom',
         help='Choose customized config yaml file in config/'
     )
 
@@ -2021,15 +2153,16 @@ if __name__ == '__main__':
     )
 
     parser.add_argument(
-        '--aux',
+        '--viz_window',
         action="store_true",
-        help="Enable auxiliary mode, where bot only help with buff skill and potion drinking"
+        help="Record debug window"
     )
 
     args = parser.parse_args()
+    args.is_ui = False # Always set False for command line
 
     # Set logger level
     if args.debug:
-        logger.setLevel(logging.DEBUG)
+        logger.set_level(logging.DEBUG)
 
     main(args)

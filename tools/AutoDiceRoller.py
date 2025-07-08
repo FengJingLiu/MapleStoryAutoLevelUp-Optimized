@@ -12,14 +12,16 @@ import numpy as np
 import cv2
 
 # Local import
-from logger import logger
-from util import find_pattern_sqdiff, screenshot, load_image, \
-                is_mac, override_cfg, load_yaml, click_in_game_window
+from src.utils.logger import logger
+from src.utils.common import (
+    find_pattern_sqdiff, screenshot, load_image,
+    is_mac, override_cfg, load_yaml, click_in_game_window,
+)
 if is_mac():
-    from GameWindowCapturorForMac import GameWindowCapturor
+    from src.input.GameWindowCapturorForMac import GameWindowCapturor
 else:
-    from GameWindowCapturor import GameWindowCapturor
-from KeyBoardListener import KeyBoardListener
+    from src.input.GameWindowCapturor import GameWindowCapturor
+from src.input.KeyBoardListener import KeyBoardListener
 
 class AutoDiceRoller:
     '''
@@ -63,7 +65,7 @@ class AutoDiceRoller:
         ]
 
         # Start keyboard listener thread
-        self.kb = KeyBoardListener(self.cfg)
+        self.kb = KeyBoardListener(self.cfg, is_autobot=False)
 
         # Start game window capturing thread
         logger.info("Waiting for game window to activate, please click on game window")
@@ -181,13 +183,6 @@ class AutoDiceRoller:
                 click_in_game_window(window_title, loc_dice)
                 logger.info("Roll the dice")
 
-        #####################
-        ### Debug Windows ###
-        #####################
-        # Don't show debug window to save system resource
-        if not self.cfg["system"]["show_debug_window"]:
-            return
-
         # Show debug image on window
         self.update_img_frame_debug()
 
@@ -225,7 +220,7 @@ if __name__ == '__main__':
     parser.add_argument(
         '--cfg',
         type=str,
-        default='edit_me',
+        default='custom',
         help='Choose customized config yaml file in config/'
     )
 

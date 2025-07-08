@@ -1,27 +1,32 @@
+'''
+Health Monitor take game windows as input to calculate player's HP/MP/EXP Bar percentage.
+When player's HP/MP drop to specific threshold, it'd press key to drink potion 
+'''
+
+# Standard Import
 import threading
 import time
 import cv2
 
-# Local import
-from logger import logger
-from util import get_bar_ratio
+# Local Import
+from src.utils.logger import logger
+from src.utils.common import get_bar_percent
 
 class HealthMonitor:
     '''
     Independent health monitoring thread that can heal while other actions are running
     '''
-    def __init__(self, cfg, args, kb_controller):
+    def __init__(self, cfg, kb_controller):
         self.cfg = cfg
-        self.args = args
         self.kb = kb_controller
         self.is_terminated = False
         self.enabled = True
-        self.thread = None
+        self.thread = None # health monitor thread
 
         # Health monitoring state
-        self.hp_ratio = 1.0
-        self.mp_ratio = 1.0
-        self.exp_ratio = 1.0
+        self.hp_percent = 100
+        self.mp_percent = 100
+        self.exp_percent = 100
 
         # Timers
         self.t_last_heal = 0
@@ -34,6 +39,7 @@ class HealthMonitor:
         self.img_frame = None
         self.frame_lock = threading.Lock()
 
+        # FPS settings
         self.fps_limit = self.cfg["health_monitor"]["fps_limit"]
         self.fps = 0
 
@@ -43,6 +49,8 @@ class HealthMonitor:
                               (0, 0, 0, 0),
                               (0, 0, 0, 0)]
 
+        logger.info("[Health Monitor] Init done")
+
     def start(self):
         '''
         Start health monitoring thread
@@ -50,7 +58,7 @@ class HealthMonitor:
         if not self.is_terminated:
             self.thread = threading.Thread(target=self._monitor_loop, daemon=True)
             self.thread.start()
-            logger.info("[Health Monitor]: Started")
+            logger.info("[Health Monitor] Started")
 
     def stop(self):
         '''
@@ -59,7 +67,7 @@ class HealthMonitor:
         self.is_terminated = True
         if self.thread:
             self.thread.join()
-            logger.info("[Health Monitor]: Stopped")
+            logger.info("[Health Monitor] Terminated")
 
     def enable(self):
         '''
@@ -80,7 +88,7 @@ class HealthMonitor:
         with self.frame_lock:
             self.img_frame = img_frame
 
-    def get_hp_mp_exp_ratio(self):
+    def get_hp_mp_exp_percent(self):
         '''
         Extracts the player's HP, MP, and EXP ratios from game frame.
 
@@ -90,7 +98,7 @@ class HealthMonitor:
         - Computes the fill ratio for each bar as: 1 - (empty_pixels / total_pixels).
 
         Returns:
-            tuple: (hp_ratio, mp_ratio, exp_ratio), each a float between 0 and 1.
+            tuple: (hp_percent, mp_percent, exp_percent), each a float between 0 and 1.
         '''
         if self.img_frame is None:
             return None, None, None
@@ -120,45 +128,10 @@ class HealthMonitor:
         self.loc_size_bars = loc_size_bars
 
         # Get bar filled ratio
-        ratio_bars = []
+        percent_bars = []
         for x, y, w, h in loc_size_bars:
-            ratio_bars.append(get_bar_ratio(img_frame[y:y+h, x:x+w]))
-        return ratio_bars
-
-    def get_hp_mp_ratio_legacy(self):
-        '''
-        Deprecated: This hp/mp bar detection method require specific window resolution as input
-                    and use hard-coded pixel coordinate to capture hp/mp bar
-                    This function is replaced by get_hp_mp_exp_ratio() which is more flexiable and
-                    can work on different window resolution
-        Extract HP and MP ratios from current frame
-        '''
-        if self.img_frame is None:
-            return 1.0, 1.0
-
-        with self.frame_lock:
-            img_frame = self.img_frame.copy()
-
-        # HP crop
-        hp_bar = img_frame[self.cfg.hp_bar_top_left[1]:self.cfg.hp_bar_bottom_right[1]+1,
-                          self.cfg.hp_bar_top_left[0]:self.cfg.hp_bar_bottom_right[0]+1]
-        # MP crop
-        mp_bar = img_frame[self.cfg.mp_bar_top_left[1]:self.cfg.mp_bar_bottom_right[1]+1,
-                          self.cfg.mp_bar_top_left[0]:self.cfg.mp_bar_bottom_right[0]+1]
-
-        # HP Detection (detect empty part)
-        empty_mask_hp = (hp_bar[:,:,0] == hp_bar[:,:,1]) & (hp_bar[:,:,0] == hp_bar[:,:,2])
-        empty_pixels_hp = max(0, len(empty_mask_hp[empty_mask_hp]) - 6)  # 6 pixel always be white
-        total_pixels_hp = hp_bar.shape[0] * hp_bar.shape[1] - 6
-        hp_ratio = 1 - (empty_pixels_hp / max(1, total_pixels_hp))
-
-        # MP Detection (detect empty part)
-        empty_mask_mp = (mp_bar[:,:,0] == mp_bar[:,:,1]) & (mp_bar[:,:,0] == mp_bar[:,:,2])
-        empty_pixels_mp = max(0, len(empty_mask_mp[empty_mask_mp]) - 6)  # 6 pixel always be white
-        total_pixels_mp = mp_bar.shape[0] * mp_bar.shape[1] - 6
-        mp_ratio = 1 - (empty_pixels_mp / max(1, total_pixels_mp))
-
-        return max(0, min(1, hp_ratio)), max(0, min(1, mp_ratio))
+            percent_bars.append(get_bar_percent(img_frame[y:y+h, x:x+w]))
+        return percent_bars
 
     def _monitor_loop(self):
         '''
@@ -166,7 +139,7 @@ class HealthMonitor:
         '''
         while not self.is_terminated:
             try:
-                if not self.enabled or self.args.disable_control:
+                if not self.enabled:
                     self.limit_fps()
                     continue
 
@@ -174,19 +147,19 @@ class HealthMonitor:
                 t_cur = time.time()
 
                 # Get current HP/MP ratios
-                hp_ratio, mp_ratio, exp_ratio = self.get_hp_mp_exp_ratio()
-                if hp_ratio is not None:
+                hp_percent, mp_percent, exp_percent = self.get_hp_mp_exp_percent()
+                if hp_percent is not None:
                     # Check if HP bar has reduced
-                    if self.hp_ratio > hp_ratio:
+                    if self.hp_percent > hp_percent:
                         self.t_last_hp_reduce = t_cur
-                    self.hp_ratio = hp_ratio
-                if mp_ratio is not None:
-                    self.mp_ratio = mp_ratio
-                if exp_ratio is not None:
-                    self.exp_ratio = exp_ratio
+                    self.hp_percent = hp_percent
+                if mp_percent is not None:
+                    self.mp_percent = mp_percent
+                if exp_percent is not None:
+                    self.exp_percent = exp_percent
 
-                hp_thres = self.cfg["health_monitor"]["add_hp_ratio"]
-                mp_thres = self.cfg["health_monitor"]["add_mp_ratio"]
+                hp_thres = self.cfg["health_monitor"]["add_hp_percent"]
+                mp_thres = self.cfg["health_monitor"]["add_mp_percent"]
                 hp_cd    = self.cfg["health_monitor"]["add_hp_cooldown"]
                 mp_cd    = self.cfg["health_monitor"]["add_mp_cooldown"]
                 watchdog_timeout = self.cfg["health_monitor"]["return_home_watch_dog_timeout"]
@@ -194,45 +167,45 @@ class HealthMonitor:
                 # Check if need to heal (with cooldown)
                 if self.cfg["health_monitor"]["force_heal"]:
                     # Ignore cooldown and force keycontroller to heal first
-                    if self.hp_ratio < hp_thres:
+                    if self.hp_percent < hp_thres:
                         if not self.kb.is_need_force_heal:
-                            logger.info(f"[Health Monitor]: Force heal triggered, "
-                                        f"HP: {self.hp_ratio*100:.1f}%")
+                            logger.info(f"[Health Monitor] Force heal triggered, "
+                                        f"HP: {self.hp_percent:.1f}%")
                         self.kb.is_need_force_heal = True
                     else:
                         self.kb.is_need_force_heal = False
                 else:
-                    if (self.hp_ratio <= hp_thres and
+                    if (self.hp_percent <= hp_thres and
                         t_cur - self.t_last_heal > hp_cd):
                         self._heal()
-                        logger.info(f"[Health Monitor]: Auto heal triggered, HP: {self.hp_ratio*100:.1f}%")
+                        logger.info(f"[Health Monitor] Auto heal triggered, HP: {self.hp_percent:.1f}%")
                         self.t_last_heal = t_cur
 
                 # Check if no HP potion and need to return home
                 if self.cfg["health_monitor"]["return_home_if_no_potion"]:
-                    if self.hp_ratio >= hp_thres:
+                    if self.hp_percent >= hp_thres:
                         self.t_hp_watch_dog = t_cur # reset watchdog
                     else:
                         # If watchdog timeout, use homing scroll to return home
                         if t_cur - self.t_hp_watch_dog > watchdog_timeout:
-                            logger.warning(f"[Health Monitor]: HP({self.hp_ratio*100:.1f}%) < {hp_thres*100:.1f}% "
+                            logger.warning(f"[Health Monitor] HP({self.hp_percent:.1f}%) < {hp_thres:.1f}% "
                                            f"for {round(t_cur - self.t_hp_watch_dog, 2)} seconds.")
-                            logger.warning(f"[Health Monitor]: Return home because potion is used up.")
+                            logger.warning(f"[Health Monitor] Return home because potion is used up.")
                             self.kb.press_key(self.cfg["key"]["return_home"]) # Return home
                             self.is_terminated = True # Terminate Health monitor
                             self.kb.is_terminated = True # Terminate AutoBot
 
                 # Check if need MP (with cooldown)
-                if (self.mp_ratio <= mp_thres and t_cur - self.t_last_mp > mp_cd):
+                if (self.mp_percent <= mp_thres and t_cur - self.t_last_mp > mp_cd):
                     self._add_mp()
                     self.t_last_mp = t_cur
-                    logger.info(f"[Health Monitor]: Auto MP triggered, MP: {self.mp_ratio*100:.1f}%")
+                    logger.info(f"[Health Monitor] Auto MP triggered, MP: {self.mp_percent:.1f}%")
 
                 # Sleep to avoid excessive CPU usage
                 self.limit_fps()
 
             except Exception as e:
-                logger.error(f"[Health Monitor]: {e}")
+                logger.error(f"[Health Monitor] {e}")
                 self.limit_fps()
 
     def _heal(self):
@@ -242,7 +215,7 @@ class HealthMonitor:
         try:
             self.kb.press_key(self.cfg["key"]["add_hp"], 0.05)
         except Exception as e:
-            logger.error(f"[Health Monitor]: Heal action failed: {e}")
+            logger.error(f"[Health Monitor] Heal action failed: {e}")
 
     def _add_mp(self):
         '''
@@ -251,7 +224,7 @@ class HealthMonitor:
         try:
             self.kb.press_key(self.cfg["key"]["add_mp"], 0.05)
         except Exception as e:
-            logger.error(f"[Health Monitor]: MP action failed: {e}")
+            logger.error(f"[Health Monitor] MP action failed: {e}")
 
     def limit_fps(self):
         '''

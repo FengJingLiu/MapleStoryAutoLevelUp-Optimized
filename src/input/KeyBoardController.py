@@ -1,5 +1,6 @@
 '''
 KeyBoardController
+Simulate user keyboard input to control character in the game 
 '''
 # Standard Import
 import threading
@@ -10,8 +11,8 @@ import pyautogui
 from pynput import keyboard
 
 # Local import
-from logger import logger
-from util import is_mac
+from src.utils.logger import logger
+from src.utils.common import is_mac
 
 if is_mac():
     import Quartz
@@ -24,11 +25,11 @@ class KeyBoardController():
     '''
     KeyBoardController
     '''
-    def __init__(self, cfg, args):
+    def __init__(self, cfg):
         self.cfg = cfg
-        self.cmd_action = ""
-        self.cmd_up_down = ""
-        self.cmd_left_right = ""
+        self.cmd_action = "none"
+        self.cmd_up_down = "none"
+        self.cmd_left_right = "none"
         self.cmd_up_down_last = ""
         self.cmd_left_right_last = ""
         self.window_title = cfg["game_window"]["title"]
@@ -44,8 +45,6 @@ class KeyBoardController():
         self.t_last_buff_cast = [0] * len(self.cfg["buff_skill"]["keys"]) # Last time cast buff skill
         # Flags
         self.is_enable = True
-        self.is_need_screen_shot = False
-        self.is_need_toggle = False
         self.is_need_force_heal = False
         self.is_terminated = False
         # Parameters
@@ -65,39 +64,17 @@ class KeyBoardController():
 
         # set up attack key
         self.attack_key = ""
-        if args.attack == "aoe_skill":
+        if cfg["bot"]["attack"] == "aoe_skill":
             self.attack_key = cfg["key"]["aoe_skill"]
-        elif args.attack == "directional":
+        elif cfg["bot"]["attack"] == "directional":
             self.attack_key = cfg["key"]["directional_attack"]
         else:
-            logger.error(f"Unexpected attack argument: {args.attack}")
+            logger.error(f"Unexpected attack argument: {cfg["bot"]["attack"]}")
 
         # Start keyboard control thread
         threading.Thread(target=self.run, daemon=True).start()
 
-        listener = keyboard.Listener(on_press=self.on_press)
-        listener.start()
-
-    def on_press(self, key):
-        '''
-        Handle key press events.
-        '''
-        try:
-            # Handle regular character keys
-            key.char
-        except AttributeError:
-            # Handle special keys
-            if key == self.toggle_key:
-                if time.time() - self.t_last_toggle > self.debounce_interval:
-                    self.toggle_enable()
-                    self.t_last_toggle = time.time()
-            elif key == self.screenshot_key:
-                if time.time() - self.t_last_screenshot > self.debounce_interval:
-                    self.is_need_screen_shot = True
-                    self.t_last_screenshot = time.time()
-            elif key == self.terminate_key:
-                self.is_terminated = True
-                logger.info(f"[on_press] User press terminate key")
+        logger.info("[KeyBoardController] Init done")
 
     def toggle_enable(self):
         '''
@@ -284,3 +261,5 @@ class KeyBoardController():
             self.limit_fps()
 
         self.release_all_key() # Prevent key keep press down after termination
+
+        logger.info("[KeyBoardController] terminated")

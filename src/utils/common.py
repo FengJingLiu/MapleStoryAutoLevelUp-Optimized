@@ -1,8 +1,7 @@
 '''
 Utility functions
 '''
-
-# Standard import
+# Standard Import
 import cv2
 import datetime
 import os
@@ -13,13 +12,13 @@ import imaplib
 import mimetypes
 import email
 
-#
+# Libarary Import
 import numpy as np
 import yaml
 import pyautogui
 import pygetwindow as gw
 
-# macOS specific import
+# macOS Import
 if platform.system() == 'Darwin':
     import Quartz
 else:
@@ -27,7 +26,7 @@ else:
     import win32con
 
 # Local import
-from logger import logger
+from src.utils.logger import logger
 
 OS_NAME = platform.system()
 
@@ -44,8 +43,55 @@ def load_yaml(path):
         return convert_lists_to_tuples(data)
 
 def save_yaml(data, path):
+    data = convert_tuples_to_lists(data)
     with open(path, 'w', encoding='utf-8') as f:
         yaml.dump(data, f, default_flow_style=False)
+    logger.info(f"Save yaml: {path}")
+
+def get_cfg_diff(base, current):
+    """
+    Recursively compute the diff between base and current configs.
+    Return only the values from current that are different.
+    """
+    diff = {}
+    for key in current:
+        if key not in base:
+            diff[key] = current[key]
+        elif isinstance(current[key], dict) and isinstance(base.get(key), dict):
+            sub_diff = get_cfg_diff(base[key], current[key])  # recursive call
+            if sub_diff:
+                diff[key] = sub_diff
+        else:
+            norm_current = normalize(current[key])
+            norm_base = normalize(base.get(key))
+            if norm_current != norm_base:
+                diff[key] = current[key]
+    return diff
+
+def normalize(value):
+    """
+    Normalize value for comparison:
+    - Convert tuples to lists
+    - Recursively normalize lists and dicts
+    """
+    if isinstance(value, tuple):
+        return [normalize(v) for v in value]
+    elif isinstance(value, list):
+        return [normalize(v) for v in value]
+    elif isinstance(value, dict):
+        return {k: normalize(v) for k, v in value.items()}
+    else:
+        return value
+
+def convert_tuples_to_lists(obj):
+    if isinstance(obj, dict):
+        return {k: convert_tuples_to_lists(v) for k, v in obj.items()}
+    elif isinstance(obj, tuple):
+        return list(obj)
+    elif isinstance(obj, list):
+        return [convert_tuples_to_lists(i) for i in obj]
+    else:
+        return obj
 
 def override_cfg(base, override):
     '''
@@ -471,7 +517,7 @@ def debug_minimap_colors(img_minimap, target_color=(0, 0, 255)):
     
     return sorted_colors
 
-def get_bar_ratio(img):
+def get_bar_percent(img):
     '''
     Get HP/MP/EXP bar ratio with given bar image
 
@@ -509,7 +555,7 @@ def get_bar_ratio(img):
     total_width = rb - lb + 1
     fill_width = total_width - unfill_pixel_cnt
     fill_ratio = fill_width / total_width if total_width > 0 else 0.0
-    return fill_ratio
+    return fill_ratio*100
 
 def nms_matches(matches, iou_thresh=0.0):
     '''
