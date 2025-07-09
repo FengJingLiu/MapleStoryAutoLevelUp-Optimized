@@ -6,10 +6,11 @@ import logging
 
 # PySide 6
 from PySide6.QtWidgets import (
-    QLabel, QWidget, QHBoxLayout, QSizePolicy, QKeySequenceEdit
+    QLabel, QWidget, QHBoxLayout, QSizePolicy, QKeySequenceEdit,
+    QGroupBox, QCheckBox, QFormLayout, QLineEdit, QLabel, QWidget, QHBoxLayout
 )
 from PySide6.QtCore import Qt, QObject, Signal
-from PySide6.QtGui import QKeySequence, QKeyEvent
+from PySide6.QtGui import QKeySequence, QKeyEvent, QDoubleValidator, QIntValidator
 
 # Local import
 from src.utils.logger import logger
@@ -105,3 +106,65 @@ class QtLogHandler(logging.Handler, QObject):
     def emit(self, record):
         msg = self.format(record)
         self.log_signal.emit(msg, record.levelno)
+
+def create_advance_setting_gbox(title, cfg):
+    gbox = QGroupBox(title)
+    form_layout = QFormLayout()
+    gbox._field_refs = {}  # 👈 Store all widget references for later update
+
+    def add_field(key, value):
+        # ... existing code ...
+
+        if isinstance(value, bool):
+            checkbox = QCheckBox()
+            checkbox.setChecked(value)
+            def update_checkbox(state):
+                cfg[title][key] = Qt.CheckState(state) == Qt.Checked
+            checkbox.stateChanged.connect(update_checkbox)
+            form_layout.addRow(QLabel(key), checkbox)
+            gbox._field_refs[key] = checkbox  # 👈 track checkbox
+
+        elif isinstance(value, list) or isinstance(value, tuple):
+            hbox = QHBoxLayout()
+            edits = []
+            for v in value:
+                line = QLineEdit(str(v))
+                validator = QDoubleValidator() if isinstance(v, float) else QIntValidator()
+                line.setValidator(validator)
+                edits.append(line)
+                hbox.addWidget(line)
+
+            def update_list():
+                cfg[title][key] = [
+                    float(e.text()) if isinstance(v, float) else int(e.text())
+                    for e, v in zip(edits, value) if e.text() != ''
+                ]
+
+            for edit in edits:
+                edit.textChanged.connect(update_list)
+
+            form_layout.addRow(QLabel(key), hbox)
+            gbox._field_refs[key] = edits  # 👈 track list of QLineEdits
+
+        elif isinstance(value, (int, float)):
+            line = QLineEdit(str(value))
+            validator = QDoubleValidator() if isinstance(value, float) else QIntValidator()
+            line.setValidator(validator)
+            def update_value(val):
+                if val != '':
+                    cfg[title][key] = float(val) if isinstance(value, float) else int(val)
+            line.textChanged.connect(update_value)
+            form_layout.addRow(QLabel(key), line)
+            gbox._field_refs[key] = line  # 👈 track QLineEdit
+
+        elif isinstance(value, str):
+            line = QLineEdit(value)
+            line.textChanged.connect(lambda val: cfg[title].__setitem__(key, val))
+            form_layout.addRow(QLabel(key), line)
+            gbox._field_refs[key] = line  # 👈 track QLineEdit
+
+    for key, value in cfg[title].items():
+        add_field(key, value)
+
+    gbox.setLayout(form_layout)
+    return gbox

@@ -95,18 +95,18 @@ def convert_tuples_to_lists(obj):
 
 def override_cfg(base, override):
     '''
-    override_cfg
-    Return a new dictionary
+    override_cfg (in-place)
+    Modifies `base` directly by overriding keys from `override`.
     '''
-    result = {}
-    for k in set(base) | set(override):
-        if k in base and k in override and isinstance(base[k], dict) and isinstance(override[k], dict):
-            result[k] = override_cfg(base[k], override[k])
-        elif k in override:
-            result[k] = override[k]
+    for k, v in override.items():
+        if (
+            k in base and isinstance(base[k], dict)
+            and isinstance(v, dict)
+        ):
+            override_cfg(base[k], v)  # recursive override
         else:
-            result[k] = base[k]
-    return result
+            base[k] = v  # direct override or new key
+    return base
 
 def convert_lists_to_tuples(obj):
     if isinstance(obj, list):

@@ -6,3 +6,4 @@ nametag/
 *.prof
 video/
 *.config_tmp.yaml
+*config_custom.yaml
