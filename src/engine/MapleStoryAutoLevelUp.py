@@ -206,8 +206,8 @@ class MapleStoryAutoBot:
 
         # Load player's name tag
         if cfg["nametag"]["enable"]:
-            self.img_nametag = load_image(f"nametag/{cfg["nametag"]["name"]}.png")
-            self.img_nametag_gray = load_image(f"nametag/{cfg["nametag"]["name"]}.png",
+            self.img_nametag = load_image(f"nametag/{cfg['nametag']['name']}.png")
+            self.img_nametag_gray = load_image(f"nametag/{cfg['nametag']['name']}.png",
                                                cv2.IMREAD_GRAYSCALE)
 
         # Load rune images from rune/
@@ -671,7 +671,7 @@ class MapleStoryAutoBot:
             y0 = self.loc_player[1] - self.cfg["directional_attack"]["range_y"] // 2
             y1 = y0 + self.cfg["directional_attack"]["range_y"]
         else:
-            logger.error(f"Unsupported attack mode: {self.cfg["bot"]["attack"]}")
+            logger.error(f"Unsupported attack mode: {self.cfg['bot']['attack']}")
             return None
 
         # Draw attack box on debug window
