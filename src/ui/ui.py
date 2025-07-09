@@ -64,7 +64,7 @@ class MainWindow(QMainWindow):
 
         # Window Settings
         self.setWindowTitle("MapleStory AutoLevelUp")
-        self.setMinimumSize(500, 800)
+        self.setMinimumSize(1, 1)
         self.resize(TAB_WINDOW_SIZE['Main'][0],
                     TAB_WINDOW_SIZE['Main'][1])
 
@@ -194,7 +194,6 @@ class MainWindow(QMainWindow):
 
         # Create a large QLabel as a canvas
         self.debug_canvas = QLabel()
-        self.debug_canvas.setMinimumSize(800, 600)
         clear_debug_canvas(self.debug_canvas)
         self.debug_canvas.setStyleSheet("background-color: black; color: white;")
         layout.addWidget(self.debug_canvas)
@@ -208,7 +207,6 @@ class MainWindow(QMainWindow):
 
         # Create a large QLabel as a canvas
         self.route_map_canvas = QLabel()
-        self.route_map_canvas.setMinimumSize(800, 600)
         clear_debug_canvas(self.route_map_canvas)
         self.route_map_canvas.setStyleSheet("background-color: black; color: white;")
         layout.addWidget(self.route_map_canvas)
@@ -721,6 +719,7 @@ class MainWindow(QMainWindow):
             self.pet_skill_gbox,
             self.map_selection_gbox,
         ]
+        gboxs += list(self.advance_settings_gboxes.values())
         # Apply disable + style
         for gbox in gboxs:
             gbox.setEnabled(enabled)
