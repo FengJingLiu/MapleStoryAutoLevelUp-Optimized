@@ -358,7 +358,7 @@ route_recoder:
 # ─────────────────────────────
 # Basic information about the game window setup
 game_window:
-  title: "MapleStory Worlds-Artale (繁體中文版)"  # 🎮 Game window title (used to detect the correct window)
+  title: "MapleStory Worlds"  # 🎮 Game window title (used to detect the correct window)
   size: [752, 1282]           # 📐 Game window size [height, width] in pixels
   ratio_tolerance: 0.08        # 📐 Game window 16:9 tolerance
 

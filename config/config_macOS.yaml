@@ -2,7 +2,6 @@
 # The following configuration is only for macOS
 
 game_window:
-  title: "MapleStory Worlds"
   size: [776, 1280]
 
 monster_detect:

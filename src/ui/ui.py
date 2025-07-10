@@ -29,12 +29,20 @@ from src.utils.common import (
 )
 
 # window size for each tab
-TAB_WINDOW_SIZE = {
-    'Main': (600, 800),
-    'Advanced Settings': (750, 800),
-    'Game Window Viz': (1280, 650),
-    'Route Map Viz': (800, 800),
-}
+if is_mac():
+    TAB_WINDOW_SIZE = {
+        'Main': (700, 800),
+        'Advanced Settings': (750, 800),
+        'Game Window Viz': (850, 430), # smaller for macbook screen
+        'Route Map Viz': (400, 400),
+    }
+else:
+    TAB_WINDOW_SIZE = {
+        'Main': (700, 800),
+        'Advanced Settings': (750, 800),
+        'Game Window Viz': (1280, 650),
+        'Route Map Viz': (800, 800),
+    }
 
 ADV_SETTINGS_HIDE = ['key', 'bot'] # cfg tile here will not shown in advanced settings tabs
 
@@ -91,22 +99,6 @@ class MainWindow(QMainWindow):
         container.setLayout(layout)
         self.setCentralWidget(container)
 
-        # # Original layout with tabs
-        # layout = QVBoxLayout()
-        # layout.addWidget(self.tabs)
-
-        # # Content container that holds the layout
-        # content = QWidget()
-        # content.setLayout(layout)
-
-        # # Wrap in a scroll area
-        # scroll = QScrollArea()
-        # scroll.setWidgetResizable(True)
-        # scroll.setWidget(content)
-
-        # # Set scroll area as central widget
-        # self.setCentralWidget(scroll)
-
         # Load previous stored UI state
         self.load_ui_state()
 
@@ -115,37 +107,46 @@ class MainWindow(QMainWindow):
 
     def setup_main_tab(self):
         '''
-        Init Main Tab
+        Init Main Tab with scrollable area
         '''
-        tab_main = QWidget()
-        layout = QVBoxLayout()
-        tab_main.setLayout(layout)
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+
+        scroll_widget = QWidget()
+        scroll_layout = QVBoxLayout(scroll_widget)
 
         # Control group box
         self.control_gbox = self.create_control_gbox()
-        layout.addWidget(self.control_gbox)
+        scroll_layout.addWidget(self.control_gbox)
 
         # Attack setting group box
         self.attack_gbox = self.create_attack_gbox()
-        layout.addWidget(self.attack_gbox)
+        scroll_layout.addWidget(self.attack_gbox)
 
         # Key bindings group box
         self.key_binding_gbox = self.create_key_binding_gbox()
-        layout.addWidget(self.key_binding_gbox)
+        scroll_layout.addWidget(self.key_binding_gbox)
 
         # Pet function group box
         self.pet_skill_gbox = self.create_pet_skill_gbox()
-        layout.addWidget(self.pet_skill_gbox)
+        scroll_layout.addWidget(self.pet_skill_gbox)
 
         # Map selection group box
         self.map_selection_gbox = self.create_map_selection_gbox()
-        layout.addWidget(self.map_selection_gbox)
+        scroll_layout.addWidget(self.map_selection_gbox)
 
         # Logger output window
         self.log_gbox = self.create_log_gbox()
-        layout.addWidget(self.log_gbox)
+        scroll_layout.addWidget(self.log_gbox)
+
+        scroll_area.setWidget(scroll_widget)
+
+        tab_main = QWidget()
+        layout = QVBoxLayout(tab_main)
+        layout.addWidget(scroll_area)
 
         return tab_main
+
 
 
     def setup_advance_setting_tab(self):
@@ -915,10 +916,14 @@ class MainWindow(QMainWindow):
         qimg = QImage(img.data, width, height, QImage.Format_BGR888)
         pixmap = QPixmap.fromImage(qimg)
 
-        self.debug_canvas.setPixmap(pixmap)
-        self.debug_canvas.setScaledContents(True)  # Scale image to fit label
-        self.debug_canvas.setMinimumSize(1, 1)     # Allow shrinking if needed
-        self.debug_canvas.adjustSize()             # Resize to current layout hints
+        # Scale the image to fit label size but maintain aspect ratio
+        scaled_pixmap = pixmap.scaled(
+                            self.debug_canvas.width(),
+                            self.debug_canvas.height(),
+                            Qt.KeepAspectRatio,
+                            Qt.SmoothTransformation)
+
+        self.debug_canvas.setPixmap(scaled_pixmap)
 
     def update_route_map_canvas(self, img):
         if img is None:
@@ -928,10 +933,13 @@ class MainWindow(QMainWindow):
         qimg = QImage(img.data, width, height, QImage.Format_BGR888)
         pixmap = QPixmap.fromImage(qimg)
 
-        self.route_map_canvas.setPixmap(pixmap)
-        self.route_map_canvas.setScaledContents(True)  # Scale image to fit label
-        self.route_map_canvas.setMinimumSize(1, 1)     # Allow shrinking if needed
-        self.route_map_canvas.adjustSize()             # Resize to current layout hints
+        scaled_pixmap = pixmap.scaled(
+                            self.route_map_canvas.width(),
+                            self.route_map_canvas.height(),
+                            Qt.KeepAspectRatio,
+                            Qt.SmoothTransformation)
+
+        self.route_map_canvas.setPixmap(scaled_pixmap)
 
     def update_advance_setting_ui_from_cfg(self):
         '''
