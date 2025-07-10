@@ -107,22 +107,31 @@ class QtLogHandler(logging.Handler, QObject):
         msg = self.format(record)
         self.log_signal.emit(msg, record.levelno)
 
-def create_advance_setting_gbox(title, cfg):
+def create_advance_setting_gbox(title, cfg, comments=None, comments_section=None):
     gbox = QGroupBox(title)
     form_layout = QFormLayout()
-    gbox._field_refs = {}  # 👈 Store all widget references for later update
+    gbox._field_refs = {}
+
+    if comments_section and title in comments_section:
+        gbox.setToolTip(comments_section[title])
+
+    def get_comment(key):
+        if comments and title in comments and key in comments[title]:
+            return comments[title][key]
+        return ""
 
     def add_field(key, value):
-        # ... existing code ...
+        tooltip = get_comment(key)
 
         if isinstance(value, bool):
             checkbox = QCheckBox()
             checkbox.setChecked(value)
+            checkbox.setToolTip(tooltip)
             def update_checkbox(state):
                 cfg[title][key] = Qt.CheckState(state) == Qt.Checked
             checkbox.stateChanged.connect(update_checkbox)
             form_layout.addRow(QLabel(key), checkbox)
-            gbox._field_refs[key] = checkbox  # 👈 track checkbox
+            gbox._field_refs[key] = checkbox
 
         elif isinstance(value, list) or isinstance(value, tuple):
             hbox = QHBoxLayout()
@@ -131,6 +140,7 @@ def create_advance_setting_gbox(title, cfg):
                 line = QLineEdit(str(v))
                 validator = QDoubleValidator() if isinstance(v, float) else QIntValidator()
                 line.setValidator(validator)
+                line.setToolTip(tooltip)
                 edits.append(line)
                 hbox.addWidget(line)
 
@@ -144,24 +154,26 @@ def create_advance_setting_gbox(title, cfg):
                 edit.textChanged.connect(update_list)
 
             form_layout.addRow(QLabel(key), hbox)
-            gbox._field_refs[key] = edits  # 👈 track list of QLineEdits
+            gbox._field_refs[key] = edits
 
         elif isinstance(value, (int, float)):
             line = QLineEdit(str(value))
             validator = QDoubleValidator() if isinstance(value, float) else QIntValidator()
             line.setValidator(validator)
+            line.setToolTip(tooltip)
             def update_value(val):
                 if val != '':
                     cfg[title][key] = float(val) if isinstance(value, float) else int(val)
             line.textChanged.connect(update_value)
             form_layout.addRow(QLabel(key), line)
-            gbox._field_refs[key] = line  # 👈 track QLineEdit
+            gbox._field_refs[key] = line
 
         elif isinstance(value, str):
             line = QLineEdit(value)
+            line.setToolTip(tooltip)
             line.textChanged.connect(lambda val: cfg[title].__setitem__(key, val))
             form_layout.addRow(QLabel(key), line)
-            gbox._field_refs[key] = line  # 👈 track QLineEdit
+            gbox._field_refs[key] = line
 
     for key, value in cfg[title].items():
         add_field(key, value)

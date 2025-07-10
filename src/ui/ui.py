@@ -15,7 +15,7 @@ from PySide6.QtWidgets import (
     QPlainTextEdit, QTabWidget, QGroupBox, QFormLayout,
     QSizePolicy, QComboBox, QListWidgetItem, QScrollArea
 )
-from PySide6.QtGui import QTextCharFormat, QColor, QTextCursor, QPixmap, QImage
+from PySide6.QtGui import QTextCharFormat, QColor, QTextCursor, QPixmap, QImage, QIcon
 from PySide6.QtCore import Qt, Signal
 
 # Local import
@@ -25,7 +25,7 @@ from src.utils.ui import (
     create_error_label, SingleKeyEdit, QtLogHandler, create_advance_setting_gbox,
 )
 from src.utils.common import (
-    load_yaml, override_cfg, is_mac, save_yaml, get_cfg_diff
+    load_yaml, override_cfg, is_mac, save_yaml, get_cfg_diff, load_yaml_with_comments
 )
 
 # window size for each tab
@@ -54,12 +54,17 @@ class MainWindow(QMainWindow):
 
     def __init__(self, controller=None):
         super().__init__()
+
+        # UI window Icon
+        self.setWindowIcon(QIcon("media/icon.png"))
+
         self.controller = controller # autoBotController
         self.prev_tab_window_size = None
         #
         self.selected_map = ""
 
         # Load default yaml and platform yaml as base config
+        _, self.comments, self.comments_section = load_yaml_with_comments("config/config_default.yaml")
         self.cfg_base = load_yaml("config/config_default.yaml")
         if is_mac():
             self.cfg_base = override_cfg(self.cfg_base,
@@ -147,8 +152,6 @@ class MainWindow(QMainWindow):
 
         return tab_main
 
-
-
     def setup_advance_setting_tab(self):
         tab_advance_setting = QWidget()
 
@@ -162,7 +165,9 @@ class MainWindow(QMainWindow):
             # Skip hide settings
             if title in ADV_SETTINGS_HIDE:
                 continue
-            gbox = create_advance_setting_gbox(title, self.cfg)
+            gbox = create_advance_setting_gbox(title, self.cfg,
+                                               self.comments,
+                                               self.comments_section)
             self.advance_settings_gboxes[title] = gbox
             if idx % 2 == 0:
                 left_col.addWidget(gbox)

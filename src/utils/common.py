@@ -11,12 +11,14 @@ from email.message import EmailMessage
 import imaplib
 import mimetypes
 import email
+from collections import defaultdict
 
 # Libarary Import
 import numpy as np
 import yaml
 import pyautogui
 import pygetwindow as gw
+from ruamel.yaml import YAML
 
 # macOS Import
 if platform.system() == 'Darwin':
@@ -41,6 +43,30 @@ def load_yaml(path):
         logger.info(f"Load yaml: {path}")
         data = yaml.safe_load(f) or {}
         return convert_lists_to_tuples(data)
+
+def load_yaml_with_comments(path):
+    yaml = YAML()
+    yaml.preserve_quotes = True
+    with open(path, 'r', encoding='utf-8') as f:
+        data = yaml.load(f)
+
+    field_comments = defaultdict(dict)
+    section_comments = {}
+
+    for title, sub in data.items():
+        # Extract section comment (before key)
+        if sub.ca.comment and sub.ca.comment[1]:
+            section_comment_lines = [line.value.strip('#').strip() for line in sub.ca.comment[1]]
+            section_comments[title] = "\n".join(section_comment_lines)
+
+        # Extract field-level comments
+        if hasattr(sub, 'ca'):
+            for key in sub:
+                comment = sub.ca.items.get(key)
+                if comment and comment[2]:
+                    field_comments[title][key] = comment[2].value.strip('#').strip()
+
+    return data, dict(field_comments), section_comments
 
 def save_yaml(data, path):
     data = convert_tuples_to_lists(data)
