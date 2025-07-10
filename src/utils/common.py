@@ -747,6 +747,18 @@ def activate_game_window(window_title):
         win32gui.BringWindowToTop(hwnd)
         win32gui.SetActiveWindow(hwnd)
 
+def get_game_window_title_by_token(token):
+    '''
+    Only work in Windows OS
+    '''
+    def callback(hwnd, matches):
+        title = win32gui.GetWindowText(hwnd)
+        if token.lower() in title.lower():
+            matches.append(title)
+    matches = []
+    win32gui.EnumWindows(callback, matches)
+    return matches[0] if matches else None
+
 def is_img_16_to_9(img, cfg):
     """
     Check if image aspect ratio is approximately 16:9.

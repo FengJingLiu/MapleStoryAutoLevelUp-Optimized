@@ -1417,7 +1417,7 @@ class MapleStoryAutoBot:
         '''
         logger.info("[channel_change] Start")
 
-        window_title = self.cfg["game_window"]["title"]
+        window_title = self.capture.window_title
         ui_coords = self.cfg["ui_coords"]
         click_in_game_window(window_title, ui_coords["menu"])
         time.sleep(1)
@@ -1614,7 +1614,7 @@ class MapleStoryAutoBot:
         img_frame = self.get_img_frame()
         if img_frame is None:
             if not is_mac():
-                activate_game_window(self.cfg["game_window"]["title"])
+                activate_game_window(self.capture.window_title)
             return -1 # Wait for game window to be ready
         else:
             self.img_frame = img_frame
@@ -1980,7 +1980,7 @@ class MapleStoryAutoBot:
 
         # Make sure player is in party
         if self.is_first_frame and not is_mac():
-            activate_game_window(self.cfg["game_window"]["title"])
+            activate_game_window(self.capture.window_title)
             time.sleep(0.3)
             self.ensure_is_in_party()
 
