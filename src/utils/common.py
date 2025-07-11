@@ -11,12 +11,14 @@ from email.message import EmailMessage
 import imaplib
 import mimetypes
 import email
+from collections import defaultdict
 
 # Libarary Import
 import numpy as np
 import yaml
 import pyautogui
 import pygetwindow as gw
+from ruamel.yaml import YAML
 
 # macOS Import
 if platform.system() == 'Darwin':
@@ -41,6 +43,30 @@ def load_yaml(path):
         logger.info(f"Load yaml: {path}")
         data = yaml.safe_load(f) or {}
         return convert_lists_to_tuples(data)
+
+def load_yaml_with_comments(path):
+    yaml = YAML()
+    yaml.preserve_quotes = True
+    with open(path, 'r', encoding='utf-8') as f:
+        data = yaml.load(f)
+
+    field_comments = defaultdict(dict)
+    section_comments = {}
+
+    for title, sub in data.items():
+        # Extract section comment (before key)
+        if sub.ca.comment and sub.ca.comment[1]:
+            section_comment_lines = [line.value.strip('#').strip() for line in sub.ca.comment[1]]
+            section_comments[title] = "\n".join(section_comment_lines)
+
+        # Extract field-level comments
+        if hasattr(sub, 'ca'):
+            for key in sub:
+                comment = sub.ca.items.get(key)
+                if comment and comment[2]:
+                    field_comments[title][key] = comment[2].value.strip('#').strip()
+
+    return data, dict(field_comments), section_comments
 
 def save_yaml(data, path):
     data = convert_tuples_to_lists(data)
@@ -95,18 +121,18 @@ def convert_tuples_to_lists(obj):
 
 def override_cfg(base, override):
     '''
-    override_cfg
-    Return a new dictionary
+    override_cfg (in-place)
+    Modifies `base` directly by overriding keys from `override`.
     '''
-    result = {}
-    for k in set(base) | set(override):
-        if k in base and k in override and isinstance(base[k], dict) and isinstance(override[k], dict):
-            result[k] = override_cfg(base[k], override[k])
-        elif k in override:
-            result[k] = override[k]
+    for k, v in override.items():
+        if (
+            k in base and isinstance(base[k], dict)
+            and isinstance(v, dict)
+        ):
+            override_cfg(base[k], v)  # recursive override
         else:
-            result[k] = base[k]
-    return result
+            base[k] = v  # direct override or new key
+    return base
 
 def convert_lists_to_tuples(obj):
     if isinstance(obj, list):
@@ -746,6 +772,18 @@ def activate_game_window(window_title):
         win32gui.ShowWindow(hwnd, win32con.SW_SHOW)
         win32gui.BringWindowToTop(hwnd)
         win32gui.SetActiveWindow(hwnd)
+
+def get_game_window_title_by_token(token):
+    '''
+    Only work in Windows OS
+    '''
+    def callback(hwnd, matches):
+        title = win32gui.GetWindowText(hwnd)
+        if token.lower() in title.lower():
+            matches.append(title)
+    matches = []
+    win32gui.EnumWindows(callback, matches)
+    return matches[0] if matches else None
 
 def is_img_16_to_9(img, cfg):
     """

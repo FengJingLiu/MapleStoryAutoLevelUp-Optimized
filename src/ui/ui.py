@@ -15,18 +15,36 @@ from PySide6.QtWidgets import (
     QPlainTextEdit, QTabWidget, QGroupBox, QFormLayout,
     QSizePolicy, QComboBox, QListWidgetItem, QScrollArea
 )
-from PySide6.QtGui import QTextCharFormat, QColor, QTextCursor, QPixmap, QImage
+from PySide6.QtGui import QTextCharFormat, QColor, QTextCursor, QPixmap, QImage, QIcon
 from PySide6.QtCore import Qt, Signal
 
 # Local import
 from src.utils.logger import logger
 from src.utils.ui import (
     validate_numerical_input, clear_debug_canvas,
-    create_error_label, SingleKeyEdit, QtLogHandler,
+    create_error_label, SingleKeyEdit, QtLogHandler, create_advance_setting_gbox,
 )
 from src.utils.common import (
-    load_yaml, override_cfg, is_mac, save_yaml, get_cfg_diff
+    load_yaml, override_cfg, is_mac, save_yaml, get_cfg_diff, load_yaml_with_comments
 )
+
+# window size for each tab
+if is_mac():
+    TAB_WINDOW_SIZE = {
+        'Main': (700, 800),
+        'Advanced Settings': (750, 800),
+        'Game Window Viz': (850, 430), # smaller for macbook screen
+        'Route Map Viz': (400, 400),
+    }
+else:
+    TAB_WINDOW_SIZE = {
+        'Main': (700, 800),
+        'Advanced Settings': (750, 800),
+        'Game Window Viz': (1280, 650),
+        'Route Map Viz': (800, 800),
+    }
+
+ADV_SETTINGS_HIDE = ['key', 'bot'] # cfg tile here will not shown in advanced settings tabs
 
 class MainWindow(QMainWindow):
     '''
@@ -36,12 +54,17 @@ class MainWindow(QMainWindow):
 
     def __init__(self, controller=None):
         super().__init__()
+
+        # UI window Icon
+        self.setWindowIcon(QIcon("media/icon.png"))
+
         self.controller = controller # autoBotController
         self.prev_tab_window_size = None
         #
         self.selected_map = ""
 
         # Load default yaml and platform yaml as base config
+        _, self.comments, self.comments_section = load_yaml_with_comments("config/config_default.yaml")
         self.cfg_base = load_yaml("config/config_default.yaml")
         if is_mac():
             self.cfg_base = override_cfg(self.cfg_base,
@@ -54,8 +77,9 @@ class MainWindow(QMainWindow):
 
         # Window Settings
         self.setWindowTitle("MapleStory AutoLevelUp")
-        self.setMinimumSize(500, 800)
-        self.resize(500, 800) # Set a default starting size
+        self.setMinimumSize(1, 1)
+        self.resize(TAB_WINDOW_SIZE['Main'][0],
+                    TAB_WINDOW_SIZE['Main'][1])
 
         # Setup tabs
         self.tabs = QTabWidget()
@@ -80,22 +104,6 @@ class MainWindow(QMainWindow):
         container.setLayout(layout)
         self.setCentralWidget(container)
 
-        # # Original layout with tabs
-        # layout = QVBoxLayout()
-        # layout.addWidget(self.tabs)
-
-        # # Content container that holds the layout
-        # content = QWidget()
-        # content.setLayout(layout)
-
-        # # Wrap in a scroll area
-        # scroll = QScrollArea()
-        # scroll.setWidgetResizable(True)
-        # scroll.setWidget(content)
-
-        # # Set scroll area as central widget
-        # self.setCentralWidget(scroll)
-
         # Load previous stored UI state
         self.load_ui_state()
 
@@ -104,48 +112,85 @@ class MainWindow(QMainWindow):
 
     def setup_main_tab(self):
         '''
-        Init Main Tab
+        Init Main Tab with scrollable area
         '''
-        tab_main = QWidget()
-        layout = QVBoxLayout()
-        tab_main.setLayout(layout)
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+
+        scroll_widget = QWidget()
+        scroll_layout = QVBoxLayout(scroll_widget)
 
         # Control group box
         self.control_gbox = self.create_control_gbox()
-        layout.addWidget(self.control_gbox)
+        scroll_layout.addWidget(self.control_gbox)
 
         # Attack setting group box
         self.attack_gbox = self.create_attack_gbox()
-        layout.addWidget(self.attack_gbox)
+        scroll_layout.addWidget(self.attack_gbox)
 
         # Key bindings group box
         self.key_binding_gbox = self.create_key_binding_gbox()
-        layout.addWidget(self.key_binding_gbox)
+        scroll_layout.addWidget(self.key_binding_gbox)
 
         # Pet function group box
         self.pet_skill_gbox = self.create_pet_skill_gbox()
-        layout.addWidget(self.pet_skill_gbox)
+        scroll_layout.addWidget(self.pet_skill_gbox)
 
         # Map selection group box
         self.map_selection_gbox = self.create_map_selection_gbox()
-        layout.addWidget(self.map_selection_gbox)
+        scroll_layout.addWidget(self.map_selection_gbox)
 
         # Logger output window
         self.log_gbox = self.create_log_gbox()
-        layout.addWidget(self.log_gbox)
+        scroll_layout.addWidget(self.log_gbox)
+
+        scroll_area.setWidget(scroll_widget)
+
+        tab_main = QWidget()
+        layout = QVBoxLayout(tab_main)
+        layout.addWidget(scroll_area)
 
         return tab_main
 
     def setup_advance_setting_tab(self):
         tab_advance_setting = QWidget()
-        layout = QVBoxLayout()
 
-        label = QLabel("🚧 Work in Progress\n"
-                       "Edit config/config_default.yaml to modify advance settings")
-        label.setAlignment(Qt.AlignCenter)
-        layout.addWidget(label)
+        # Two vertical layouts side-by-side
+        left_col = QVBoxLayout()
+        right_col = QVBoxLayout()
 
-        tab_advance_setting.setLayout(layout)
+        # Distribute group boxes evenly between columns
+        self.advance_settings_gboxes = {}  # store title -> QGroupBox mapping
+        for idx, title in enumerate(self.cfg):
+            # Skip hide settings
+            if title in ADV_SETTINGS_HIDE:
+                continue
+            gbox = create_advance_setting_gbox(title, self.cfg,
+                                               self.comments,
+                                               self.comments_section)
+            self.advance_settings_gboxes[title] = gbox
+            if idx % 2 == 0:
+                left_col.addWidget(gbox)
+            else:
+                right_col.addWidget(gbox)
+
+        # Wrap columns in a horizontal layout
+        row_layout = QHBoxLayout()
+        row_layout.addLayout(left_col)
+        row_layout.addLayout(right_col)
+
+        # Make it scrollable (recommended for lots of settings)
+        scroll_area = QScrollArea()
+        container = QWidget()
+        container.setLayout(row_layout)
+        scroll_area.setWidget(container)
+        scroll_area.setWidgetResizable(True)
+
+        # Final layout for the tab
+        final_layout = QVBoxLayout()
+        final_layout.addWidget(scroll_area)
+        tab_advance_setting.setLayout(final_layout)
+
         return tab_advance_setting
 
     def setup_game_window_viz_tab(self):
@@ -155,7 +200,6 @@ class MainWindow(QMainWindow):
 
         # Create a large QLabel as a canvas
         self.debug_canvas = QLabel()
-        self.debug_canvas.setMinimumSize(800, 600)
         clear_debug_canvas(self.debug_canvas)
         self.debug_canvas.setStyleSheet("background-color: black; color: white;")
         layout.addWidget(self.debug_canvas)
@@ -169,7 +213,6 @@ class MainWindow(QMainWindow):
 
         # Create a large QLabel as a canvas
         self.route_map_canvas = QLabel()
-        self.route_map_canvas.setMinimumSize(800, 600)
         clear_debug_canvas(self.route_map_canvas)
         self.route_map_canvas.setStyleSheet("background-color: black; color: white;")
         layout.addWidget(self.route_map_canvas)
@@ -194,6 +237,7 @@ class MainWindow(QMainWindow):
                 self.load_config(create_error_label(),
                                  state.get("last_config_path"))
         logger.info(f"[UI] Load UI state from {path}")
+
 
     def create_attack_gbox(self):
         '''
@@ -670,6 +714,9 @@ class MainWindow(QMainWindow):
                 self.on_map_selected(item)  # Reuse existing logic
                 break
 
+        # Advance settings
+        self.update_advance_setting_ui_from_cfg()
+
     def set_gbox_enabled(self, enabled: bool):
         gray_style = "color: lightgray;" if not enabled else ""
         gboxs = [
@@ -678,6 +725,7 @@ class MainWindow(QMainWindow):
             self.pet_skill_gbox,
             self.map_selection_gbox,
         ]
+        gboxs += list(self.advance_settings_gboxes.values())
         # Apply disable + style
         for gbox in gboxs:
             gbox.setEnabled(enabled)
@@ -689,30 +737,24 @@ class MainWindow(QMainWindow):
         if tab_name == "Game Window Viz":
             self.controller.enable_bot_viz()
 
-            # Store original size if not already stored
-            if self.prev_tab_window_size is None:
-                self.prev_tab_window_size = self.size()
-
-            # Resize window
-            self.resize(1280, 650)
-
         elif tab_name == "Route Map Viz":
             self.controller.enable_bot_viz()
 
-            # Store original size if not already stored
-            if self.prev_tab_window_size is None:
-                self.prev_tab_window_size = self.size()
+        elif tab_name == "Main":
+            self.controller.disable_bot_viz()
+            self.apply_config_to_ui()
 
-            # Resize window
-            self.resize(800, 800)
+        elif tab_name == "Advanced Settings":
+            self.controller.disable_bot_viz()
+            self.update_cfg_from_main_ui()
+            self.apply_config_to_ui()
 
         else:
+            logger.error(f"[UI] Unexpected tab name: {tab_name}")
             self.controller.disable_bot_viz()
 
-            # Restore original size if we have it
-            if self.prev_tab_window_size is not None:
-                self.resize(self.prev_tab_window_size)
-                self.prev_tab_window_size = None
+        self.resize(TAB_WINDOW_SIZE[tab_name][0],
+                    TAB_WINDOW_SIZE[tab_name][1])
 
         logger.info(f"[UI] user change tab to {tab_name}")
 
@@ -772,7 +814,7 @@ class MainWindow(QMainWindow):
 
     def toggle_start_ui(self):
         if self.button_start_pause.isChecked(): # When start autobot
-            self.update_cfg_from_ui()
+            self.update_cfg_from_main_ui()
 
             # Save UI config to tmp file
             cfg_path = "config/.config_tmp.yaml"
@@ -810,7 +852,7 @@ class MainWindow(QMainWindow):
             self.button_record.setStyleSheet("")
             self.controller.stop_recording()
 
-    def update_cfg_from_ui(self):
+    def update_cfg_from_main_ui(self):
         '''
         Collect setting from UI framework
         '''
@@ -830,7 +872,7 @@ class MainWindow(QMainWindow):
             self.cfg["aoe_skill"]["range_y"] = int(self.attack_range_y.text())
             self.cfg["aoe_skill"]["cooldown"] = float(self.attack_cooldown.text())
         else:
-            logger.error(f"[update_cfg_from_ui] Unsupported attack mode: {self.cfg["bot"]["attack"]}")
+            logger.error(f"[update_cfg_from_main_ui] Unsupported attack mode: {self.cfg["bot"]["attack"]}")
         # Key binding gbox
         self.cfg["key"]["teleport"] = self.teleport_key.get_key()
         self.cfg["key"]["party"] = self.party_key.get_key()
@@ -879,10 +921,14 @@ class MainWindow(QMainWindow):
         qimg = QImage(img.data, width, height, QImage.Format_BGR888)
         pixmap = QPixmap.fromImage(qimg)
 
-        self.debug_canvas.setPixmap(pixmap)
-        self.debug_canvas.setScaledContents(True)  # Scale image to fit label
-        self.debug_canvas.setMinimumSize(1, 1)     # Allow shrinking if needed
-        self.debug_canvas.adjustSize()             # Resize to current layout hints
+        # Scale the image to fit label size but maintain aspect ratio
+        scaled_pixmap = pixmap.scaled(
+                            self.debug_canvas.width(),
+                            self.debug_canvas.height(),
+                            Qt.KeepAspectRatio,
+                            Qt.SmoothTransformation)
+
+        self.debug_canvas.setPixmap(scaled_pixmap)
 
     def update_route_map_canvas(self, img):
         if img is None:
@@ -892,10 +938,43 @@ class MainWindow(QMainWindow):
         qimg = QImage(img.data, width, height, QImage.Format_BGR888)
         pixmap = QPixmap.fromImage(qimg)
 
-        self.route_map_canvas.setPixmap(pixmap)
-        self.route_map_canvas.setScaledContents(True)  # Scale image to fit label
-        self.route_map_canvas.setMinimumSize(1, 1)     # Allow shrinking if needed
-        self.route_map_canvas.adjustSize()             # Resize to current layout hints
+        scaled_pixmap = pixmap.scaled(
+                            self.route_map_canvas.width(),
+                            self.route_map_canvas.height(),
+                            Qt.KeepAspectRatio,
+                            Qt.SmoothTransformation)
+
+        self.route_map_canvas.setPixmap(scaled_pixmap)
+
+    def update_advance_setting_ui_from_cfg(self):
+        '''
+        Updates UI fields in an existing gbox to reflect the latest cfg[title].
+        '''
+        for title in self.cfg:
+            if title in ADV_SETTINGS_HIDE: # skip hide settings
+                continue
+            refs = getattr(self.advance_settings_gboxes[title], "_field_refs", {})
+            for key, value in self.cfg[title].items():
+                widget = refs.get(key)
+                if widget is None:
+                    continue  # unknown field, skip
+
+                # Checkbox
+                if isinstance(value, bool) and isinstance(widget, QCheckBox):
+                    widget.setChecked(value)
+
+                # List of QLineEdits
+                elif isinstance(value, (list, tuple)) and isinstance(widget, list):
+                    for line, v in zip(widget, value):
+                        line.setText(str(v))
+
+                # Single numeric value
+                elif isinstance(value, (int, float)) and isinstance(widget, QLineEdit):
+                    widget.setText(str(value))
+
+                # String
+                elif isinstance(value, str) and isinstance(widget, QLineEdit):
+                    widget.setText(value)
 
     def add_buff_row(self, key="", cooldown=""):
         row_widget = QWidget()
@@ -991,7 +1070,7 @@ class MainWindow(QMainWindow):
         Call when user close the UI window
         '''
         # Collect current UI setting and update to self.cfg
-        self.update_cfg_from_ui()
+        self.update_cfg_from_main_ui()
         # Save current UI config to config_XXXX.yaml
         if "config_default.yaml" not in self.path_cfg_custom:
             cfg_diff = get_cfg_diff(self.cfg_base, self.cfg)

@@ -12,6 +12,7 @@ import cv2
 
 # local import
 from src.utils.logger import logger
+from src.utils.common import get_game_window_title_by_token
 
 class GameWindowCapturor:
     '''
@@ -19,10 +20,16 @@ class GameWindowCapturor:
     '''
     def __init__(self, cfg):
         self.cfg = cfg
-        self.window_title = cfg["game_window"]["title"]
         self.frame = None
         self.lock = threading.Lock()
         self.is_terminated = False
+
+        self.window_title = get_game_window_title_by_token(cfg["game_window"]["title"])
+        if self.window_title is None:
+            logger.error("[GameWindowCapturor] Unable to find windows "
+                        f"title that contains {cfg['game_window']['title']}")
+        else:
+            logger.info(f"[GameWindowCapturor] Found game window title: {self.window_title}")
 
         self.capture = WindowsCapture(window_name=self.window_title)
         self.capture.event(self.on_frame_arrived)

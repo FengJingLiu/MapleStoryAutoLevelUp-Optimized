@@ -11,6 +11,21 @@ import Quartz
 # Local import
 from src.utils.logger import logger
 
+def get_window_title(token):
+    '''
+    Get window title that contain token
+    '''
+    window_list = Quartz.CGWindowListCopyWindowInfo(
+        Quartz.kCGWindowListOptionOnScreenOnly | Quartz.kCGWindowListExcludeDesktopElements,
+        Quartz.kCGNullWindowID
+    )
+    # Get all exist windows
+    for window in window_list:
+        title = window.get(Quartz.kCGWindowName, '')
+        if token in title:
+            return title
+    return None
+
 def get_window_region(window_title):
     window_list = Quartz.CGWindowListCopyWindowInfo(
         Quartz.kCGWindowListOptionOnScreenOnly | Quartz.kCGWindowListExcludeDesktopElements,
@@ -45,7 +60,10 @@ class GameWindowCapturor:
         self.lock = threading.Lock()
         self.is_terminated = False
 
-        self.window_title = cfg["game_window"]["title"]
+        self.window_title = get_window_title(cfg["game_window"]["title"])
+        if self.window_title is None:
+            logger.error(f"[GameWindowCapturor] Unable to find window titles that contain {cfg["game_window"]["title"]}")
+            return -1
 
         self.fps = 0
         self.fps_limit = cfg["system"]["fps_limit_window_capturor"]

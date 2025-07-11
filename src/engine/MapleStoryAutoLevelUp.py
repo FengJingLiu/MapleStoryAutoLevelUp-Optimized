@@ -67,6 +67,7 @@ class MapleStoryAutoBot:
         self.is_need_show_debug_window = args.viz_window #
         self.is_disable_control = args.disable_control
         self.is_ui = args.is_ui # Whether is using UI framework to invoke engine 
+        self.is_frame_done = False #
         # Coordinate (top-left coordinate)
         self.loc_nametag = (0, 0) # nametag location on game screen
         self.loc_party_red_bar = (0, 0) # party red bar location on game screen
@@ -206,8 +207,8 @@ class MapleStoryAutoBot:
 
         # Load player's name tag
         if cfg["nametag"]["enable"]:
-            self.img_nametag = load_image(f"nametag/{cfg["nametag"]["name"]}.png")
-            self.img_nametag_gray = load_image(f"nametag/{cfg["nametag"]["name"]}.png",
+            self.img_nametag = load_image(f"nametag/{cfg['nametag']['name']}.png")
+            self.img_nametag_gray = load_image(f"nametag/{cfg['nametag']['name']}.png",
                                                cv2.IMREAD_GRAYSCALE)
 
         # Load rune images from rune/
@@ -671,7 +672,7 @@ class MapleStoryAutoBot:
             y0 = self.loc_player[1] - self.cfg["directional_attack"]["range_y"] // 2
             y1 = y0 + self.cfg["directional_attack"]["range_y"]
         else:
-            logger.error(f"Unsupported attack mode: {self.cfg["bot"]["attack"]}")
+            logger.error(f"Unsupported attack mode: {self.cfg['bot']['attack']}")
             return None
 
         # Draw attack box on debug window
@@ -1369,7 +1370,6 @@ class MapleStoryAutoBot:
                         cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0,0,255), 2)
             # Draw bar on debug window
             x_s, y_s = (410, 73)
-            # print(self.health_monitor.loc_size_bars)
             x, y, w, h = self.health_monitor.loc_size_bars[i]
             self.img_frame_debug[y_s+30*i:y_s+h+30*i, x_s:x_s+w] = \
                 self.img_frame[self.cfg["camera"]["y_end"]:, :][y:y+h, x:x+w]
@@ -1417,7 +1417,7 @@ class MapleStoryAutoBot:
         '''
         logger.info("[channel_change] Start")
 
-        window_title = self.cfg["game_window"]["title"]
+        window_title = self.capture.window_title
         ui_coords = self.cfg["ui_coords"]
         click_in_game_window(window_title, ui_coords["menu"])
         time.sleep(1)
@@ -1614,11 +1614,10 @@ class MapleStoryAutoBot:
         img_frame = self.get_img_frame()
         if img_frame is None:
             if not is_mac():
-                activate_game_window(self.cfg["game_window"]["title"])
+                activate_game_window(self.capture.window_title)
             return -1 # Wait for game window to be ready
         else:
             self.img_frame = img_frame
-
         # Grayscale game window
         self.img_frame_gray = cv2.cvtColor(self.img_frame, cv2.COLOR_BGR2GRAY)
 
@@ -1981,7 +1980,7 @@ class MapleStoryAutoBot:
 
         # Make sure player is in party
         if self.is_first_frame and not is_mac():
-            activate_game_window(self.cfg["game_window"]["title"])
+            activate_game_window(self.capture.window_title)
             time.sleep(0.3)
             self.ensure_is_in_party()
 
@@ -1998,12 +1997,6 @@ class MapleStoryAutoBot:
         # Print text on debug image
         self.update_info_on_img_frame_debug()
 
-        # Show debug image on window
-        if not self.is_ui:
-            cv2.imshow("Game Window Debug",
-                self.img_frame_debug[self.cfg["camera"]["y_start"]:
-                                     self.cfg["camera"]["y_end"], :])
-
         # Save debug window to video
         if self.video_writer:
             self.video_writer.write(self.img_frame_debug)
@@ -2015,8 +2008,6 @@ class MapleStoryAutoBot:
                         fx=self.cfg["minimap"]["debug_window_upscale"],
                         fy=self.cfg["minimap"]["debug_window_upscale"],
                         interpolation=cv2.INTER_NEAREST)
-            if not self.is_ui:
-                cv2.imshow("Route Map Debug", self.img_route_debug)
 
         self.profiler.mark("Debug Window Show")
 
@@ -2037,30 +2028,31 @@ class MapleStoryAutoBot:
     def loop(self):
         '''
         Auto Bot main loop
+        Only run when call autobot from UI framework and AutoBotController
         '''
         while not self.kb.is_terminated:
 
             t_start = time.time()
 
             # Process one game window frame
+            self.is_frame_done = False
             ret = self.run_once()
 
             # Only proceed if the frame is valid
             if ret == 0:
                 # Draw image on debug window
-                if self.is_show_debug_window:
-                    if self.is_ui:
-                        self.image_debug_signal.emit(
-                            self.img_frame_debug[
-                                self.cfg["camera"]["y_start"]:
-                                self.cfg["camera"]["y_end"], :].copy())
-                        self.route_map_viz_signal.emit(
-                            self.img_route_debug.copy())
-                    else:
-                        cv2.waitKey(1)
+                if self.is_show_debug_window and self.is_ui:
+                    img_frame_debug_emit = self.img_frame_debug[
+                        self.cfg["camera"]["y_start"]:
+                        self.cfg["camera"]["y_end"], :].copy()
+                    img_route_debug_emit = self.img_route_debug.copy()
+                    self.image_debug_signal.emit(img_frame_debug_emit)
+                    self.route_map_viz_signal.emit(img_route_debug_emit)
             else:
                 pass
                 # logger.warning("Skipped debug window update due to invalid frame.")
+
+            self.is_frame_done = True
 
             # Cap FPS to save system resource
             frame_duration = time.time() - t_start
@@ -2117,7 +2109,20 @@ def main(args):
 
     # While loop
     while not mapleStoryAutoBot.is_terminated:
-        time.sleep(0.1)
+        # Show debug image on window
+        if mapleStoryAutoBot.is_frame_done:
+            if mapleStoryAutoBot.img_frame_debug is not None:
+                cv2.imshow("Game Window Debug",
+                    mapleStoryAutoBot.img_frame_debug[
+                        mapleStoryAutoBot.cfg["camera"]["y_start"]:
+                        mapleStoryAutoBot.cfg["camera"]["y_end"], :])
+
+            if mapleStoryAutoBot.img_route_debug is not None:
+                cv2.imshow("Route Map Debug", mapleStoryAutoBot.img_route_debug)
+
+        cv2.waitKey(1)
+
+        time.sleep(0.01)
 
     #########################
     ### Terminate AutoBot ###
