@@ -152,6 +152,10 @@ channel_change:
   mode: ""  # 🧠 Options: "" "true" "pixel"
   other_player_move_thres: 10  # only work in "pixel" mode
 
+scheduled_channel_switching:
+  enable: True
+  interval_seconds: 1800
+
 ui_coords:
   # 🧭 UI Coordinate
   # Buttons and menu cooridinate in game window

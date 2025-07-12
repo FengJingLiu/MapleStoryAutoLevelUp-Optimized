@@ -96,6 +96,7 @@ class MapleStoryAutoBot:
         self.t_last_rune_trigger = time.time() # Last time trigger rune
         self.t_rune_finding_start = 0 # Start time of rune finding. Reset when 'channel_change' and 'solve_rune'.
         self.t_last_minimap_update = time.time()
+        self.t_to_change_channel = time.time()
         # Patrol mode
         self.is_patrol_to_left = True # Patrol direction flag
         self.patrol_turn_point_cnt = 0 # Patrol tuning back counter
@@ -1578,6 +1579,21 @@ class MapleStoryAutoBot:
                     return True
         return False
 
+    def time_to_change_channel(self):
+        '''
+        time_to_change_channel
+        '''
+        if not self.cfg["scheduled_channel_switching"]["enable"]:
+            return False
+        current_time = time.time()
+        dt = current_time - self.t_to_change_channel
+        if dt > self.cfg["scheduled_channel_switching"]["interval_seconds"]:
+            self.t_to_change_channel = time.time()
+            self.t_last_switch_status = time.time()
+            self.status = "hunting"
+            return True
+        return False
+
     def get_login_button_location(self):
         '''
         get_login_button_location
@@ -1740,6 +1756,14 @@ class MapleStoryAutoBot:
             return
 
         self.profiler.mark("Other Player Location Detection")
+
+        if self.time_to_change_channel():
+            self.kb.set_command("none none none")
+            self.kb.release_all_key()
+            self.kb.disable()
+            time.sleep(1)
+            self.channel_change()
+            return
 
         # Get player location on global map
         if self.cfg["bot"]["mode"] in ["patrol", "aux"]:
