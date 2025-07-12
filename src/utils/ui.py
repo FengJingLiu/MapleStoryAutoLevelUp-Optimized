@@ -6,7 +6,7 @@ import logging
 
 # PySide 6
 from PySide6.QtWidgets import (
-    QLabel, QWidget, QHBoxLayout, QSizePolicy, QKeySequenceEdit,
+    QLabel, QWidget, QHBoxLayout, QSizePolicy, QKeySequenceEdit, QComboBox,
     QGroupBox, QCheckBox, QFormLayout, QLineEdit, QLabel, QWidget, QHBoxLayout
 )
 from PySide6.QtCore import Qt, QObject, Signal
@@ -169,11 +169,27 @@ def create_advance_setting_gbox(title, cfg, comments=None, comments_section=None
             gbox._field_refs[key] = line
 
         elif isinstance(value, str):
-            line = QLineEdit(value)
-            line.setToolTip(tooltip)
-            line.textChanged.connect(lambda val: cfg[title].__setitem__(key, val))
-            form_layout.addRow(QLabel(key), line)
-            gbox._field_refs[key] = line
+            if tooltip and "Options:" in tooltip:
+                # Parse options from tooltip
+                options_part = tooltip.split("Options:")[1]
+                options = [opt.strip('" ') for opt in options_part.strip().split('"') if opt.strip()]
+
+                # Create drop list
+                combo = QComboBox()
+                combo.addItems(options)
+                if value in options:
+                    combo.setCurrentText(value)
+                combo.setToolTip(tooltip)
+
+                combo.currentTextChanged.connect(lambda val: cfg[title].__setitem__(key, val))
+                form_layout.addRow(QLabel(key), combo)
+                gbox._field_refs[key] = combo
+            else:
+                line = QLineEdit(value)
+                line.setToolTip(tooltip)
+                line.textChanged.connect(lambda val: cfg[title].__setitem__(key, val))
+                form_layout.addRow(QLabel(key), line)
+                gbox._field_refs[key] = line
 
     for key, value in cfg[title].items():
         add_field(key, value)
