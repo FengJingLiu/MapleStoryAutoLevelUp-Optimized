@@ -251,6 +251,11 @@ class MainWindow(QMainWindow):
         self.attack_mode.addItems(["Basic", "AOE Skill"])
         self.attack_mode.setFixedWidth(100)
 
+        # Connect dropdown change to handler
+        self.attack_mode.currentIndexChanged.connect(
+            self.update_atk_config_trigger_by_drop_list
+        )
+
         # Set default value
         form_left.addRow("Attack Mode:", self.attack_mode)
 
@@ -652,6 +657,23 @@ class MainWindow(QMainWindow):
 
         # Re-apply config to UI
         self.apply_config_to_ui()
+
+    def update_atk_config_trigger_by_drop_list(self):
+        '''
+        Update attack config fields based on selected attack mode from drop-down.
+        '''
+        index = self.attack_mode.currentIndex()  # Get selected index
+        if index == 0:
+            atk_cfg = self.cfg["directional_attack"]
+        elif index == 1:
+            atk_cfg = self.cfg["aoe_skill"]
+        else:
+            atk_cfg = None
+
+        if atk_cfg:
+            self.attack_range_x.setText(str(atk_cfg["range_x"]))
+            self.attack_cooldown.setText(str(atk_cfg["cooldown"]))
+            self.attack_range_y.setText(str(atk_cfg["range_y"]))
 
     def apply_config_to_ui(self):
         # === Attack Section ===
