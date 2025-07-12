@@ -9,6 +9,7 @@ monster_detect:
 
 minimap:
   player_color: [84, 255, 255] # BGR
+  other_player_color: [20, 15, 228] # BGR
   debug_window_upscale: 2
 
 party_red_bar:

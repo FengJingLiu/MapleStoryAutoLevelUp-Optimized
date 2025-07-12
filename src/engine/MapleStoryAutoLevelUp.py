@@ -48,13 +48,13 @@ class MapleStoryAutoBot:
         self.cfg = None # Configuration
         self.status = "hunting" # 'finding_rune', 'near_rune'
         self.idx_routes = 0 # Index of route map
-        self.monster_info = [] # monster information
+        self.monsters_info = {} # monster information
+        self.monsters = [] # monster detected in current frame
         self.fps = 0 # Frame per second
         self.red_dot_center_prev = None # previous other player location in minimap
         self.video_writer = None # For video recording feature
         self.color_code = {} # For color code instruction
         self.color_code_up_down = {} # Color code only contain 'up' and 'down'
-        self.monsters = {}
         self.thread_auto_bot = None # thread for running autobot
         # Signals (for UI)
         self.image_debug_signal = None
@@ -199,12 +199,12 @@ class MapleStoryAutoBot:
                     img_flip = cv2.flip(img, 1)
                     imgs.append((img_flip, get_mask(img_flip, (0, 255, 0))))
                 if imgs:
-                    self.monsters[monster_name] = imgs
+                    self.monsters_info[monster_name] = imgs
                 else:
                     logger.error(f"No images found in monster/{monster_name}/{monster_name}*")
                     return -1
                     # raise RuntimeError(f"No images found in monster/{monster_name}/{monster_name}*")
-            logger.info(f"Loaded monsters: {list(self.monsters.keys())}")
+            logger.info(f"Loaded monsters: {list(self.monsters_info.keys())}")
 
         # Load player's name tag
         if cfg["nametag"]["enable"]:
@@ -636,7 +636,7 @@ class MapleStoryAutoBot:
 
         return nearest, nearest_up_down  # if not found return none
 
-    def get_nearest_monster(self, is_left = True, overlap_threshold=0.5):
+    def get_nearest_monster(self, is_left = True):
         '''
         Finds the nearest monster within the player's attack range.
 
@@ -650,8 +650,6 @@ class MapleStoryAutoBot:
         Args:
             is_left (bool): If True, assume the player is facing left;
                             adjusts attack box accordingly.
-            overlap_threshold (float): Minimum IoU area ratio required to consider a hit.
-
         Returns:
             dict or None: The nearest monster's info dict, or None if no valid match.
         '''
@@ -685,7 +683,7 @@ class MapleStoryAutoBot:
 
         nearest_monster = None
         min_distance = float('inf')
-        for monster in self.monster_info:
+        for monster in self.monsters:
             mx1, my1 = monster["position"]
             mw, mh = monster["size"]
             mx2 = mx1 + mw
@@ -701,11 +699,9 @@ class MapleStoryAutoBot:
             ih = max(0, iy2 - iy1)
             inter_area = iw * ih
 
-            monster_area = mw * mh
-            if monster_area == 0:
-                continue  # skip degenerate box
-
-            if inter_area/monster_area >= overlap_threshold:
+            min_mob_area = min(img.shape[0]*img.shape[1] for _, imgs in self.monsters_info.items() for img, _ in imgs)
+            inter_area_thres = min(min_mob_area, self.cfg['monster_detect']['max_mob_area_trigger'])
+            if inter_area >= inter_area_thres:
                 # Compute distance to player center
                 monster_center = (mx1 + mw // 2, my1 + mh // 2)
                 dx = monster_center[0] - self.loc_player[0]
@@ -738,8 +734,8 @@ class MapleStoryAutoBot:
         char_y_min = max(0, py_in_roi - self.cfg["character"]["height"] // 2)
         char_y_max = min(img_roi.shape[0], py_in_roi + self.cfg["character"]["height"] // 2)
 
-        monster_info = []
-        for monster_name, monster_imgs in self.monsters.items():
+        monsters = []
+        for monster_name, monster_imgs in self.monsters_info.items():
             for img_monster, mask_monster in monster_imgs:
                 if self.cfg["bot"]["mode"] == "patrol":
                     pass # Don't detect monster using template in patrol mode
@@ -764,12 +760,12 @@ class MapleStoryAutoBot:
 
                     num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(closed_mask, connectivity=8)
 
-                    monster_info = []
+                    monsters = []
                     min_area = 1000
                     for i in range(1, num_labels):
                         x, y, w, h, area = stats[i]
                         if area > min_area:
-                            monster_info.append({
+                            monsters.append({
                                 "name": "",
                                 "position": (x0+x, y0+y),
                                 "size": (h, w),
@@ -804,7 +800,7 @@ class MapleStoryAutoBot:
 
                     h, w = img_monster.shape[:2]
                     for pt in zip(*match_locations[::-1]):
-                        monster_info.append({
+                        monsters.append({
                             "name": monster_name,
                             "position": (pt[0] + x0, pt[1] + y0),
                             "size": (h, w),
@@ -821,7 +817,7 @@ class MapleStoryAutoBot:
                     match_locations = np.where(res <= self.cfg["monster_detect"]["diff_thres"])
                     h, w = img_monster.shape[:2]
                     for pt in zip(*match_locations[::-1]):
-                        monster_info.append({
+                        monsters.append({
                             "name": monster_name,
                             "position": (pt[0] + x0, pt[1] + y0),
                             "size": (h, w),
@@ -836,7 +832,7 @@ class MapleStoryAutoBot:
                     match_locations = np.where(res <= self.cfg["monster_detect"]["diff_thres"])
                     h, w = img_monster.shape[:2]
                     for pt in zip(*match_locations[::-1]):
-                        monster_info.append({
+                        monsters.append({
                             "name": monster_name,
                             "position": (pt[0] + x0, pt[1] + y0),
                             "size": (h, w),
@@ -847,7 +843,7 @@ class MapleStoryAutoBot:
                     return []
 
         # Apply Non-Maximum Suppression to monster detection
-        monster_info = nms(monster_info, iou_threshold=0.4)
+        monsters = nms(monsters, iou_threshold=0.4)
 
         # Detect monster via health bar
         if self.cfg["monster_detect"]["with_enemy_hp_bar"]:
@@ -870,9 +866,9 @@ class MapleStoryAutoBot:
                 x = max(0, x)
                 y = max(0, y)
                 w = 70
-                h = 70
+                h = min(img.shape[0] for _, imgs in self.monsters_info.items() for img, _ in imgs)
 
-                monster_info.append({
+                monsters.append({
                     "name": "Health Bar",
                     "position": (x0 + x, y0 + y),
                     "size": (h, w),
@@ -881,13 +877,13 @@ class MapleStoryAutoBot:
 
         # Debug
         # Draw attack detection range
-        # draw_rectangle(
-        #     self.img_frame_debug, (x0, y0), (y1-y0, x1-x0),
-        #     (255, 0, 0), "Monster Detection Box"
-        # )
+        draw_rectangle(
+            self.img_frame_debug, (x0, y0), (y1-y0, x1-x0),
+            (255, 0, 0), "Mob Detection Box"
+        )
 
         # Draw monsters bounding box
-        for monster in monster_info:
+        for monster in monsters:
             if monster["name"] == "Health Bar":
                 color = (0, 255, 255)
             else:
@@ -898,7 +894,7 @@ class MapleStoryAutoBot:
                 color, str(round(monster['score'], 2))
             )
 
-        return monster_info
+        return monsters
 
     def switch_status(self, new_status):
         '''
@@ -1732,20 +1728,14 @@ class MapleStoryAutoBot:
 
         # Get other player location on minimap & change channel
 
-
-        # Get other player color from config
-        if is_mac():
-            other_player_color = (20, 15, 228)
-        else:
-            other_player_color = (0, 0, 255)
-
         # 調試：分析小地圖顏色（只在第一次執行時）
         # if self.is_first_frame:
         #     logger.info("Running minimap color analysis...")
         #     debug_minimap_colors(self.img_minimap, other_player_color)
 
-        loc_other_players = get_all_other_player_locations_on_minimap(self.img_minimap, other_player_color)
-        # logger.info(f"loc_other_players: {loc_other_players}, other_player_color: {other_player_color}")
+        loc_other_players = get_all_other_player_locations_on_minimap(
+                                self.img_minimap,
+                                self.cfg['minimap']['other_player_color'])
         if self.is_need_change_channel(loc_other_players):
             self.kb.set_command("none none none")
             self.kb.release_all_key()
@@ -1847,19 +1837,20 @@ class MapleStoryAutoBot:
 
         # Get monsters in the search box
         if self.status == "hunting":
-            self.monster_info = self.get_monsters_in_range((x0, y0), (x1, y1))
+            self.monsters = self.get_monsters_in_range((x0, y0), (x1, y1))
         else:
-            self.monster_info = []
+            self.monsters = []
 
         self.profiler.mark("Monster Detection")
 
         # Get attack direction
         if self.cfg["bot"]["attack"] == "aoe_skill":
-            if len(self.monster_info) == 0:
+            if len(self.monsters) == 0:
                 attack_direction = None
             else:
                 attack_direction = "I don't care"
-            nearest_monster = self.get_nearest_monster()
+            # TODO:
+            self.get_nearest_monster() # AOE skill doesn't care
 
         elif self.cfg["bot"]["attack"] == "directional":
             # Get nearest monster to player

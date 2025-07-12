@@ -143,6 +143,7 @@ monster_detect:
   contour_blur: 5              # 🌫️ Gaussian blur kernel size used for contour smoothing (in "contour_only" mode).
   with_enemy_hp_bar: True      # ❤️ Enable smarter detection using enemy HP bars.
   hp_bar_color: [71, 204, 64]  # 💚 Enemy HP bar color (in BGR format)
+  max_mob_area_trigger: 1500   # 📏 How much does the mob need to overlap with attack range to be considered as a target
 
 channel_change:
   # 🔁Auto change channel
@@ -248,6 +249,7 @@ minimap:
   # The minimap appears in the top-left corner of the game window.
   # It is used to estimate the player’s current location in the world.
   player_color: [136, 255, 255]   # 🟡 BGR value of the yellow player dot on the minimap
+  other_player_color: [0, 0, 255] # 🔴 BGR value of the red other player dot on the minimap
   debug_window_upscale: 4         # 🔍 Zoom factor for the route debug image (for visualization only)
   offset: [0, 0]                  # 📐 Don't set this unless playing on global server
 
