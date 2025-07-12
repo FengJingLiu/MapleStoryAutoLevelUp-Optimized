@@ -153,8 +153,9 @@ channel_change:
   other_player_move_thres: 10  # only work in "pixel" mode
 
 scheduled_channel_switching:
-  enable: True
-  interval_seconds: 1800
+  # Schduel for channel swithcing
+  enable: False            # Enable this feature or not
+  interval_seconds: 1800   # Switch channel for every <interval_seconds> second
 
 ui_coords:
   # 🧭 UI Coordinate
