@@ -32,8 +32,6 @@ class FindingRuneState(State):
         elif self.bot.rune_solver.loc_rune is not None:
             return "near_rune"
 
-        elif time.time() - self.bot.fsm.t_last_transition
-
         else:
             return None
 
