@@ -92,7 +92,7 @@ party_red_bar:
   lower_red: [0, 60, 60]   # ❤️ HSV, darker red of party health bar
   upper_red: [0, 100, 100] # ❤️ HSV, brighter red of party health bar
   offset: [20, 66]         # 🎯 Offset from the top-left corner of the party red bar to the character center
-  create_party_button_cn_thres: 0.1   # 📏 threshold for create party button matching
+  create_party_button_cn_thres: 0.04   # 📏 threshold for create party button matching
   create_party_button_eng_thres: 0.04 # 📏 threshold for create party button matching
 
 nametag:

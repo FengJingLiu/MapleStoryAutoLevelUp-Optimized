@@ -1468,12 +1468,6 @@ class MapleStoryAutoBot:
         # Start profiler for performance debugging
         self.profiler.start()
 
-        # Make sure player is in party
-        if self.is_first_frame and not is_mac():
-            activate_game_window(self.capture.window_title)
-            time.sleep(0.3)
-            self.ensure_is_in_party()
-
         # Check if need viz window
         self.is_show_debug_window = self.is_need_show_debug_window
         if not self.is_show_debug_window:
@@ -1693,6 +1687,12 @@ class MapleStoryAutoBot:
         Auto Bot main loop
         Only run when call autobot from UI framework and AutoBotController
         '''
+        # Make sure player is in party
+        if not is_mac():
+            activate_game_window(self.capture.window_title)
+            time.sleep(0.3)
+            self.ensure_is_in_party()
+
         while not self.kb.is_terminated:
 
             t_start = time.time()

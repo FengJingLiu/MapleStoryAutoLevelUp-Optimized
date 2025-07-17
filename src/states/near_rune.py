@@ -9,13 +9,12 @@ class NearRuneState(State):
     def __init__(self, name, bot):
         super().__init__(name, bot)
         self.bot = bot
-        self.t_last_rune_trigger = time.time()
 
     def on_enter(self):
         pass
 
     def on_exit(self):
-        pass
+        self.bot.rune_solver.reset()
 
     def check_transitions(self):
         if self.bot.rune_solver.is_in_rune_game(
@@ -39,17 +38,14 @@ class NearRuneState(State):
                 self.bot.loc_player
         )
 
-        dt = time.time() - self.t_last_rune_trigger
         dx = abs(self.bot.loc_player[0] - self.bot.rune_solver.loc_rune[0])
         dy = abs(self.bot.loc_player[1] - self.bot.rune_solver.loc_rune[1])
         logger.info(f"[NearRuneState] Player distance to rune: ({dx}, {dy})")
 
         # Check if close enough to trigger the rune
-        if dt > self.bot.cfg["rune_find"]["rune_trigger_cooldown"] and \
-            dx < self.bot.cfg["rune_find"]["rune_trigger_distance_x"] and \
+        if  dx < self.bot.cfg["rune_find"]["rune_trigger_distance_x"] and \
             dy < self.bot.cfg["rune_find"]["rune_trigger_distance_y"]:
             press_key("up", 0.02) # Attempt to trigger rune
-            self.t_last_rune_trigger = time.time()
 
         # Get commend from route map
         self.bot.update_cmd_by_route()
