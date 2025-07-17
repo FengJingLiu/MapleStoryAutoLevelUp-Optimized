@@ -21,6 +21,47 @@ else:
 
 pyautogui.PAUSE = 0  # remove delay
 
+def key_down(key):
+    '''
+    Press key down
+    '''
+    try:
+        pyautogui.keyDown(key)
+    except pyautogui.FailSafeException:
+        logger.warning("[key_down] pyautogui failsafe triggered during key_down.")
+        recover_mouse()
+
+def key_up(key):
+    '''
+    Release key
+    '''
+    try:
+        pyautogui.keyUp(key)
+    except pyautogui.FailSafeException:
+        logger.warning("[key_up] pyautogui failsafe triggered during key_up.")
+        recover_mouse()
+
+def recover_mouse():
+    '''
+    Move mouse back to center to avoid pyautogui failsafe
+    '''
+    pyautogui.FAILSAFE = False # Temp disasble failsafe to avoid nested exception
+
+    screen_w, screen_h = pyautogui.size()
+    pyautogui.moveTo(screen_w // 2, screen_h // 2)
+    time.sleep(0.2) # Give it a moment to "cool down"
+
+    pyautogui.FAILSAFE = True # Recover failsafe
+
+def press_key(key, duration=0.05):
+    '''
+    Simulates a key press for a specified duration
+    '''
+    if key:
+        key_down(key)
+        time.sleep(duration)
+        key_up(key)
+
 class KeyBoardController():
     '''
     KeyBoardController
@@ -69,7 +110,7 @@ class KeyBoardController():
         elif cfg["bot"]["attack"] == "directional":
             self.attack_key = cfg["key"]["directional_attack"]
         else:
-            logger.error(f"Unexpected attack argument: {cfg["bot"]["attack"]}")
+            raise ValueError(f"Unexpected attack type: {cfg['bot']['attack']}")
 
         # Start keyboard control thread
         threading.Thread(target=self.run, daemon=True).start()
@@ -85,15 +126,6 @@ class KeyBoardController():
 
         # Make sure all key are released
         self.release_all_key()
-
-    def press_key(self, key, duration=0.05):
-        '''
-        Simulates a key press for a specified duration
-        '''
-        if key:
-            pyautogui.keyDown(key)
-            time.sleep(duration)
-            pyautogui.keyUp(key)
 
     def disable(self):
         '''
@@ -144,12 +176,12 @@ class KeyBoardController():
         '''
         Release all key
         '''
-        pyautogui.keyUp("left")
-        pyautogui.keyUp("right")
-        pyautogui.keyUp("up")
-        pyautogui.keyUp("down")
+        key_up("left")
+        key_up("right")
+        key_up("up")
+        key_up("down")
         # Also release attack keys to stop any ongoing attacks
-        pyautogui.keyUp(self.attack_key)
+        key_up(self.attack_key)
 
     def limit_fps(self):
         '''
@@ -181,7 +213,7 @@ class KeyBoardController():
                 cooldown = self.cfg["buff_skill"]["cooldown"][i]
                 if time.time() - self.t_last_buff_cast[i] >= cooldown and \
                     time.time() - self.t_last_skill > self.cfg["buff_skill"]["action_cooldown"]:
-                    self.press_key(buff_skill_key)
+                    press_key(buff_skill_key)
                     logger.info(f"[Buff] Press buff skill key: '{buff_skill_key}' (cooldown: {cooldown}s)")
                     # Reset timers
                     self.t_last_buff_cast[i] = time.time()
@@ -196,18 +228,18 @@ class KeyBoardController():
             ### Left-Right Command ###
             ##########################
             if self.cmd_left_right == "left":
-                pyautogui.keyUp("right")
-                pyautogui.keyDown("left")
+                key_up("right")
+                key_down("left")
             elif self.cmd_left_right == "right":
-                pyautogui.keyUp("left")
-                pyautogui.keyDown("right")
+                key_up("left")
+                key_down("right")
             elif self.cmd_left_right == "stop":
-                pyautogui.keyUp("left")
-                pyautogui.keyUp("right")
+                key_up("left")
+                key_up("right")
             elif self.cmd_left_right == "none":
                 if self.cmd_left_right_last != "none":
-                    pyautogui.keyUp("left")
-                    pyautogui.keyUp("right")
+                    key_up("left")
+                    key_up("right")
             else:
                 logger.error("[KeyBoardController] Unsupported left-right command: "
                              f"{self.cmd_left_right}")
@@ -217,18 +249,18 @@ class KeyBoardController():
             ### Up-Down Command ###
             #######################
             if self.cmd_up_down == "up":
-                pyautogui.keyUp("down")
-                pyautogui.keyDown("up")
+                key_up("down")
+                key_down("up")
             elif self.cmd_up_down == "down":
-                pyautogui.keyUp("up")
-                pyautogui.keyDown("down")
+                key_up("up")
+                key_down("down")
             elif self.cmd_up_down == "stop":
-                pyautogui.keyUp("up")
-                pyautogui.keyUp("down")
+                key_up("up")
+                key_up("down")
             elif self.cmd_up_down == "none":
                 if self.cmd_up_down_last != "none":
-                    pyautogui.keyUp("up")
-                    pyautogui.keyUp("down")
+                    key_up("up")
+                    key_up("down")
             else:
                 logger.error("[KeyBoardController] Unsupported up-down command: "
                              f"{self.cmd_up_down}")
@@ -238,17 +270,17 @@ class KeyBoardController():
             ### Action Command ###
             ######################
             if self.cmd_action == "jump":
-                self.press_key(self.cfg["key"]["jump"])
+                press_key(self.cfg["key"]["jump"])
             elif self.cmd_action == "teleport":
-                self.press_key(self.cfg["key"]["teleport"])
+                press_key(self.cfg["key"]["teleport"])
             elif self.cmd_action == "attack":
-                self.press_key(self.attack_key)
+                press_key(self.attack_key)
                 self.t_last_skill = time.time()
             elif self.cmd_action == "add_hp":
-                self.press_key(self.cfg["key"]["add_hp"])
+                press_key(self.cfg["key"]["add_hp"])
                 self.cmd_action = "none"  # Reset command
             elif self.cmd_action == "add_mp":
-                self.press_key(self.cfg["key"]["add_mp"])
+                press_key(self.cfg["key"]["add_mp"])
                 self.cmd_action = "none"  # Reset command
             elif self.cmd_action == "goal":
                 pass

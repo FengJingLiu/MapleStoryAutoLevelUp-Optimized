@@ -894,7 +894,7 @@ class MainWindow(QMainWindow):
             self.cfg["aoe_skill"]["range_y"] = int(self.attack_range_y.text())
             self.cfg["aoe_skill"]["cooldown"] = float(self.attack_cooldown.text())
         else:
-            logger.error(f"[update_cfg_from_main_ui] Unsupported attack mode: {self.cfg["bot"]["attack"]}")
+            logger.error(f"[update_cfg_from_main_ui] Unsupported attack mode: {self.cfg['bot']['attack']}")
         # Key binding gbox
         self.cfg["key"]["teleport"] = self.teleport_key.get_key()
         self.cfg["key"]["party"] = self.party_key.get_key()
@@ -993,6 +993,12 @@ class MainWindow(QMainWindow):
                 # Single numeric value
                 elif isinstance(value, (int, float)) and isinstance(widget, QLineEdit):
                     widget.setText(str(value))
+
+                # Droplist
+                elif isinstance(value, str) and isinstance(widget, QComboBox):
+                    index = widget.findText(value)
+                    if index != -1:
+                        widget.setCurrentIndex(index)
 
                 # String
                 elif isinstance(value, str) and isinstance(widget, QLineEdit):

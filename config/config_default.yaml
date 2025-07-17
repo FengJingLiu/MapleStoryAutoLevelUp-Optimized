@@ -5,7 +5,7 @@
 
 bot:
   # 🔁 Bot Settings
-  mode: "normal"        # Options: "normal", "aux", "patrol"
+  mode: "normal"        # Options: "normal" "aux" "patrol"
   attack: "directional" # Options: "aoe_skill" "directional"
   map: "" # Please refer to config/config_data.yaml
 
@@ -92,7 +92,8 @@ party_red_bar:
   lower_red: [0, 60, 60]   # ❤️ HSV, darker red of party health bar
   upper_red: [0, 100, 100] # ❤️ HSV, brighter red of party health bar
   offset: [20, 66]         # 🎯 Offset from the top-left corner of the party red bar to the character center
-  create_party_button_thres: 0.1 # 📏 threshold for create party button matching
+  create_party_button_cn_thres: 0.1   # 📏 threshold for create party button matching
+  create_party_button_eng_thres: 0.04 # 📏 threshold for create party button matching
 
 nametag:
   # 🏷️ NameTag Recognition
@@ -146,12 +147,12 @@ monster_detect:
   max_mob_area_trigger: 1500   # 📏 How much does the mob need to overlap with attack range to be considered as a target
 
 channel_change:
-  # 🔁Auto change channel
-  # "": Off
+  # 🔁 Auto change channel when other player detected
   # "true": Change channel once other player is detected
   # "pixel": Change channel once other player move set pixels in other_player_move_pixel
-  mode: ""  # 🧠 Options: "" "true" "pixel"
-  other_player_move_thres: 10  # only work in "pixel" mode
+  enable: False                # ✅
+  mode: "pixel"                # 🧠 Options: "true" "pixel"
+  other_player_move_thres: 10  # 📏 only work in "pixel" mode
 
 scheduled_channel_switching:
   # Schduel for channel swithcing
@@ -198,20 +199,48 @@ route:
     "255,255,127": "none down none"     # 🟡 Light yellow
 
 watchdog:
-  # 🐶 Watchdog (Anti-Stuck System)
+  # 🐶 Watchdog
   # This feature monitors your character's movement.
   # If the player stays in the same spot for too long, the watchdog will "bark"
   # and trigger a random action (defined in `color_code`) to help break the stuck state.
-  range: 10    # 🥶 Movement threshold (in pixels). If the player moves less than this, it's considered stuck.
-  timeout: 10  # ⏱️ Time limit (in seconds). If the player stays still for this long, a random action is triggered.
+  # The other feature is last attack watch dog. It check if the player doesn't attack for too long.
+  # If so, consider the player is stuck and perform recovery action 
+  range: 10            # 🥶 Movement threshold (in pixels). If the player moves less than this, it's considered stuck.
+  timeout: 10          # ⏱️ Time limit (in seconds). If the player stays still for this long, a random action is triggered.
+  last_attack_timeout: 1200 # ⏳ Maximum time (in seconds) to not perform attack action
+  last_attack_timeout_action: "change_channel" # 🧠 Options: "go_home" "change_channel"
 
-rune_warning:
-  # ⚠️ Rune Warning Detection
+rune_warning_cn:
+  # ⚠️ Rune Warning Detection(Chinese)
   # Detects the "Please remove the rune" message on screen.
   # When this warning appears, the bot will pause combat and start searching for the rune instead.
   top_left: [513, 196]        # 🟦 Top-left corner of the rune warning message
   bottom_right: [768, 236]    # 🟥 Bottom-right corner of the rune warning
-  diff_thres: 0.2             # 📏 Matching threshold [0.0 ~ 1.0], higher = stricter match
+  diff_thres: 0.1             # 📏 Matching threshold [0.0 ~ 1.0], higher = stricter match
+
+rune_warning_eng:
+  # ⚠️ Rune Warning Detection(English)
+  # Detects the "Please remove the rune" message on screen.
+  # When this warning appears, the bot will pause combat and start searching for the rune instead.
+  top_left: [432, 204]        # 🟦 Top-left corner of the rune warning message
+  bottom_right: [864, 230]    # 🟥 Bottom-right corner of the rune warning
+  diff_thres: 0.1             # 📏 Matching threshold [0.0 ~ 1.0], higher = stricter match
+
+rune_enable_msg_cn:
+  # ⚠️ Rune Enable Message(Chinese)
+  # Detects the "Runes has been create" message on screen
+  # When it appears, the bot will start detecting runes
+  top_left: [559, 116]     # 📐 top left coordinate of rune enable msg
+  bottom_right: [733, 146] # 📐 right bottom coordinate of rune enable msg
+  diff_thres: 0.1          # 📏 Match threshold [0.0 ~ 1.0], higher = stricter match
+
+rune_enable_msg_eng:
+  # ⚠️ Rune Enable Message(English)
+  # Detects the "Runes has been create" message on screen
+  # When it appears, the bot will start detecting runes
+  top_left: [460, 119]     # 📐 top left coordinate of rune enable msg
+  bottom_right: [702, 142] # 📐 right bottom coordinate of rune enable msg
+  diff_thres: 0.1          # 📏 Match threshold [0.0 ~ 1.0], higher = stricter match
 
 rune_detect:
   # ✨ Rune Detection Box
@@ -220,13 +249,10 @@ rune_detect:
   box_width: 350              # ↔️ Width of the detection region
   box_height: 150             # ↕️ Height of the detection region
   diff_thres: 0.2             # 📏 Match threshold [0.0 ~ 1.0], higher = stricter match
+  debug     : False           # 🔍 Draw rune boxes or not
 
 rune_find:
   # 🧭 Rune-Finding Behavior
-  # Defines the bot’s strategy for searching and interacting with the rune.
-  timeout: 1200                    # ⏳ Maximum time (in seconds) to keep searching before giving up
-                                   #     If the timeout is reached, the bot will fallback to route_rest.png and rest.
-  timeout_action: "change_channel" # 🧠 Options: "go_home" "change_channel"
   near_rune_duration: 10           # 🕒 Duration to interact with rune when a positive detection occurs
   rune_trigger_cooldown: 0.3       # 🕒 Cooldown for 'up' key rune trigger
   rune_trigger_distance_x: 20      # ↔️ only press 'up' when player distance(in pixel) to the rune is close enough.
@@ -243,6 +269,10 @@ rune_solver:
   arrow_box_diff_thres: 0.2    # 📏 Match threshold [0.0 ~ 1.0]
                                #     ↪ If the match score of the first arrow is lower than this,
                                #     the solver assumes the rune mini-game has started
+  arrow_low_hsv: [340, 40, 40]    # 🔴
+  arrow_high_hsv: [110, 100, 100] # 🔴
+  arrow_highlight_low_hsv: [340, 85, 85]    # 🔴
+  arrow_highlight_high_hsv: [110, 100, 100] # 🔴
 
 minimap:
   # 🗺️ Mini-Map
@@ -297,8 +327,8 @@ system:
   fps_limit_route_recorder: 10      # 🚥 Route recorder FPS
   fps_limit_auto_dice_roller: 1     # 🚥 Auto rice roller FPS
   key_debounce_interval: 1          # ⏱️ Cooldown (in seconds) between function key presses (e.g., F1, F2...)
-  server: "TW"                      # Options: "TW" "NA"
-  language: "chinese"               # Options: "english" "chinese"
+  server: "TW"                      # ⚙️ Options: "TW" "NA"
+  language: "cn"                    # ⚙️ Options: "eng" "cn"
 
 profiler:
   # ⚙️ Profiler

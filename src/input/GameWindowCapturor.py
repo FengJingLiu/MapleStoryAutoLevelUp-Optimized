@@ -12,32 +12,41 @@ import cv2
 
 # local import
 from src.utils.logger import logger
-from src.utils.common import get_game_window_title_by_token
+from src.utils.common import get_game_window_title_by_token, load_image
 
 class GameWindowCapturor:
     '''
     GameWindowCapturor
     '''
-    def __init__(self, cfg):
+    def __init__(self, cfg, test_image_name = None):
         self.cfg = cfg
         self.frame = None
         self.lock = threading.Lock()
         self.is_terminated = False
-
-        self.window_title = get_game_window_title_by_token(cfg["game_window"]["title"])
-        if self.window_title is None:
-            logger.error("[GameWindowCapturor] Unable to find windows "
-                        f"title that contains {cfg['game_window']['title']}")
-        else:
-            logger.info(f"[GameWindowCapturor] Found game window title: {self.window_title}")
-
-        self.capture = WindowsCapture(window_name=self.window_title)
-        self.capture.event(self.on_frame_arrived)
-        self.capture.event(self.on_closed)
-
         self.fps = 0
         self.fps_limit = cfg["system"]["fps_limit_window_capturor"]
         self.t_last_run = 0.0
+        self.capture_control = None
+        self.window_title = ""
+
+        # If use test image as input, disable the whole capture thread
+        if test_image_name is not None:
+            self.frame = load_image(f"test/{test_image_name}.png")
+            raise FileNotFoundError(f"[GameWindowCapturor] Test image not found: {test_image_name}")
+
+        # Get game window title
+        self.window_title = get_game_window_title_by_token(cfg["game_window"]["title"])
+        if self.window_title is None:
+            raise RuntimeError(
+                f"[GameWindowCapturor] Unable to find window title containing: {cfg['game_window']['title']}"
+            )
+        else:
+            logger.info(f"[GameWindowCapturor] Found game window title: {self.window_title}")
+
+        # Create capture handler
+        self.capture = WindowsCapture(window_name=self.window_title)
+        self.capture.event(self.on_frame_arrived)
+        self.capture.event(self.on_closed)
 
         # Start capturing thread
         self.capture_control = self.capture.start_free_threaded()
@@ -73,7 +82,8 @@ class GameWindowCapturor:
         '''
         Stop capturing thread
         '''
-        self.capture_control.stop()
+        if self.capture_control is not None:
+            self.capture_control.stop()
         logger.info("[GameWindowCapturor] Terminated")
 
     def limit_fps(self):

@@ -26,8 +26,7 @@ from src.utils.common import (find_pattern_sqdiff, draw_rectangle, screenshot, n
     click_in_game_window, mask_route_colors, to_opencv_hsv, debug_minimap_colors,
     activate_game_window, is_img_16_to_9,
 )
-
-from src.input.KeyBoardController import KeyBoardController
+from src.input.KeyBoardController import KeyBoardController, press_key
 from src.input.KeyBoardListener import KeyBoardListener
 if is_mac():
     from src.input.GameWindowCapturorForMac import GameWindowCapturor
@@ -35,6 +34,14 @@ else:
     from src.input.GameWindowCapturor import GameWindowCapturor
 from src.engine.HealthMonitor import HealthMonitor
 from src.engine.Profiler import Profiler
+from src.engine.RuneSolver import RuneSolver
+from src.engine.FiniteStateMachine import FiniteStateMachine
+from src.states.hunting import HuntingState
+from src.states.finding_rune import FindingRuneState
+from src.states.near_rune import NearRuneState
+from src.states.solving_rune import SolvingRuneState
+from src.states.auxiliary import AuxiliaryState
+from src.states.patrol import PatrolState
 
 class MapleStoryAutoBot:
     '''
@@ -46,7 +53,6 @@ class MapleStoryAutoBot:
         '''
         self.args = args # User args
         self.cfg = None # Configuration
-        self.status = "hunting" # 'finding_rune', 'near_rune'
         self.idx_routes = 0 # Index of route map
         self.monsters_info = {} # monster information
         self.monsters = [] # monster detected in current frame
@@ -56,6 +62,9 @@ class MapleStoryAutoBot:
         self.color_code = {} # For color code instruction
         self.color_code_up_down = {} # Color code only contain 'up' and 'down'
         self.thread_auto_bot = None # thread for running autobot
+        self.cmd_move_x = "none" # "left" "right"
+        self.cmd_move_y = "none" # "up" "down"
+        self.cmd_action = "none" # "jump" "attack" ....
         # Signals (for UI)
         self.image_debug_signal = None
         self.route_map_viz_signal = None
@@ -63,10 +72,10 @@ class MapleStoryAutoBot:
         self.is_first_frame = True # first frame flag
         self.is_terminated = False # Close all object and thread if True
         self.is_on_ladder = False # Character is on ladder or not
-        self.is_show_debug_window = args.viz_window #
-        self.is_need_show_debug_window = args.viz_window #
+        self.is_show_debug_window = not args.disable_viz #
+        self.is_need_show_debug_window = not args.disable_viz #
         self.is_disable_control = args.disable_control
-        self.is_ui = args.is_ui # Whether is using UI framework to invoke engine 
+        self.is_ui = args.is_ui # Whether is using UI framework to invoke engine
         self.is_frame_done = False #
         # Coordinate (top-left coordinate)
         self.loc_nametag = (0, 0) # nametag location on game screen
@@ -77,7 +86,6 @@ class MapleStoryAutoBot:
         self.loc_minimap_global = (0, 0) # minimap location on global map
         self.loc_player_global = (0, 0) # player location on global map
         self.loc_watch_dog = (0, 0) # watch dog location on global map
-        self.loc_rune = (0, 0) # rune location on game screen
         # Images
         self.frame = None # raw image
         self.img_frame = None # game window frame
@@ -88,46 +96,20 @@ class MapleStoryAutoBot:
         self.img_minimap = np.zeros((10, 10, 3), dtype=np.uint8) # minimap on game screen
         # Timers
         self.t_last_frame = time.time() # Last frame timer, for fps calculation
-        self.t_last_switch_status = time.time() # Last status switches timer
         self.t_watch_dog = time.time() # Last movement timer
         self.t_last_teleport = time.time() # Last teleport timer
-        self.t_patrol_last_attack = time.time() # Last patrol attack timer
         self.t_last_attack = time.time() # Last attack timer for cooldown
-        self.t_last_rune_trigger = time.time() # Last time trigger rune
-        self.t_rune_finding_start = 0 # Start time of rune finding. Reset when 'channel_change' and 'solve_rune'.
         self.t_last_minimap_update = time.time()
         self.t_to_change_channel = time.time()
-        # Patrol mode
-        self.is_patrol_to_left = True # Patrol direction flag
-        self.patrol_turn_point_cnt = 0 # Patrol tuning back counter
         # Images
         self.img_map = None
         self.img_routes = []
-        self.img_rune_warning = None
-        self.img_runes = []
         self.img_nametag = None
         self.img_nametag_gray = None
         self.img_create_party_enable = None
         self.img_create_party_disable = None
         self.img_login_button = None
-        self.img_arrows = {
-            "left":
-                [load_image("rune/arrow_left_1.png"),
-                load_image("rune/arrow_left_2.png"),
-                load_image("rune/arrow_left_3.png"),],
-            "right":
-                [load_image("rune/arrow_right_1.png"),
-                load_image("rune/arrow_right_2.png"),
-                load_image("rune/arrow_right_3.png"),],
-            "up":
-                [load_image("rune/arrow_up_1.png"),
-                load_image("rune/arrow_up_2.png"),
-                load_image("rune/arrow_up_3.png")],
-            "down":
-                [load_image("rune/arrow_down_1.png"),
-                load_image("rune/arrow_down_2.png"),
-                load_image("rune/arrow_down_3.png"),],
-        }
+
         # Database
         self.data = load_yaml("config/config_data.yaml")
         # Threads & Objects
@@ -135,6 +117,24 @@ class MapleStoryAutoBot:
         self.capture = None # Game window capturor
         self.health_monitor = None # Health monitor
         self.profiler = None # Profiler, for performance issue debugging
+        self.rune_solver = None # Rune solver
+
+        # Finite State Machine
+        self.fsm = FiniteStateMachine()
+        self.fsm.add_state(HuntingState    ("hunting"     , self))
+        self.fsm.add_state(FindingRuneState("finding_rune", self))
+        self.fsm.add_state(NearRuneState   ("near_rune"   , self))
+        self.fsm.add_state(SolvingRuneState("solving_rune", self))
+        self.fsm.add_state(AuxiliaryState  ("aux"         , self))
+        self.fsm.add_state(PatrolState     ("patrol"      , self))
+        self.fsm.add_transition("hunting", "finding_rune")
+        self.fsm.add_transition("finding_rune", "hunting")
+        self.fsm.add_transition("finding_rune", "near_rune")
+        self.fsm.add_transition("finding_rune", "solving_rune")
+        self.fsm.add_transition("near_rune", "finding_rune")
+        self.fsm.add_transition("near_rune", "solving_rune")
+        self.fsm.add_transition("solving_rune", "hunting")
+        self.fsm.set_init_state("hunting")
 
     def update_signals(self, image_debug_signal, route_map_viz_signal):
         '''
@@ -158,11 +158,13 @@ class MapleStoryAutoBot:
             for k, v in cfg["route"]["color_code_up_down"].items()
         }
 
-        # Set status to hunting for startup
+        # Set init state
         if cfg["bot"]["mode"] == "aux":
-            self.switch_status("aux")
+            self.fsm.set_init_state("aux")
+        elif cfg["bot"]["mode"] == "patrol":
+            self.fsm.set_init_state("patrol")
         else:
-            self.switch_status("hunting")
+            self.fsm.set_init_state("hunting")
 
         if cfg["bot"]["mode"] == "normal":
             map_name = cfg['bot']['map']
@@ -212,28 +214,11 @@ class MapleStoryAutoBot:
             self.img_nametag_gray = load_image(f"nametag/{cfg['nametag']['name']}.png",
                                                cv2.IMREAD_GRAYSCALE)
 
-        # Load rune images from rune/
-        rune_ver = cfg["system"]["language"]
-        if rune_ver == "chinese":
-            self.img_rune_warning = load_image("rune/rune_warning.png",
-                                               cv2.IMREAD_GRAYSCALE)
-        elif rune_ver == "english":
-            self.img_rune_warning = load_image("rune/rune_warning_eng.png",
-                                               cv2.IMREAD_GRAYSCALE)
-        else:
-            logger.error(f"Unsupported rune warning version: {rune_ver}")
-
-        self.img_runes = [load_image("rune/rune_1.png"),
-                          load_image("rune/rune_2.png"),
-                          load_image("rune/rune_3.png"),]
-        if rune_ver == "english":
-            self.img_runes[1] = load_image("rune/rune_2_eng.png")
-
         # Load misc image
-        # TODO: english version
-        self.img_create_party_enable  = load_image("misc/party_button_create_enable.png")
-        self.img_create_party_disable = load_image("misc/party_button_create_disable.png")
-        self.img_login_button = load_image("misc/login_button_cn.png") # TODO eng version
+        lang = cfg["system"]["language"]
+        self.img_create_party_enable  = load_image(f"misc/party_button_create_enable_{lang}.png")
+        self.img_create_party_disable = load_image(f"misc/party_button_create_disable_{lang}.png")
+        self.img_login_button = load_image(f"misc/login_button_{lang}.png")
 
         # Print mode on log
         logger.info(f"[load_config] Config AutoBot as {cfg['bot']['mode']} mode")
@@ -253,9 +238,10 @@ class MapleStoryAutoBot:
             self.kb.disable() # Disable keyboard controller for debugging
 
         # Start game window capturing thread
-        logger.info("Waiting for game window to activate,"
-                    "please click on game window")
-        self.capture = GameWindowCapturor(self.cfg)
+        if self.args.test_image == '':
+            self.capture = GameWindowCapturor(self.cfg)
+        else:
+            self.capture = GameWindowCapturor(self.cfg, self.args.test_image)
 
         # Start health monitoring thread
         self.health_monitor = HealthMonitor(self.cfg, self.kb)
@@ -263,12 +249,16 @@ class MapleStoryAutoBot:
             not self.is_disable_control:
             self.health_monitor.start()
 
-        # Start profiler
+        # Init profiler
         self.profiler = Profiler(self.cfg)
+
+        # Init rune solver
+        self.rune_solver = RuneSolver(self.cfg)
 
         # Start Auto Bot main thread
         self.thread_auto_bot = threading.Thread(target=self.loop)
         self.thread_auto_bot.start()
+        self.is_first_frame = True
 
         logger.info("[MapleStoryAutoBot] Started")
 
@@ -636,7 +626,33 @@ class MapleStoryAutoBot:
 
         return nearest, nearest_up_down  # if not found return none
 
-    def get_nearest_monster(self, is_left = True):
+    def get_attack_range(self, is_left=True):
+        '''
+        get_attack_range
+        '''
+        if self.cfg["bot"]["attack"] == "aoe_skill":
+            dx = self.cfg["aoe_skill"]["range_x"] // 2
+            dy = self.cfg["aoe_skill"]["range_y"] // 2
+            x0 = max(0, self.loc_player[0] - dx)
+            x1 = min(self.img_frame.shape[1], self.loc_player[0] + dx)
+            y0 = max(0, self.loc_player[1] - dy)
+            y1 = min(self.img_frame.shape[0], self.loc_player[1] + dy)
+
+        elif self.cfg["bot"]["attack"] == "directional":
+            if is_left:
+                x0 = self.loc_player[0] - self.cfg["directional_attack"]["range_x"]
+                x1 = self.loc_player[0]
+            else:
+                x0 = self.loc_player[0]
+                x1 = x0 + self.cfg["directional_attack"]["range_x"]
+            y0 = self.loc_player[1] - self.cfg["directional_attack"]["range_y"] // 2
+            y1 = y0 + self.cfg["directional_attack"]["range_y"]
+        else:
+            raise RuntimeError(f"Unsupported attack mode: {self.cfg['bot']['attack']}")
+
+        return (x0, y0, x1, y1)
+
+    def get_nearest_monster(self, is_left=True):
         '''
         Finds the nearest monster within the player's attack range.
 
@@ -653,33 +669,8 @@ class MapleStoryAutoBot:
         Returns:
             dict or None: The nearest monster's info dict, or None if no valid match.
         '''
-        # Get attack box
-        if self.cfg["bot"]["attack"] == "aoe_skill":
-            dx = self.cfg["aoe_skill"]["range_x"] // 2
-            dy = self.cfg["aoe_skill"]["range_y"] // 2
-            x0 = max(0, self.loc_player[0] - dx)
-            x1 = min(self.img_frame.shape[1], self.loc_player[0] + dx)
-            y0 = max(0, self.loc_player[1] - dy)
-            y1 = min(self.img_frame.shape[0], self.loc_player[1] + dy)
-        elif self.cfg["bot"]["attack"] == "directional":
-            if is_left:
-                x0 = self.loc_player[0] - self.cfg["directional_attack"]["range_x"]
-                x1 = self.loc_player[0]
-            else:
-                x0 = self.loc_player[0]
-                x1 = x0 + self.cfg["directional_attack"]["range_x"]
-            y0 = self.loc_player[1] - self.cfg["directional_attack"]["range_y"] // 2
-            y1 = y0 + self.cfg["directional_attack"]["range_y"]
-        else:
-            logger.error(f"Unsupported attack mode: {self.cfg['bot']['attack']}")
-            return None
 
-        # Draw attack box on debug window
-        draw_rectangle(
-            self.img_frame_debug, (x0, y0),
-            (y1-y0, x1-x0),
-            (0, 0, 255), "Attack Range"
-        )
+        x0, y0, x1, y1 = self.get_attack_range(is_left=is_left)
 
         nearest_monster = None
         min_distance = float('inf')
@@ -896,22 +887,6 @@ class MapleStoryAutoBot:
 
         return monsters
 
-    def switch_status(self, new_status):
-        '''
-        Switch to new status and log the transition.
-
-        Parameters:
-        - new_status: string, the new status to switch to.
-        '''
-        # Ignore dummy transition
-        if self.status == new_status:
-            return
-
-        t_elapsed = round(time.time() - self.t_last_switch_status)
-        logger.info(f"[switch_status] From {self.status}({t_elapsed} sec) to {new_status}.")
-        self.status = new_status
-        self.t_last_switch_status = time.time()
-
     def get_img_frame(self):
         '''
         get_img_frame
@@ -923,7 +898,9 @@ class MapleStoryAutoBot:
             return
 
         # Make sure the window ratio is as expected
-        if self.cfg["bot"]["mode"] == "aux":
+        if self.args.test_image != "":
+            pass # Disable size check if using test image for debugging
+        elif self.cfg["bot"]["mode"] == "aux":
             if not is_img_16_to_9(self.frame, self.cfg): # Aux mode allow 16:9 resolution
                 text = f"Unexpeted window size: {self.frame.shape[:2]} (expect window ratio 16:9)\n"
                 text += "Please use windowed mode & smallest resolution."
@@ -941,71 +918,6 @@ class MapleStoryAutoBot:
         # Resize raw frame to (1296, 759)
         return cv2.resize(self.frame, (1296, 759),
                    interpolation=cv2.INTER_NEAREST)
-
-    def solve_rune(self):
-        '''
-        Automatically solves the rune puzzle mini-game by recognizing directional arrows
-        on the screen and simulating the correct key presses.
-
-        This function:
-        - Continuously checks whether the rune game is active.
-        - For each of the 4 arrows:
-            - Compares the cropped image with all known arrow templates.
-            - Selects the best-matching arrow direction.
-            - Simulates a key press corresponding to the detected arrow direction.
-        - Repeats until the rune game ends.
-
-        Note:
-            - Skips key press simulation if `--disable_control` flag is set.
-
-        Returns:
-            None
-        '''
-        while self.is_in_rune_game():
-            for arrow_idx in [0,1,2,3]:
-                # Get lastest game screen frame buffer
-                self.img_frame = self.get_img_frame()
-
-                # Crop arrow detection box
-                x0, y0 = self.cfg["rune_solver"]["arrow_box_coord"]
-                x = x0 + self.cfg["rune_solver"]["arrow_box_interval"] * arrow_idx
-                y = y0
-                size = self.cfg["rune_solver"]["arrow_box_size"]
-                img_roi = self.img_frame[y:y+size, x:x+size]
-
-                # Loop through all possible arrows template and choose the most possible one
-                best_score = float('inf')
-                best_direction = ""
-                for direction, arrow_list in self.img_arrows.items():
-                    for img_arrow in arrow_list:
-                        _, score, _ = find_pattern_sqdiff(
-                                        img_roi, img_arrow,
-                                        mask=get_mask(img_arrow, (0, 255, 0)))
-                        if score < best_score:
-                            best_score = score
-                            best_direction = direction
-                logger.info(f"[solve_rune] Arrow({arrow_idx}) is {best_direction} with score({best_score})")
-
-                # Update img_frame_debug
-                self.img_frame_debug = self.img_frame.copy()
-                draw_rectangle(
-                    self.img_frame_debug, (x, y), (size, size),
-                    (0, 0, 255), str(round(best_score, 2))
-                )
-                # Update debug window
-                if not self.is_ui:
-                    self.update_img_frame_debug()
-                    cv2.waitKey(1)
-
-                # For logging
-                screenshot(self.img_frame_debug, "solve_rune")
-
-                # Press the key for 0.5 second
-                if not self.is_disable_control:
-                    self.kb.press_key(best_direction, 0.5)
-                time.sleep(1)
-
-        logger.info(f"[solve_rune] Solved all arrows")
 
     def is_player_stuck(self):
         """
@@ -1038,37 +950,9 @@ class MapleStoryAutoBot:
             # watch dog idle for too long, player stuck
             self.loc_watch_dog = self.loc_player_global
             self.t_watch_dog = current_time
-            logger.warning(f"[is_player_stuck] Player stuck for {dt} seconds.")
+            logger.warning(f"[is_player_stuck] Player stuck for {round(dt, 2)} seconds.")
             return True
         return False
-
-    def is_rune_warning(self):
-        '''
-        Checks whether the rune warning icon is appear on the game frame.
-
-        This function:
-        - Crops a specific region where the rune warning icon is expected.
-        - Compare the cropped region against the known rune warning image template.
-        - Returns True if rune warning template matched
-
-        Returns:
-            bool: True if the rune warning is detected, False otherwise.
-        '''
-        x0, y0 = self.cfg["rune_warning"]["top_left"]
-        x1, y1 = self.cfg["rune_warning"]["bottom_right"]
-
-        # Debugre
-        # draw_rectangle(
-        #     self.img_frame_debug, (x0, y0), (y1-y0, x1-x0),
-        #     (0, 0, 255), "")
-        _, score, _ = find_pattern_sqdiff(
-                        self.img_frame_gray[y0:y1, x0:x1],
-                        self.img_rune_warning)
-        if self.status == "hunting" and score < self.cfg["rune_warning"]["diff_thres"]:
-            logger.info(f"[is_rune_warning] Detect rune warning on screen with score({score})")
-            return True
-        else:
-            return False
 
     def screenshot_img_frame(self):
         '''
@@ -1078,150 +962,6 @@ class MapleStoryAutoBot:
             logger.error("[screenshot_img_frame] Failed, game window is not available")
         else:
             screenshot(self.img_frame)
-
-    def update_rune_location(self):
-        '''
-        Checks if a rune icon is visible around the player's position.
-
-        This function:
-        - Uses template matching to detect the rune icon within this predefine box.
-
-        Returns:
-            nearest rune
-        '''
-        # Calculate bounding box
-        h, w = self.img_frame.shape[:2]
-        h_rune_box = self.cfg["rune_detect"]["box_height"]
-        w_rune_box = self.cfg["rune_detect"]["box_width"]
-        x0 = max(0, self.loc_player[0] - w_rune_box // 2)
-        y0 = max(0, self.loc_player[1] - h_rune_box)
-        x1 = min(w, self.loc_player[0] + w_rune_box // 2)
-        y1 = min(h, self.loc_player[1])
-
-        # Debug
-        draw_rectangle(
-            self.img_frame_debug, (x0, y0), (y1-y0, x1-x0),
-            (255, 0, 0), "Rune Detection Range"
-        )
-
-        # Make sure ROI is large enough to hold a full rune
-        max_rune_height = max(r.shape[0] for r in self.img_runes)
-        max_rune_width  = max(r.shape[1] for r in self.img_runes)
-        if (x1 - x0) < max_rune_width or (y1 - y0) < max_rune_height:
-            return  # Skip check if box is out of range
-
-        # Extract ROI near player
-        img_roi = self.img_frame[y0:y1, x0:x1]
-
-        # Match each rune part separately
-        matches = []
-        for i, img_rune in enumerate(self.img_runes):
-            mask = get_mask(img_rune, (0, 255, 0))
-            loc, score, _ = find_pattern_sqdiff(img_roi, img_rune, mask=mask)
-            matches.append((i, loc, score, img_rune.shape))
-
-        # # Matches box debug
-        # for i, (part_idx, loc, score, shape) in enumerate(matches):
-        #     draw_rectangle(
-        #         self.img_frame_debug,
-        #         (x0 + loc[0], y0 + loc[1]),
-        #         shape,
-        #         (255, 255, 0),
-        #         f"{i},{round(score, 2)}",
-        #         thickness=1,
-        #         text_height=0.4
-        #     )
-
-        # Filter out good matches
-        good_matches = [
-            (i, loc, score, shape)
-            for (i, loc, score, shape) in matches
-            if score < self.cfg["rune_detect"]["diff_thres"]
-        ]
-
-        # Remove overlapping matches
-        good_matches = nms_matches(good_matches)
-
-        # Require at least 2 rune parts
-        if len(good_matches) < 2:
-            return
-
-        # Horizontal: max distance between part's centers are small
-        x_centers = [x0 + loc[0] + shape[1] // 2 for (_, loc, _, shape) in good_matches]
-        if max(x_centers) - min(x_centers) > 10:
-            return
-
-        # Vertical: check if all Y's are strictly increasing
-        ys = [y0 + loc[1] for (_, loc, _, _) in good_matches]
-        if not all(ys[i] < ys[i + 1] for i in range(len(ys) - 1)):
-            return
-
-        logger.info(f"[Rune Detect] Found rune parts near player with scores:"
-                    f" {[round(s, 2) for (_, _, s, _) in matches]}")
-
-        # Update rune location
-        self.loc_rune = (int(sum(x_centers) / len(x_centers)),
-                         int(sum(ys) / len(ys)))
-
-        # Draw all parts on debug window
-        for (i, loc, score, shape) in matches:
-            draw_rectangle(
-                self.img_frame_debug,
-                (x0 + loc[0], y0 + loc[1]),
-                shape,
-                (255, 0, 255),
-                f"{i},{round(score, 2)}",
-                text_height=0.5,
-                thickness=1
-            )
-
-        # Draw rune location on debug window
-        cv2.circle(self.img_frame_debug, self.loc_rune,
-                   radius=5, color=(0, 255, 255), thickness=-1)
-
-        screenshot(self.img_frame_debug, "rune_detected")
-
-    def is_in_rune_game(self):
-        '''
-        Determines whether the rune puzzle game screen is currently active.
-
-        This function:
-        - Extracts the RoI where the first arrow of the rune puzzle appears.
-        - Performs masked template matching with all known arrow templates.
-        - Computes the best matching score across all arrow directions.
-        - If the best match score is below a threshold,
-          the rune puzzle is considered active.
-
-        Returns:
-            bool: True if the rune game is detected on screen, False otherwise.
-        '''
-        # Get lastest game screen frame buffer
-        self.img_frame = self.get_img_frame()
-
-        # Crop arrow detection box
-        x, y = self.cfg["rune_solver"]["arrow_box_coord"]
-        size = self.cfg["rune_solver"]["arrow_box_size"]
-        img_roi = self.img_frame[y:y+size, x:x+size]
-
-        # Check if arrow exist on screen
-        best_score = float('inf')
-        for direc, arrow_list in self.img_arrows.items():
-            for img_arrow in arrow_list:
-                _, score, _ = find_pattern_sqdiff(
-                                img_roi, img_arrow,
-                                mask=get_mask(img_arrow, (0, 255, 0)))
-                if score < best_score:
-                    best_score = score
-
-        draw_rectangle(
-            self.img_frame_debug, (x, y), (size, size),
-            (0, 0, 255), str(round(best_score, 2))
-        )
-
-        if best_score < self.cfg["rune_solver"]["arrow_box_diff_thres"]:
-            logger.info(f"Arrow screen detected with score({score})")
-            return True
-        return False
 
     def is_near_edge(self):
         '''
@@ -1274,16 +1014,6 @@ class MapleStoryAutoBot:
         else:
             return "edge on right"
 
-    def get_random_action(self):
-        '''
-        get_random_action - pick a random action except 'up' and teleport command
-        '''
-        cmd_left_right = random.choice(["left", "right", "none"])
-        cmd_up_down = random.choice(["down", "none"])
-        cmd_action = random.choice(["jump", "none"])
-        logger.warning(f"Perform random command: {cmd_left_right} {cmd_up_down} {cmd_action}")
-        return cmd_left_right, cmd_up_down, cmd_action
-
     def update_info_on_img_frame_debug(self):
         '''
         update_info_on_img_frame_debug
@@ -1296,7 +1026,7 @@ class MapleStoryAutoBot:
         h, w = self.frame.shape[:2]
         text_list = [
             f"FPS: {self.fps}",
-            f"Status: {self.status}",
+            f"State: {self.fsm.state.name}",
             f"Resolution: {h}x{w}, Ratio: {round(w/h, 2)}",
             f"Press 'F1' to {'pause' if self.kb.is_enable else 'start'} Bot",
             f"Press 'F2' to save screenshot{' : Saved' if dt_screenshot < 0.7 else ''}",
@@ -1307,6 +1037,28 @@ class MapleStoryAutoBot:
                 (10, text_y_start + text_y_interval*idx),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255),
                 2, cv2.LINE_AA
+            )
+
+        # Draw attack box on debug window
+        if self.cfg["bot"]["attack"] == "aoe_skill":
+            x0, y0, x1, y1 = self.get_attack_range()
+            draw_rectangle(
+                self.img_frame_debug, (x0, y0),
+                (y1-y0, x1-x0),
+                (0, 0, 255), "Attack Range"
+            )
+        elif self.cfg["bot"]["attack"] == "directional":
+            x0, y0, x1, y1 = self.get_attack_range(is_left=True)
+            draw_rectangle(
+                self.img_frame_debug, (x0, y0),
+                (y1-y0, x1-x0),
+                (0, 0, 255), "Attack Range(Left)"
+            )
+            x0, y0, x1, y1 = self.get_attack_range(is_left=False)
+            draw_rectangle(
+                self.img_frame_debug, (x0, y0),
+                (y1-y0, x1-x0),
+                (0, 0, 255), "Attack Range(Right)"
             )
 
         # Draw minimap rectangle on img debug
@@ -1371,6 +1123,10 @@ class MapleStoryAutoBot:
             self.img_frame_debug[y_s+30*i:y_s+h+30*i, x_s:x_s+w] = \
                 self.img_frame[self.cfg["camera"]["y_end"]:, :][y:y+h, x:x+w]
 
+        # Print command on screen
+        cv2.putText(self.img_frame_debug, f"Cmd: {self.cmd_move_x} {self.cmd_move_y} {self.cmd_action}",
+                    (10, 480), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+
     def update_img_frame_debug(self):
         '''
         update_img_frame_debug
@@ -1386,7 +1142,7 @@ class MapleStoryAutoBot:
         ensure_is_in_party
         '''
         # open party window
-        self.kb.press_key(self.cfg["key"]["party"])
+        press_key(self.cfg["key"]["party"])
 
         # Wait party window to show up
         time.sleep(0.5)
@@ -1397,16 +1153,21 @@ class MapleStoryAutoBot:
         # Find the 'create party' button
         loc_enable, score_enable, _ = find_pattern_sqdiff(
                         self.img_frame, self.img_create_party_enable)
-        if score_enable < self.cfg["party_red_bar"]["create_party_button_thres"]:
+
+        lang = self.cfg["system"]["language"]
+        thres = self.cfg['party_red_bar'][f'create_party_button_{lang}_thres']
+        if score_enable < thres:
+            logger.info(f"[ensure_is_in_party] Find party enable button({round(score_enable, 2)})")
             h, w = self.img_create_party_enable.shape[:2]
             click_in_game_window(self.cfg["game_window"]["title"],
                 (loc_enable[0] + w // 2, loc_enable[1] + h // 2)
             )
         else:
-            logger.info("Cannot find create party button. Maybe player is in party already?")
+            logger.info("[ensure_is_in_party] Cannot find create party button."
+                        "Maybe player already in party.")
 
         # close party window
-        self.kb.press_key(self.cfg["key"]["party"])
+        press_key(self.cfg["key"]["party"])
 
     def channel_change(self):
         '''
@@ -1445,10 +1206,8 @@ class MapleStoryAutoBot:
 
         self.ensure_is_in_party() # Make sure player is in party
 
-        self.switch_status("hunting")
-
-        # Clear rune finding timer after channel change
-        self.t_rune_finding_start = 0
+        self.fsm.set_init_state("hunting")
+        self.t_last_attack = time.time() # Update timer
 
     def terminate_threads(self):
         '''
@@ -1557,10 +1316,11 @@ class MapleStoryAutoBot:
         #logger.info(f"[is_need_change_channel] Center of mass = {center}")
 
         # Change channel
-        if self.cfg["channel_change"]["mode"] == "true":
+        mode = self.cfg["channel_change"]["mode"]
+        if mode == "true":
             logger.warning("[is_need_change_channel] Player detected, immediately change channel.")
             return True
-        elif self.cfg["channel_change"]["mode"] == "pixel":
+        elif mode == "pixel":
             if self.red_dot_center_prev is None:
                 self.red_dot_center_prev = center
             else:
@@ -1573,20 +1333,20 @@ class MapleStoryAutoBot:
                     logger.warning(f"Other player movement > {thres} pixel detected. "
                                 "Trigger channel change.")
                     return True
+        else:
+            logger.error(f"[is_need_change_channel] Unsupported mode: {mode}")
+
         return False
 
-    def time_to_change_channel(self):
+    def is_time_to_change_channel(self):
         '''
-        time_to_change_channel
+        is_time_to_change_channel
         '''
         if not self.cfg["scheduled_channel_switching"]["enable"]:
             return False
-        current_time = time.time()
-        dt = current_time - self.t_to_change_channel
+        dt = time.time() - self.t_to_change_channel
         if dt > self.cfg["scheduled_channel_switching"]["interval_seconds"]:
             self.t_to_change_channel = time.time()
-            self.t_last_switch_status = time.time()
-            self.status = "hunting"
             return True
         return False
 
@@ -1603,18 +1363,116 @@ class MapleStoryAutoBot:
         loc, score, _ = find_pattern_sqdiff(
                         img_roi, self.img_login_button)
         if score < self.cfg["ui_coords"]["login_button_thres"]:
-            h, w = self.img_create_party_enable.shape[:2]
+            h, w = self.img_login_button.shape[:2]
             logger.info(f"[get_login_button_location] Found login button with score({score})")
             return (x0 + loc[0] + w // 2, y0 + loc[1] + h // 2)
         else:
             return None
 
+    def update_cmd_by_route(self):
+        # get color code from img_route
+        color_code, color_code_up_down = self.get_nearest_color_code()
+        # Use color_code and color_code_up_down to complement each other
+        # To prevent character stuck at the end of ladder, we use two color color pixels
+        # and let them complement with each other, to ensure smoothy ladder climbing
+        if color_code and color_code_up_down:
+            if color_code["distance"] < color_code_up_down["distance"]:
+                self.cmd_move_x, self.cmd_move_y, self.cmd_action = color_code["command"].split()
+                _, cmd, _ = color_code_up_down["command"].split()
+                if self.cmd_move_y == "none" and self.is_on_ladder:
+                    self.cmd_move_y = cmd # only complement cmd_move_y when player is on ladder
+            else:
+                self.cmd_move_x, self.cmd_move_y, self.cmd_action = color_code_up_down["command"].split()
+                cmd, _, _ = color_code["command"].split()
+                if self.cmd_move_x == "none" and self.is_on_ladder:
+                    self.cmd_move_x = cmd # only complement cmd_move_x when player is on ladder
+        elif color_code:
+            self.cmd_move_x, self.cmd_move_y, self.cmd_action = color_code["command"].split()
+        elif color_code_up_down:
+            self.cmd_move_x, self.cmd_move_y, self.cmd_action = color_code_up_down["command"].split()
+
+        # teleport away from edge to avoid falling off cliff
+        if self.is_near_edge() and \
+            time.time() - self.t_last_teleport > self.cfg["teleport"]["cooldown"]:
+            self.cmd_action = "teleport"
+            self.t_last_teleport = time.time() # update timer
+
+        # replace teleport to jump if user doesn't set teleport key
+        if self.cfg["key"]["teleport"] == "" and self.cmd_action == "teleport":
+            self.cmd_action = "jump"
+
+    def update_cmd_by_mob_detection(self):
+        # Get monster search box
+        margin = self.cfg["monster_detect"]["search_box_margin"]
+        if self.cfg["bot"]["attack"] == "aoe_skill":
+            dx = self.cfg["aoe_skill"]["range_x"] // 2 + margin
+            dy = self.cfg["aoe_skill"]["range_y"] // 2 + margin
+            cooldown = self.cfg["aoe_skill"]["cooldown"]
+        elif self.cfg["bot"]["attack"] == "directional":
+            dx = self.cfg["directional_attack"]["range_x"] + margin
+            dy = self.cfg["directional_attack"]["range_y"] + margin
+            cooldown = self.cfg["directional_attack"]["cooldown"]
+        else:
+            raise RuntimeError(f"Unsupported attack mode: {self.cfg['bot']['attack']}")
+        x0 = max(0                      , self.loc_player[0] - dx)
+        x1 = min(self.img_frame.shape[1], self.loc_player[0] + dx)
+        y0 = max(0                      , self.loc_player[1] - dy)
+        y1 = min(self.img_frame.shape[0], self.loc_player[1] + dy)
+
+        # Get monsters in the search box
+        self.monsters = self.get_monsters_in_range((x0, y0), (x1, y1))
+
+        # Check if no mob to attack
+        if len(self.monsters) == 0:
+            return
+
+        # Update attack command
+        if self.cfg["bot"]["attack"] == "aoe_skill":
+            if time.time() - self.t_last_attack > cooldown:
+                self.cmd_action = "attack"
+                self.t_last_attack = time.time()
+
+        elif self.cfg["bot"]["attack"] == "directional":
+            # Get nearest monster to player
+            monster_left  = self.get_nearest_monster(is_left = True)
+            monster_right = self.get_nearest_monster(is_left = False)
+            # Determine attack direction
+            attack_direction = self.get_attack_direction(monster_left, monster_right)
+            # Attack Command
+            if time.time() - self.t_last_attack > cooldown and attack_direction is not None:
+                self.cmd_action = "attack"
+                self.t_last_attack = time.time()
+                # Set up attack direction
+                self.cmd_move_x = attack_direction
+
+    def update_cmd_by_random(self):
+        '''
+        update_cmd_by_random - pick a random action except 'up' and teleport command
+        '''
+        self.cmd_move_x = random.choice(["left", "right", "none"])
+        self.cmd_move_y = random.choice(["down", "none"])
+        self.cmd_action = random.choice(["jump", "none"])
+        logger.warning("[update_cmd_by_random]"\
+                    f"{self.cmd_move_x} {self.cmd_move_y} {self.cmd_action}")
+
+    def check_reach_goal(self):
+        if self.cmd_action == "goal":
+            # Switch to next route map
+            self.idx_routes = (self.idx_routes+1)%len(self.img_routes)
+            logger.debug(f"Change to new route:{self.idx_routes}")
+
     def run_once(self):
         '''
         Process one game window frame
         '''
-        # Start prfiler for performance debugging
+        # Start profiler for performance debugging
         self.profiler.start()
+
+        # Make sure player is in party
+        if self.is_first_frame and not is_mac():
+            activate_game_window(self.capture.window_title)
+            time.sleep(0.3)
+            self.ensure_is_in_party()
 
         # Check if need viz window
         self.is_show_debug_window = self.is_need_show_debug_window
@@ -1622,6 +1480,9 @@ class MapleStoryAutoBot:
             self.img_frame_debug = None
             self.img_route_debug = None
 
+        ###########################
+        ### Image Preprocessing ###
+        ###########################
         # Get game window frame
         img_frame = self.get_img_frame()
         if img_frame is None:
@@ -1630,19 +1491,30 @@ class MapleStoryAutoBot:
             return -1 # Wait for game window to be ready
         else:
             self.img_frame = img_frame
+
         # Grayscale game window
         self.img_frame_gray = cv2.cvtColor(self.img_frame, cv2.COLOR_BGR2GRAY)
 
-        # Image for debug use
+        # Image for debug viz
         if self.is_show_debug_window:
             self.img_frame_debug = self.img_frame.copy()
 
+        # Get current route image
+        if self.cfg["bot"]["mode"] == "normal":
+            self.img_route = self.img_routes[self.idx_routes]
+            if self.is_show_debug_window:
+                self.img_route_debug = cv2.cvtColor(self.img_route, cv2.COLOR_RGB2BGR)
+
         self.profiler.mark("Image Preprocessing")
 
+        ###################
+        ### Get Minimap ###
+        ###################
         # Get minimap coordinate and size on game window
         minimap_result = get_minimap_loc_size(self.img_frame)
         if minimap_result is None:
             if time.time() - self.t_last_minimap_update > 30:
+                # Unable to get minimap for 30 seconds -> assume it's login screen
                 loc_login_button = self.get_login_button_location()
                 if loc_login_button:
                     logger.info("Found login button on screen. Proceed to login.")
@@ -1654,39 +1526,24 @@ class MapleStoryAutoBot:
                     time.sleep(2)
         else:
             x, y, w, h = minimap_result
-
-            # Apply minimap position offset (adjust these values as needed)
-            # Positive values move right and down, negative values move left and up
-            # TODO: change h,w as well
-            x_offset = 1  # Move 2 pixels to the right
-            y_offset = 1  # Move 2 pixels down
-
-            x += x_offset
-            y += y_offset
-
+            # Shrink minimap boardary by one pixel to avoid pixel leaking to minimap
+            x += 1
+            y += 1
+            w -= 2
+            h -= 2
+            # update minimap image
             self.loc_minimap = (x, y)
             self.img_minimap = self.img_frame[y:y+h, x:x+w]
-            t_last_minimap_update = time.time() # update timer
-        self.profiler.mark("get_minimap_loc_size")
+            self.t_last_minimap_update = time.time()
 
-        # Get current route image
-        if self.cfg["bot"]["mode"] == "normal":
-            self.img_route = self.img_routes[self.idx_routes]
-            if self.is_show_debug_window:
-                self.img_route_debug = cv2.cvtColor(self.img_route, cv2.COLOR_RGB2BGR)
+        self.profiler.mark("Get Minimap Location and Size")
 
         # Update health monitor with current frame
         self.health_monitor.update_frame(self.img_frame[self.cfg["camera"]["y_end"]:, :])
 
-        self.profiler.mark("Health Monitor")
-
-        # Check whether "Please remove runes" warning appears on screen
-        if self.is_rune_warning():
-            self.loc_rune = None
-            self.switch_status("finding_rune") # Stop hunting and start find runes
-
-        self.profiler.mark("Rune Warning Detection")
-
+        #################################
+        ### Player Location Detection ###
+        #################################
         # Get player location in game window
         if self.cfg["nametag"]["enable"]:
             loc_player = self.get_player_location_by_nametag()
@@ -1715,8 +1572,6 @@ class MapleStoryAutoBot:
                 self.loc_player, radius=3,
                 color=(0, 0, 255), thickness=-1)
 
-        self.profiler.mark("Nametag Detection")
-
         # Get player location on minimap
         loc_player_minimap = get_player_location_on_minimap(
                                 self.img_minimap,
@@ -1724,36 +1579,14 @@ class MapleStoryAutoBot:
         if loc_player_minimap:
             self.loc_player_minimap = loc_player_minimap
 
-        self.profiler.mark("Player Location Detection")
-
-        # Get other player location on minimap & change channel
-
-        # 調試：分析小地圖顏色（只在第一次執行時）
-        # if self.is_first_frame:
-        #     logger.info("Running minimap color analysis...")
-        #     debug_minimap_colors(self.img_minimap, other_player_color)
-
+        # Get other player location on minimap
         loc_other_players = get_all_other_player_locations_on_minimap(
                                 self.img_minimap,
                                 self.cfg['minimap']['other_player_color'])
-        if self.is_need_change_channel(loc_other_players):
-            self.kb.set_command("none none none")
-            self.kb.release_all_key()
-            self.kb.disable()
-            time.sleep(1)
-            self.channel_change()
-            self.red_dot_center_prev = None
-            return
-
-        self.profiler.mark("Other Player Location Detection")
-
-        if self.time_to_change_channel():
-            self.kb.set_command("none none none")
-            self.kb.release_all_key()
-            self.kb.disable()
-            time.sleep(1)
-            self.channel_change()
-            return
+        # Debug
+        # if self.is_first_frame:
+        #     logger.info("Running minimap color analysis...")
+        #     debug_minimap_colors(self.img_minimap, other_player_color)
 
         # Get player location on global map
         if self.cfg["bot"]["mode"] in ["patrol", "aux"]:
@@ -1761,246 +1594,61 @@ class MapleStoryAutoBot:
         else:
             self.loc_player_global = self.get_player_location_on_global_map()
 
-        self.profiler.mark("Global Map Matching")
+        self.profiler.mark("Player Location Detection")
 
-        # Check whether a rune icon is near player
-        if self.status == "finding_rune":
+        ######################
+        ### Change Channel ###
+        ######################
+        if self.cfg['channel_change']['enable'] and \
+            self.is_need_change_channel(loc_other_players):
+            self.kb.set_command("none none none")
+            self.kb.release_all_key()
+            self.kb.disable()
+            time.sleep(1)
+            self.channel_change()
+            self.red_dot_center_prev = None
+            return 0
 
-            # Start timer when entering finding_rune status
-            if self.t_rune_finding_start == 0:
-                self.t_rune_finding_start = time.time()
+        if self.is_time_to_change_channel():
+            self.kb.set_command("none none none")
+            self.kb.release_all_key()
+            self.kb.disable()
+            time.sleep(1)
+            self.channel_change()
+            return 0
 
-            self.update_rune_location()
-            if self.loc_rune is not None:
-                self.switch_status("near_rune")
-                logger.info(abs(self.loc_player[0] - self.loc_rune[0]))
+        self.profiler.mark("Change Channel")
 
-        # Check whether we entered the rune mini-game
-        if self.status == "near_rune" and (not self.is_disable_control):
-            # Update rune location
-            self.update_rune_location()
-
-            dt = time.time() - self.t_last_rune_trigger
-            dx = abs(self.loc_player[0] - self.loc_rune[0])
-            dy = abs(self.loc_player[1] - self.loc_rune[1])
-            logger.info(f"[Near Rune] Player distance to rune: ({dx}, {dy})")
-
-            # Check if close enough to trigger the rune
-            if dt > self.cfg["rune_find"]["rune_trigger_cooldown"] and \
-                dx < self.cfg["rune_find"]["rune_trigger_distance_x"] and \
-                dy < self.cfg["rune_find"]["rune_trigger_distance_y"]:
-
-                self.kb.set_command("none none none")
-                self.kb.release_all_key()
-                time.sleep(0.1) # Wait for character to stop
-                self.kb.disable() # Disable kb thread during rune solving
-
-                # Attempt to trigger rune
-                self.kb.press_key("up", 0.02)
-
-                # Wait for rune game to pop up
-                if self.cfg["system"]["server"] == "NA":
-                    # N.A server needs wait longer for rune scene to pop up
-                    time.sleep(4)
-                else:
-                    time.sleep(1)
-
-                # If entered the game, start solving rune
-                if self.is_in_rune_game():
-                    self.solve_rune() # Blocking until runes solved
-                    self.switch_status("hunting")
-                    # Clear rune finding timer after successful rune solving
-                    self.t_rune_finding_start = 0
-
-                # Restore kb thread
-                self.kb.enable()
-
-                self.t_last_rune_trigger = time.time()
-
-        self.profiler.mark("Rune Detection")
-
-        # Get monster search box
-        margin = self.cfg["monster_detect"]["search_box_margin"]
-        if self.cfg["bot"]["attack"] == "aoe_skill":
-            dx = self.cfg["aoe_skill"]["range_x"] // 2 + margin
-            dy = self.cfg["aoe_skill"]["range_y"] // 2 + margin
-        elif self.cfg["bot"]["attack"] == "directional":
-            dx = self.cfg["directional_attack"]["range_x"] + margin
-            dy = self.cfg["directional_attack"]["range_y"] + margin
-        else:
-            logger.error(f"Unsupported attack mode: {self.cfg["bot"]["attack"]}")
-            return -1
-        x0 = max(0, self.loc_player[0] - dx)
-        x1 = min(self.img_frame.shape[1], self.loc_player[0] + dx)
-        y0 = max(0, self.loc_player[1] - dy)
-        y1 = min(self.img_frame.shape[0], self.loc_player[1] + dy)
-
-        # Get monsters in the search box
-        if self.status == "hunting":
-            self.monsters = self.get_monsters_in_range((x0, y0), (x1, y1))
-        else:
-            self.monsters = []
-
-        self.profiler.mark("Monster Detection")
-
-        # Get attack direction
-        if self.cfg["bot"]["attack"] == "aoe_skill":
-            if len(self.monsters) == 0:
-                attack_direction = None
+        #######################
+        ### Attack WatchDog ###
+        ####################### Check if last attack is timeout
+        dt = time.time() - self.t_last_attack
+        if self.cfg['bot']['mode'] == 'normal' and \
+            dt > self.cfg["watchdog"]["last_attack_timeout"]:
+            logger.info(f"Last attack timeout for {round(dt, 2)} seconds")
+            cfg_action = self.cfg["watchdog"]["last_attack_timeout_action"]
+            if cfg_action == "change_channel":
+                logger.info("Change channel!")
+                self.channel_change()
+            elif cfg_action == "go_home":
+                logger.info("Return home!")
+                press_key(self.cfg["key"]["return_home"])
+                # Terminate Autobot
+                self.is_terminated = True
+                self.kb.is_terminated = True
             else:
-                attack_direction = "I don't care"
-            # TODO:
-            self.get_nearest_monster() # AOE skill doesn't care
+                logger.info(f"Unsupported timeout mode: {cfg_action}")
 
-        elif self.cfg["bot"]["attack"] == "directional":
-            # Get nearest monster to player
-            monster_left  = self.get_nearest_monster(is_left = True)
-            monster_right = self.get_nearest_monster(is_left = False)
-            # Determine attack direction
-            attack_direction = self.get_attack_direction(monster_left, monster_right)
+        self.profiler.mark("Attack WatchDog")
 
-        else:
-            logger.error(f"Unexpected attack mode: {self.cfg["bot"]["attack"]}")
-            return -1
+        ######################
+        ### State Behavior ###
+        ######################
+        self.fsm.do_state_stuff()
 
-        cmd_left_right = "none"
-        cmd_up_down = "none"
-        cmd_action = "none"
-        if self.cfg["bot"]["mode"] == "patrol":
-            x, y = self.loc_player
-            h, w = self.img_frame.shape[:2]
-            loc_player_ratio = float(x)/float(w)
-            left_ratio, right_ratio = self.cfg["patrol"]["range"]
-
-            # Check if we need to change patrol direction
-            if self.is_patrol_to_left and loc_player_ratio < left_ratio:
-                self.patrol_turn_point_cnt += 1
-            elif (not self.is_patrol_to_left) and loc_player_ratio > right_ratio:
-                self.patrol_turn_point_cnt += 1
-
-            if self.patrol_turn_point_cnt > self.cfg["patrol"]["turn_point_thres"]:
-                self.is_patrol_to_left = not self.is_patrol_to_left
-                self.patrol_turn_point_cnt = 0
-
-            # Get left-right command
-            if self.is_patrol_to_left:
-                cmd_left_right = "left"
-            else:
-                cmd_left_right = "right"
-
-            # Get action command
-            if (time.time() - self.t_patrol_last_attack > self.cfg["patrol"]["patrol_attack_interval"] or \
-                attack_direction is not None):
-                cmd_action = "attack"
-                self.t_patrol_last_attack = time.time()
-
-        elif self.cfg["bot"]["mode"] == "aux":
-            pass
-
-        else:
-            # get color code from img_route
-            color_code, color_code_up_down = self.get_nearest_color_code()
-
-            # Use color_code and color_code_up_down to complement each other
-            # To prevent character stuck at the end of ladder, we use two color color pixels
-            # and let them complement with each other, to ensure smoothy ladder climbing
-            if color_code and color_code_up_down:
-                if color_code["distance"] < color_code_up_down["distance"]:
-                    cmd_left_right, cmd_up_down, cmd_action = color_code["command"].split()
-                    _, cmd, _ = color_code_up_down["command"].split()
-                    if cmd_up_down == "none" and self.is_on_ladder:
-                        cmd_up_down = cmd # only complement when player is on ladder
-                else:
-                    cmd_left_right, cmd_up_down, cmd_action = color_code_up_down["command"].split()
-                    cmd, _, _ = color_code["command"].split()
-                    if cmd_left_right == "none" and self.is_on_ladder:
-                        cmd_left_right = cmd # only complement when player is on ladder
-            elif color_code:
-                cmd_left_right, cmd_up_down, cmd_action = color_code["command"].split()
-            elif color_code_up_down:
-                cmd_left_right, cmd_up_down, cmd_action = color_code_up_down["command"].split()
-
-            # Change route map if reached goal
-            if cmd_action == "goal":
-                # Switch to next route map
-                self.idx_routes = (self.idx_routes+1)%len(self.img_routes)
-                logger.debug(f"Change to new route:{self.idx_routes}")
-
-            # teleport away from edge to avoid falling off cliff
-            if self.is_near_edge() and \
-                time.time() - self.t_last_teleport > self.cfg["teleport"]["cooldown"]:
-                cmd_action = "teleport"
-                self.t_last_teleport = time.time() # update timer
-
-        # replace teleport to jump if user doesn't set teleport key
-        if self.cfg["key"]["teleport"] == "" and cmd_action == "teleport":
-            cmd_action = "jump"
-
-        # Special logic for each status, overwrite color code action
-        if self.status == "hunting":
-            # Perform a random action when player stuck
-            if not self.cfg["bot"]["mode"] == "patrol" and self.is_player_stuck():
-                cmd_left_right, cmd_up_down, cmd_action = self.get_random_action()
-            elif attack_direction is not None and \
-                time.time() - self.t_last_attack > self.cfg["directional_attack"]["cooldown"]:
-                cmd_action = "attack"
-                # Set up attack direction
-                if attack_direction in ["left", "right"]:
-                    cmd_left_right = attack_direction
-                self.t_last_attack = time.time()
-
-        elif self.status == "finding_rune":
-            if self.is_player_stuck():
-                command = self.get_random_action()
-
-            # If the HP is reduced switch to hurting (other player probably help solved the rune)
-            if  time.time() - self.health_monitor.t_last_hp_reduce < 3 and \
-                time.time() - self.t_last_switch_status > 3:
-                self.switch_status("hunting")
-
-            # Check if finding rune timeout
-            diff_timeout = time.time() - self.t_rune_finding_start
-            logger.debug(f"diff_timeout: {round(diff_timeout, 2)}")
-            if diff_timeout > self.cfg["rune_find"]["timeout"]:
-                if self.cfg["rune_find"]["timeout_action"] == "change_channel":
-                    # Change channel to avoid rune
-                    self.channel_change()
-                else:
-                    # Return home
-                    self.kb.press_key(self.cfg["key"]["return_home_key"])
-                    self.is_terminated = True
-                    self.kb.is_terminated = True
-
-        elif self.status == "near_rune":
-            # Stay in near_rune status for only a few seconds
-            if time.time() - self.t_last_switch_status > self.cfg["rune_find"]["near_rune_duration"]:
-                self.switch_status("hunting")
-
-        elif self.status == "aux": # only for aux mode
-            pass
-
-        else:
-            logger.error(f"Unknown status: {self.status}")
-
-        # send command to keyboard controller
-        command = f"{cmd_left_right} {cmd_up_down} {cmd_action}"
-        self.kb.set_command(command)
-
-        self.profiler.mark("Determine Command")
-
-        # Debug: show current command on screen
-        if command and len(command) > 0:
-            cv2.putText(self.img_frame_debug, f"CMD: {command}",
-                       (10, 480), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
-
-        # Make sure player is in party
-        if self.is_first_frame and not is_mac():
-            activate_game_window(self.capture.window_title)
-            time.sleep(0.3)
-            self.ensure_is_in_party()
-
-        # Enable cached location since second frame
         self.is_first_frame = False
+
+        self.profiler.mark("State per-frame behavior")
 
         #####################
         ### Debug Windows ###
@@ -2111,7 +1759,14 @@ def main(args):
     #####################
     ### Start AutoBot ###
     #####################
-    mapleStoryAutoBot.start() # Start all threads in autoBot
+    try:
+        mapleStoryAutoBot.start() # Start all threads in autoBot
+    except Exception as e:
+        logger.error(f"MapleStoryAutoBot start failed: {e}")
+        mapleStoryAutoBot.terminate_threads() # Terminate all threads
+        sys.exit(1)
+    else:
+        logger.info("MapleStoryAutoBot Start Successfully")
 
     # Start record game window for debugging
     if args.record:
@@ -2174,9 +1829,15 @@ if __name__ == '__main__':
     )
 
     parser.add_argument(
-        '--viz_window',
+        '--disable_viz',
         action="store_true",
-        help="Record debug window"
+        help="Disable viz debug window"
+    )
+
+    parser.add_argument(
+        '--test_image',
+        default="",
+        help="Pass in image in test/XXX.png"
     )
 
     args = parser.parse_args()

@@ -318,7 +318,22 @@ class RouteRecorder():
             h -= 2
             self.loc_minimap = (x, y)
             self.img_minimap = self.img_frame[y:y+h, x:x+w]
+        else:
+            x, y = self.loc_minimap
+            h, w = self.img_minimap.shape[:2]
+            self.img_minimap = self.img_frame[y:y+h, x:x+w]
 
+        # Replace black pixels (0, 0, 0) with (1, 1, 1)
+        black_mask = np.all(self.img_minimap == [0, 0, 0], axis=-1)
+        self.img_minimap[black_mask] = [1, 1, 1]
+
+        # Get player location on minimap
+        loc_player_minimap = get_player_location_on_minimap(self.img_minimap)
+        if loc_player_minimap:
+            self.loc_player_minimap = loc_player_minimap
+
+        # Update map
+        if self.is_first_frame:
             # copy minimap to map
             if self.img_map is None:
                 self.img_map = self.img_minimap.copy()
@@ -344,10 +359,6 @@ class RouteRecorder():
             self.img_route_debug = self.img_route.copy()
 
         else:
-            x, y = self.loc_minimap
-            h, w = self.img_minimap.shape[:2]
-            self.img_minimap = self.img_frame[y:y+h, x:x+w]
-
             # Create mask where pixels are not black
             mask = np.any(self.img_minimap != [0, 0, 0], axis=2).astype(np.uint8)
             mask = mask * 255
@@ -363,28 +374,29 @@ class RouteRecorder():
             # Ensure img_map is big enough to fit the newly explored region
             self.ensure_img_map_capacity(x, y, h, w)
 
+            # Don't copy pixel near player
+            player_yellow_dot_radius = 5
+            px, py = self.loc_player_minimap
+            h, w = self.img_minimap.shape[:2]
+            x_min = max(0, px - player_yellow_dot_radius)
+            x_max = min(w, px + player_yellow_dot_radius)
+            y_min = max(0, py - player_yellow_dot_radius)
+            y_max = min(h, py + player_yellow_dot_radius)
+            # Apply the black color mask to mask player yellow dot
+            self.img_minimap[y_min:y_max, x_min:x_max] = (0, 0, 0)
+
             # Update map
             if self.args.map == '':
                 map_slice = self.img_map[y:y+h, x:x+w]
                 black_mask = np.all(map_slice == [0, 0, 0], axis=2)
                 map_slice[black_mask] = self.img_minimap[black_mask]
 
-            # Replace player "yellow" dot to black on map
-            self.replace_color_on_map(
-                (55, 40, 80),
-                (60, 100, 100)
-            )
             # Replace other player "red" dot to black on map
-            self.replace_color_on_map((0, 80, 80),
+            self.replace_color_on_map((0, 78, 78),
                                       (5, 100, 100))
 
         cv2.imshow("Map", self.img_map)
         self.img_route_debug = self.img_route.copy()
-
-        # Get player location on minimap
-        loc_player_minimap = get_player_location_on_minimap(self.img_minimap)
-        if loc_player_minimap:
-            self.loc_player_minimap = loc_player_minimap
 
         # Get player location on global map
         self.loc_player_global = self.get_player_location_on_global_map()

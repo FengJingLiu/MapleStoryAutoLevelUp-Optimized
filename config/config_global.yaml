@@ -56,11 +56,6 @@ game_window:
   title: "MapleStory Worlds-Artale(Global)"  # 🎮 Game window title (used to detect the correct window)
   size: [752, 1282]                          # 📐 Game window size [height, width] in pixels
 
-# NA server's use english rune warning, so it's longer than TW server
-rune_warning:
-  top_left: [432, 204]        # 🟦 Top-left corner of the rune warning message
-  bottom_right: [864, 230]    # 🟥 Bottom-right corner of the rune warning
-
 system:
   server: "NA" # North America server
   language: "english"

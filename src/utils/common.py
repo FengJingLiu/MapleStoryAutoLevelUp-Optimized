@@ -245,7 +245,7 @@ def screenshot(img, suffix="screenshot"):
     timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     filename = f"screenshot/{timestamp}_{suffix}.png"
     cv2.imwrite(filename, img)
-    logger.info(f"Screenshot saved: {filename}")
+    logger.info(f"[screenshot] save to {filename}")
 
 def draw_rectangle(img, top_left, size, color, text,
                    thickness=2, text_height=0.7):
@@ -379,6 +379,16 @@ def to_opencv_hsv(color_hsv):
     s_opencv = round(s / 100 * 255)
     v_opencv = round(v / 100 * 255)
     return np.array([h_opencv, s_opencv, v_opencv], dtype=np.uint8)
+
+def to_standard_hsv(color_hsv):
+    """
+    Convert HSV from OpenCV scale to standard HSV scale.
+    """
+    h, s, v = color_hsv
+    h_std = h / 179 * 360
+    s_std = s / 255 * 100
+    v_std = v / 255 * 100
+    return (h_std, s_std, v_std)
 
 def get_minimap_loc_size(img_frame):
     '''
@@ -764,9 +774,11 @@ def activate_game_window(window_title):
     try:
         # Try to restore the window first
         win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
- 
+
         # Try to set foreground
         win32gui.SetForegroundWindow(hwnd)
+
+        logger.info(f"[activate_game_window] Set game window to foreground")
     except:
         # If SetForegroundWindow fails, try alternative methods
         win32gui.ShowWindow(hwnd, win32con.SW_SHOW)
