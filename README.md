@@ -1,20 +1,35 @@
 # Maple Story Auto Level Up
 
-An auto leveling up script for Maple Story Artale
+An auto leveling up bot for Maple Story Artale
 
-<img src="media/intro.gif" width="60%">
+<img src="media/intro2.gif" width="100%">
 
 [▶ Watch demo on YouTube](https://www.youtube.com/watch?v=QeEXLHO8KN4)
 
 This work purely-based on Computer Vision technique, it doesn't required access game's memory. Instead, it detects image pattern(i.e., player red health bar and monsters) on game window screen and send simulated keyboard command to the game to control player's character.
 
-✅ User friendly UI
+✅ No game's memory access required
 
-✅ No memory access required
-
-✅ Purely screen-based CV detection
+✅ Purely Computer Vision
 
 ✅ Simulates real keyboard input
+
+✅ User friendly UI
+<p align="center">
+  <img src="media/main_tab.gif" width="49%" />
+  <img src="media/adv_settings_tab.gif" width="49%" />
+</p>
+
+✅ Auto solve rune
+<img src="media/rune_solve.gif" width="100%">
+
+✅ Visualization window for debugging
+
+✅ Auto HP/MP potion drink
+
+✅ Auto change channel
+
+✅ Auto dice rolling for character creation
 
 ## Environment
 * Windows11
@@ -23,7 +38,7 @@ This work purely-based on Computer Vision technique, it doesn't required access 
 
 Note: this project DOES NOT support virtual environment(VM), it's only for recreational and academical use.
 
-## Support MapleStory Version
+## Supported MapleStory Version
 This project is mostly developed and tested on MapleStory Artale Taiwan Server
 
 It also supports global server, select config/config_global.yaml in load config in window
@@ -59,15 +74,15 @@ python -m src.engine.MapleStoryAutoLevelUp
 ```
 #### Run with a custom config
 ```
-python src/main.py --cfg my_config
+python -m src.engine.MapleStoryAutoLevelUp --cfg my_config
 ```
-#### Show debug visualization window
+#### Disable debug visualization window
 ```
-python src/main.py --viz_window
+python -m src.engine.MapleStoryAutoLevelUp --disable_viz
 ```
 #### Record the debug window
 ```
-python src/main.py --viz_window --record
+python -m src.engine.MapleStoryAutoLevelUp --record
 ```
 #### Choose map via config.yaml
 Edit your map selection in the config file:
