@@ -15,10 +15,9 @@ This work purely-based on Computer Vision technique, it doesn't required access 
 ✅ Simulates real keyboard input
 
 ✅ User friendly UI
-<p align="center">
-  <img src="media/main_tab.gif" width="49%" />
-  <img src="media/adv_settings_tab.gif" width="49%" />
-</p>
+| ![Main Tab](media/main_tab.png) | ![Advanced Tab](media/adv_settings_tab.png) |
+|:-------------------------------:|:-------------------------------------------:|
+| Main Tab UI                    | Advanced Settings UI                        |
 
 ✅ Auto solve rune
 <img src="media/rune_solve.gif" width="100%">
