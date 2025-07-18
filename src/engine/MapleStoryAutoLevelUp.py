@@ -255,6 +255,14 @@ class MapleStoryAutoBot:
         # Init rune solver
         self.rune_solver = RuneSolver(self.cfg)
 
+        # Reset all timers
+        self.t_last_frame = time.time()
+        self.t_watch_dog = time.time()
+        self.t_last_teleport = time.time()
+        self.t_last_attack = time.time()
+        self.t_last_minimap_update = time.time()
+        self.t_to_change_channel = time.time()
+
         # Start Auto Bot main thread
         self.thread_auto_bot = threading.Thread(target=self.loop)
         self.thread_auto_bot.start()
@@ -1397,6 +1405,12 @@ class MapleStoryAutoBot:
             self.cmd_action = "teleport"
             self.t_last_teleport = time.time() # update timer
 
+        # Use teleport while walking
+        if self.cfg['teleport']['is_use_teleport_to_walk'] and \
+            time.time() - self.t_last_teleport > self.cfg['teleport']['cooldown']:
+            self.cmd_action = "teleport"
+            self.t_last_teleport = time.time() # update timer
+
         # replace teleport to jump if user doesn't set teleport key
         if self.cfg["key"]["teleport"] == "" and self.cmd_action == "teleport":
             self.cmd_action = "jump"
@@ -1619,13 +1633,13 @@ class MapleStoryAutoBot:
         dt = time.time() - self.t_last_attack
         if self.cfg['bot']['mode'] == 'normal' and \
             dt > self.cfg["watchdog"]["last_attack_timeout"]:
-            logger.info(f"Last attack timeout for {round(dt, 2)} seconds")
+            logger.info(f"[Attack Timeout] Last attack timeout for {round(dt, 2)} seconds")
             cfg_action = self.cfg["watchdog"]["last_attack_timeout_action"]
             if cfg_action == "change_channel":
-                logger.info("Change channel!")
+                logger.info("[Attack Timeout] Change channel!")
                 self.channel_change()
             elif cfg_action == "go_home":
-                logger.info("Return home!")
+                logger.info("[Attack Timeout] Return home!")
                 press_key(self.cfg["key"]["return_home"])
                 # Terminate Autobot
                 self.is_terminated = True
