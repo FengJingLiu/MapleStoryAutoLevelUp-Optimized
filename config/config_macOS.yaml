@@ -2,8 +2,8 @@
 # The following configuration is only for macOS
 
 game_window:
-  size: [686, 1280]
-  title_bar_height: 90         # 📐 Title Bar Height (Note titel bar will be cropped before window resize)
+  size: [691, 1280]
+  title_bar_height: 85         # 📐 Title Bar Height (Note titel bar will be cropped before window resize)
 
 monster_detect:
   hp_bar_color: [90, 201, 108] # (B,G,R)
@@ -20,3 +20,17 @@ party_red_bar:
 rune_solver:
   arrow_highlight_low_hsv: [340, 50, 85]    # 🔴
   arrow_highlight_high_hsv: [110, 100, 100] # 🔴
+
+# More tolerant for macOS
+# TODO: it's not ideal but a easy workaround
+rune_warning_cn:
+  diff_thres: 0.15
+
+rune_warning_eng:
+  diff_thres: 0.15
+
+rune_enable_msg_cn:
+  diff_thres: 0.15
+
+rune_enable_msg_eng:
+  diff_thres: 0.15
