@@ -114,12 +114,6 @@ nametag:
   # To avoid occlusion from ladders or background objects,
   # the nametag will be split vertically and matched in smaller parts.
 
-camera:
-  # 📸 Camera
-  # Defines the region of the game window that exclude window title and game bottom UI
-  y_start: 60     # ⬆️ Top boundary (in pixels)
-  y_end: 665      # ⬇️ Bottom boundary (in pixels)
-
 character:
   # 🧍 Character
   # Your character's size in pixels.
@@ -162,6 +156,8 @@ scheduled_channel_switching:
 ui_coords:
   # 🧭 UI Coordinate
   # Buttons and menu cooridinate in game window
+  # Expect all these coordinate is on orignal window size (get it from frame screenshot)
+  ui_y_start: 610                       # 📐 UI y start
   "menu": [1140, 730]                   # 📐 Menu coordinate on game window UI
   "channel": [1140, 666]                # 📐 Channel button coordinate
   "random_channel": [877, 161]          # 📐 Random channel button in the channel selection menu
@@ -214,32 +210,32 @@ rune_warning_cn:
   # ⚠️ Rune Warning Detection(Chinese)
   # Detects the "Please remove the rune" message on screen.
   # When this warning appears, the bot will pause combat and start searching for the rune instead.
-  top_left: [513, 196]        # 🟦 Top-left corner of the rune warning message
-  bottom_right: [768, 236]    # 🟥 Bottom-right corner of the rune warning
+  top_left: [513, 137]        # 🟦 Top-left corner of the rune warning message (img_frame coord)
+  bottom_right: [768, 177]    # 🟥 Bottom-right corner of the rune warning (img_frame coord)
   diff_thres: 0.1             # 📏 Matching threshold [0.0 ~ 1.0], higher = stricter match
 
 rune_warning_eng:
   # ⚠️ Rune Warning Detection(English)
   # Detects the "Please remove the rune" message on screen.
   # When this warning appears, the bot will pause combat and start searching for the rune instead.
-  top_left: [432, 204]        # 🟦 Top-left corner of the rune warning message
-  bottom_right: [864, 230]    # 🟥 Bottom-right corner of the rune warning
+  top_left: [432, 145]        # 🟦 Top-left corner of the rune warning message (img_frame coord)
+  bottom_right: [864, 171]    # 🟥 Bottom-right corner of the rune warning (img_frame coord)
   diff_thres: 0.1             # 📏 Matching threshold [0.0 ~ 1.0], higher = stricter match
 
 rune_enable_msg_cn:
   # ⚠️ Rune Enable Message(Chinese)
   # Detects the "Runes has been create" message on screen
   # When it appears, the bot will start detecting runes
-  top_left: [559, 116]     # 📐 top left coordinate of rune enable msg
-  bottom_right: [733, 146] # 📐 right bottom coordinate of rune enable msg
+  top_left: [559, 57]     # 📐 top left coordinate of rune enable msg (img_frame coord)
+  bottom_right: [733, 87] # 📐 right bottom coordinate of rune enable msg (img_frame coord)
   diff_thres: 0.1          # 📏 Match threshold [0.0 ~ 1.0], higher = stricter match
 
 rune_enable_msg_eng:
   # ⚠️ Rune Enable Message(English)
   # Detects the "Runes has been create" message on screen
   # When it appears, the bot will start detecting runes
-  top_left: [460, 119]     # 📐 top left coordinate of rune enable msg
-  bottom_right: [702, 142] # 📐 right bottom coordinate of rune enable msg
+  top_left: [460, 60]     # 📐 top left coordinate of rune enable msg (img_frame coord)
+  bottom_right: [702, 83] # 📐 right bottom coordinate of rune enable msg (img_frame coord)
   diff_thres: 0.1          # 📏 Match threshold [0.0 ~ 1.0], higher = stricter match
 
 rune_detect:
@@ -265,7 +261,7 @@ rune_solver:
   # then press the correct direction key to solve the mini-game.
   arrow_box_size: 80           # 📐 Arrow icon size in pixels (e.g., 75x75 box)
   arrow_box_interval: 170      # ↔️ Distance between arrows (horizontal spacing in pixels)
-  arrow_box_coord: [355, 355]  # 🎯 Top-left coordinate of the first (leftmost) arrow
+  arrow_box_coord: [355, 296]  # 🎯 Top-left coordinate of the first (leftmost) arrow (img_frame coord)
   arrow_box_diff_thres: 0.2    # 📏 Match threshold [0.0 ~ 1.0]
                                #     ↪ If the match score of the first arrow is lower than this,
                                #     the solver assumes the rune mini-game has started
@@ -306,8 +302,9 @@ game_window:
   # 🪟 Game Window
   # Basic information about the game window setup
   title: "MapleStory Worlds"   # 🎮 Game window title (used to detect the correct window)
-  size: [752, 1282]            # 📐 Game window size [height, width] in pixels
+  size: [693, 1282]            # 📐 Game window size [height, width] in pixels, (Excluded title bar size)
   ratio_tolerance: 0.08        # 📐 Game window 16:9 tolerance
+  title_bar_height: 59         # 📐 Title Bar Height (Note it's before window resize)
 
 email:
   # 📩 Email

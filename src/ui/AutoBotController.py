@@ -36,6 +36,7 @@ class AutoBotController(QObject):
                 is_ui=True,
                 disable_viz=True,
                 test_image='',
+                init_state='',
             )
             self.auto_bot = MapleStoryAutoBot(args)
         except Exception as e:

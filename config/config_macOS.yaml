@@ -2,7 +2,8 @@
 # The following configuration is only for macOS
 
 game_window:
-  size: [776, 1280]
+  size: [686, 1280]
+  title_bar_height: 90         # 📐 Title Bar Height (Note titel bar will be cropped before window resize)
 
 monster_detect:
   hp_bar_color: [90, 201, 108] # (B,G,R)
@@ -15,3 +16,7 @@ minimap:
 party_red_bar:
   lower_red: [4, 80, 50] # ❤️ HSV, darker red of party health bar
   upper_red: [5, 90, 90] # ❤️ HSV, brighter red of party health bar
+
+rune_solver:
+  arrow_highlight_low_hsv: [340, 50, 85]    # 🔴
+  arrow_highlight_high_hsv: [110, 100, 100] # 🔴

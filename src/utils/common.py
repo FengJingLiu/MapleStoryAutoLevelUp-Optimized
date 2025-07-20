@@ -29,6 +29,7 @@ else:
 
 # Local import
 from src.utils.logger import logger
+from src.utils.global_var import WINDOW_WORKING_SIZE
 
 OS_NAME = platform.system()
 
@@ -804,3 +805,26 @@ def is_img_16_to_9(img, cfg):
     tolerance = cfg["game_window"]["ratio_tolerance"]
     h, w = img.shape[:2]
     return abs(w/h - 16/9) <= tolerance
+
+def normalize_pixel_coordinate(coord, window_size):
+    '''
+    Normalize pixel coordinate from current window size to standard (693x1282).
+    '''
+    h_win, w_win = window_size
+    h_std, w_std = (693, 1282)
+
+    # Standard size, no need to normalize
+    if h_win == h_std and w_win == w_std:
+        return coord
+
+    scale_y = h_std / h_win
+    scale_x = w_std / w_win
+
+    x, y = coord
+    norm_y = round(y * scale_y)
+    norm_x = round(x * scale_x)
+
+    logger.info("[normalize_pixel_coordinate] "\
+                f"Normalized coord{coord} to coord{(norm_x, norm_y)}")
+
+    return (norm_x, norm_y)

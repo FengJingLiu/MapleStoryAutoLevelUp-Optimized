@@ -13,6 +13,8 @@ class HuntingState(State):
             self.bot.rune_solver.is_rune_warning(
             self.bot.img_frame_gray, self.bot.img_frame_debug):
             # When "Rune enable" message appears on screen
+            self.bot.screenshot_img_frame()
+
             return "finding_rune"
 
         else:

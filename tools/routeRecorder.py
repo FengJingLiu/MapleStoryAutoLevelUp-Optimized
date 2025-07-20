@@ -13,6 +13,7 @@ import numpy as np
 import cv2
 
 # local import
+from src.utils.global_var import WINDOW_WORKING_SIZE
 from src.utils.logger import logger
 from src.utils.common import (
     find_pattern_sqdiff, draw_rectangle, screenshot,
@@ -94,8 +95,7 @@ class RouteRecorder():
         update_img_frame_debug
         '''
         cv2.imshow("Game Window Debug",
-                   self.img_frame_debug[self.cfg["camera"]["y_start"]:
-                                        self.cfg["camera"]["y_end"], :])
+                   self.img_frame_debug[:self.cfg["ui_coords"]["ui_y_start"], :])
         # Update FPS timer
         self.t_last_frame = time.time()
 
@@ -168,8 +168,9 @@ class RouteRecorder():
             logger.error(text)
             return
 
-        # Resize raw frame to (1296, 759)
-        return cv2.resize(self.frame, (1296, 759),
+        # Cut the title bar and resize raw frame to (1296, 700)
+        y_start = self.cfg["game_window"]["title_bar_height"]
+        return cv2.resize(self.frame[y_start:, :], WINDOW_WORKING_SIZE,
                    interpolation=cv2.INTER_NEAREST)
 
     def __init__(self, args):

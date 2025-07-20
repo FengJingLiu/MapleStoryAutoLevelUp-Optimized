@@ -19,12 +19,13 @@ import cv2
 import yaml
 
 # Local import
+from src.utils.global_var import WINDOW_WORKING_SIZE
 from src.utils.logger import logger
 from src.utils.common import (find_pattern_sqdiff, draw_rectangle, screenshot, nms,
     load_image, get_mask, get_minimap_loc_size, get_player_location_on_minimap,
     is_mac, nms_matches, override_cfg, load_yaml, get_all_other_player_locations_on_minimap,
     click_in_game_window, mask_route_colors, to_opencv_hsv, debug_minimap_colors,
-    activate_game_window, is_img_16_to_9,
+    activate_game_window, is_img_16_to_9, normalize_pixel_coordinate
 )
 from src.input.KeyBoardController import KeyBoardController, press_key
 from src.input.KeyBoardListener import KeyBoardListener
@@ -158,14 +159,6 @@ class MapleStoryAutoBot:
             for k, v in cfg["route"]["color_code_up_down"].items()
         }
 
-        # Set init state
-        if cfg["bot"]["mode"] == "aux":
-            self.fsm.set_init_state("aux")
-        elif cfg["bot"]["mode"] == "patrol":
-            self.fsm.set_init_state("patrol")
-        else:
-            self.fsm.set_init_state("hunting")
-
         if cfg["bot"]["mode"] == "normal":
             map_name = cfg['bot']['map']
             # Check if the map is supported in config_data.yaml
@@ -220,6 +213,26 @@ class MapleStoryAutoBot:
         self.img_create_party_disable = load_image(f"misc/party_button_create_disable_{lang}.png")
         self.img_login_button = load_image(f"misc/login_button_{lang}.png")
 
+        # Normalized pixel coordinate configuration
+        cfg['rune_warning_cn']['top_left'] = normalize_pixel_coordinate(
+            cfg['rune_warning_cn']['top_left'], cfg['game_window']['size'])
+        cfg['rune_warning_cn']['bottom_right'] = normalize_pixel_coordinate(
+            cfg['rune_warning_cn']['bottom_right'], cfg['game_window']['size'])
+        cfg['rune_warning_eng']['top_left'] = normalize_pixel_coordinate(
+            cfg['rune_warning_eng']['top_left'], cfg['game_window']['size'])
+        cfg['rune_warning_eng']['bottom_right'] = normalize_pixel_coordinate(
+            cfg['rune_warning_eng']['bottom_right'], cfg['game_window']['size'])
+        cfg['rune_enable_msg_cn']['top_left'] = normalize_pixel_coordinate(
+            cfg['rune_enable_msg_cn']['top_left'], cfg['game_window']['size'])
+        cfg['rune_enable_msg_cn']['bottom_right'] = normalize_pixel_coordinate(
+            cfg['rune_enable_msg_cn']['bottom_right'], cfg['game_window']['size'])
+        cfg['rune_enable_msg_eng']['top_left'] = normalize_pixel_coordinate(
+            cfg['rune_enable_msg_eng']['top_left'], cfg['game_window']['size'])
+        cfg['rune_enable_msg_eng']['bottom_right'] = normalize_pixel_coordinate(
+            cfg['rune_enable_msg_eng']['bottom_right'], cfg['game_window']['size'])
+        cfg['rune_solver']['arrow_box_coord'] = normalize_pixel_coordinate(
+            cfg['rune_solver']['arrow_box_coord'], cfg['game_window']['size'])
+
         # Print mode on log
         logger.info(f"[load_config] Config AutoBot as {cfg['bot']['mode']} mode")
 
@@ -263,6 +276,16 @@ class MapleStoryAutoBot:
         self.t_last_minimap_update = time.time()
         self.t_to_change_channel = time.time()
 
+        # Set init state
+        if self.args.init_state != "":
+            self.fsm.set_init_state(self.args.init_state) # For debugging
+        elif self.cfg["bot"]["mode"] == "aux":
+            self.fsm.set_init_state("aux")
+        elif self.cfg["bot"]["mode"] == "patrol":
+            self.fsm.set_init_state("patrol")
+        else:
+            self.fsm.set_init_state("hunting")
+
         # Start Auto Bot main thread
         self.thread_auto_bot = threading.Thread(target=self.loop)
         self.thread_auto_bot.start()
@@ -299,7 +322,7 @@ class MapleStoryAutoBot:
 
         # Get video writer
         fourcc = cv2.VideoWriter_fourcc(*'mp4v')  # mp4 codec
-        self.video_writer = cv2.VideoWriter(path, fourcc, 10, (1296, 759))
+        self.video_writer = cv2.VideoWriter(path, fourcc, 10, WINDOW_WORKING_SIZE)
 
         logger.info(f"[start_record] Record video to {path}")
 
@@ -327,7 +350,7 @@ class MapleStoryAutoBot:
         '''
         # Get camera region in the game window
         img_camera = self.img_frame_gray[
-            self.cfg["camera"]["y_start"]:self.cfg["camera"]["y_end"], :]
+            :self.cfg["ui_coords"]["ui_y_start"], :]
 
         # Get nametag image and search image
         if self.cfg["nametag"]["mode"] == "white_mask":
@@ -368,7 +391,7 @@ class MapleStoryAutoBot:
         else:
             last_result = (
                 self.loc_nametag[0] + pad_x,
-                self.loc_nametag[1] + pad_y - self.cfg["camera"]["y_start"]
+                self.loc_nametag[1] + pad_y
             )
 
         # Get number of splits
@@ -417,7 +440,7 @@ class MapleStoryAutoBot:
         loc_nametag = (loc_nametag[0] - offset_x, loc_nametag[1])
         loc_nametag = (
             loc_nametag[0] - pad_x,
-            loc_nametag[1] - pad_y + self.cfg["camera"]["y_start"]
+            loc_nametag[1] - pad_y
         )
 
         # Only update nametag location when score is good enough
@@ -453,8 +476,7 @@ class MapleStoryAutoBot:
         img_frame[y:y+h, x:x+w] = 0
 
         # Get camera area
-        img_camera = img_frame[
-            self.cfg["camera"]["y_start"]:self.cfg["camera"]["y_end"], :]
+        img_camera = img_frame[:self.cfg["ui_coords"]["ui_y_start"], :]
 
         # Convert to HSV
         img_hsv = cv2.cvtColor(img_camera, cv2.COLOR_BGR2HSV)
@@ -487,9 +509,9 @@ class MapleStoryAutoBot:
         x, y, w, h = boxs[0]
 
         # Offset coordinate
-        loc_party_red_bar = (x, y + self.cfg["camera"]["y_start"])
-        loc_player = (loc_party_red_bar[0] + self.cfg["party_red_bar"]["offset"][0],
-                      loc_party_red_bar[1] + self.cfg["party_red_bar"]["offset"][1])
+        loc_party_red_bar = (x, y)
+        loc_player = (x + self.cfg["party_red_bar"]["offset"][0],
+                      y + self.cfg["party_red_bar"]["offset"][1])
 
         # visualize for debug
         draw_rectangle(self.img_frame_debug, loc_party_red_bar,
@@ -606,13 +628,13 @@ class MapleStoryAutoBot:
             # Print color code on debug image
             cv2.putText(
                 self.img_frame_debug, f"Route Action: {nearest['command']}",
-                (650, 90),
+                (650, 30),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255),
                 2, cv2.LINE_AA
             )
             cv2.putText(
                 self.img_frame_debug, f"Route Index: {self.idx_routes}",
-                (650, 150),
+                (650, 90),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255),
                 2, cv2.LINE_AA
             )
@@ -620,7 +642,7 @@ class MapleStoryAutoBot:
         if nearest_up_down is not None:
             cv2.putText(
                 self.img_frame_debug, f"Route Action: {nearest_up_down['command']}",
-                (650, 120),
+                (650, 60),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255),
                 2, cv2.LINE_AA
             )
@@ -905,26 +927,28 @@ class MapleStoryAutoBot:
             logger.warning("Failed to capture game frame.")
             return
 
+        # Cut the title bar and resize raw frame to (1296, 759)
+        frame_no_title = self.frame[self.cfg["game_window"]["title_bar_height"]:, :]
+
         # Make sure the window ratio is as expected
         if self.args.test_image != "":
             pass # Disable size check if using test image for debugging
         elif self.cfg["bot"]["mode"] == "aux":
-            if not is_img_16_to_9(self.frame, self.cfg): # Aux mode allow 16:9 resolution
-                text = f"Unexpeted window size: {self.frame.shape[:2]} (expect window ratio 16:9)\n"
+            if not is_img_16_to_9(frame_no_title, self.cfg): # Aux mode allow 16:9 resolution
+                text = f"Unexpeted window size: {frame_no_title.shape[:2]} (expect window ratio 16:9)\n"
                 text += "Please use windowed mode & smallest resolution."
                 logger.error(text)
                 return
         else:
             # Other mode only allow specific resolution
-            if self.cfg["game_window"]["size"] != self.frame.shape[:2]:
-                text = f"Unexpeted window size: {self.frame.shape[:2]} "\
+            if self.cfg["game_window"]["size"] != frame_no_title.shape[:2]:
+                text = f"Unexpeted window size: {frame_no_title.shape[:2]} "\
                        f"(expect {self.cfg['game_window']['size']})\n"
                 text += "Please use windowed mode & smallest resolution."
                 logger.error(text)
                 return
 
-        # Resize raw frame to (1296, 759)
-        return cv2.resize(self.frame, (1296, 759),
+        return cv2.resize(frame_no_title, WINDOW_WORKING_SIZE,
                    interpolation=cv2.INTER_NEAREST)
 
     def is_player_stuck(self):
@@ -969,7 +993,17 @@ class MapleStoryAutoBot:
         if self.img_frame is None:
             logger.error("[screenshot_img_frame] Failed, game window is not available")
         else:
-            screenshot(self.img_frame)
+            screenshot(self.img_frame, "img_frame")
+
+        if self.img_frame_debug is None:
+            pass
+        else:
+            screenshot(self.img_frame_debug, "img_frame_debug")
+
+        if self.frame is None:
+            pass
+        else:
+            screenshot(self.frame, "frame")
 
     def is_near_edge(self):
         '''
@@ -1029,7 +1063,7 @@ class MapleStoryAutoBot:
         # Print text at bottom left corner
         self.fps = round(1.0 / (time.time() - self.t_last_frame))
         text_y_interval = 23
-        text_y_start = 520
+        text_y_start = 460
         dt_screenshot = time.time() - self.kb.t_last_screenshot
         h, w = self.frame.shape[:2]
         text_list = [
@@ -1102,7 +1136,7 @@ class MapleStoryAutoBot:
         h_crop, w_crop = mini_map_crop.shape[:2]
         h_frame, w_frame = self.img_frame_debug.shape[:2]
         x_paste = w_frame - w_crop - 10  # 10px margin from right
-        y_paste = 70
+        y_paste = 10
         self.img_frame_debug[y_paste:y_paste + h_crop, x_paste:x_paste + w_crop] = mini_map_crop
 
         # Draw border around minimap
@@ -1119,29 +1153,28 @@ class MapleStoryAutoBot:
                       self.health_monitor.mp_percent,
                       self.health_monitor.exp_percent]
         for i, bar_name in enumerate(["HP", "MP", "EXP"]):
-            x_s, y_s = (250, 90)
+            x_s, y_s = (250, 30)
             # Print bar ratio on debug window
             cv2.putText(self.img_frame_debug,
                         f"{bar_name}: {percent_bars[i]:.1f}%",
                         (x_s, y_s + 30*i),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0,0,255), 2)
             # Draw bar on debug window
-            x_s, y_s = (410, 73)
+            x_s, y_s = (410, 13)
             x, y, w, h = self.health_monitor.loc_size_bars[i]
             self.img_frame_debug[y_s+30*i:y_s+h+30*i, x_s:x_s+w] = \
-                self.img_frame[self.cfg["camera"]["y_end"]:, :][y:y+h, x:x+w]
+                self.img_frame[self.cfg["ui_coords"]["ui_y_start"]:, :][y:y+h, x:x+w]
 
         # Print command on screen
         cv2.putText(self.img_frame_debug, f"Cmd: {self.cmd_move_x} {self.cmd_move_y} {self.cmd_action}",
-                    (10, 480), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+                    (10, 430), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
 
     def update_img_frame_debug(self):
         '''
         update_img_frame_debug
         '''
         cv2.imshow("Game Window Debug",
-            self.img_frame_debug[self.cfg["camera"]["y_start"]:
-                                 self.cfg["camera"]["y_end"], :])
+            self.img_frame_debug[:self.cfg["ui_coords"]["ui_y_start"], :])
         # Update FPS timer
         self.t_last_frame = time.time()
 
@@ -1167,7 +1200,7 @@ class MapleStoryAutoBot:
         if score_enable < thres:
             logger.info(f"[ensure_is_in_party] Find party enable button({round(score_enable, 2)})")
             h, w = self.img_create_party_enable.shape[:2]
-            click_in_game_window(self.cfg["game_window"]["title"],
+            click_in_game_window(self.capture.window_title,
                 (loc_enable[0] + w // 2, loc_enable[1] + h // 2)
             )
         else:
@@ -1526,10 +1559,10 @@ class MapleStoryAutoBot:
                 loc_login_button = self.get_login_button_location()
                 if loc_login_button:
                     logger.info("Found login button on screen. Proceed to login.")
-                    click_in_game_window(self.cfg["game_window"]["title"],
+                    click_in_game_window(self.capture.window_title,
                                          loc_login_button)
                     time.sleep(3)
-                    click_in_game_window(self.cfg["game_window"]["title"],
+                    click_in_game_window(self.capture.window_title,
                                          self.cfg["ui_coords"]["select_character"])
                     time.sleep(2)
         else:
@@ -1547,7 +1580,7 @@ class MapleStoryAutoBot:
         self.profiler.mark("Get Minimap Location and Size")
 
         # Update health monitor with current frame
-        self.health_monitor.update_frame(self.img_frame[self.cfg["camera"]["y_end"]:, :])
+        self.health_monitor.update_frame(self.img_frame[self.cfg["ui_coords"]["ui_y_start"]:, :])
 
         #################################
         ### Player Location Detection ###
@@ -1719,9 +1752,8 @@ class MapleStoryAutoBot:
             if ret == 0:
                 # Draw image on debug window
                 if self.is_show_debug_window and self.is_ui:
-                    img_frame_debug_emit = self.img_frame_debug[
-                        self.cfg["camera"]["y_start"]:
-                        self.cfg["camera"]["y_end"], :].copy()
+                    img_frame_debug_emit = self.img_frame_debug[:
+                        self.cfg["ui_coords"]["ui_y_start"], :].copy()
                     img_route_debug_emit = self.img_route_debug.copy()
                     self.image_debug_signal.emit(img_frame_debug_emit)
                     self.route_map_viz_signal.emit(img_route_debug_emit)
@@ -1797,9 +1829,8 @@ def main(args):
         if mapleStoryAutoBot.is_frame_done:
             if mapleStoryAutoBot.img_frame_debug is not None:
                 cv2.imshow("Game Window Debug",
-                    mapleStoryAutoBot.img_frame_debug[
-                        mapleStoryAutoBot.cfg["camera"]["y_start"]:
-                        mapleStoryAutoBot.cfg["camera"]["y_end"], :])
+                    mapleStoryAutoBot.img_frame_debug[:
+                        mapleStoryAutoBot.cfg["ui_coords"]["ui_y_start"], :])
 
             if mapleStoryAutoBot.img_route_debug is not None:
                 cv2.imshow("Route Map Debug", mapleStoryAutoBot.img_route_debug)
@@ -1852,6 +1883,12 @@ if __name__ == '__main__':
         '--test_image',
         default="",
         help="Pass in image in test/XXX.png"
+    )
+
+    parser.add_argument(
+        '--init_state',
+        default="",
+        help="choose the init_state"
     )
 
     args = parser.parse_args()

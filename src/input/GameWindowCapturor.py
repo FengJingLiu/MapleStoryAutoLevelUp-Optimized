@@ -32,7 +32,7 @@ class GameWindowCapturor:
         # If use test image as input, disable the whole capture thread
         if test_image_name is not None:
             self.frame = load_image(f"test/{test_image_name}.png")
-            raise FileNotFoundError(f"[GameWindowCapturor] Test image not found: {test_image_name}")
+            return
 
         # Get game window title
         self.window_title = get_game_window_title_by_token(cfg["game_window"]["title"])
