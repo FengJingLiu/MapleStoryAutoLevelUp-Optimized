@@ -149,6 +149,9 @@ python -m tools.AutoDiceRoller --attribute 4,4,13,4
 支援問號模糊能力值
 python -m tools.AutoDiceRoller --attribute 4,4,?,?
 ```
+## Discord
+Join the Discord for more detail discussions
+https://discord.gg/3e9rSS3p
 
 ## Legacy Version
 This project previously use full-size screenshot map for camera localization
