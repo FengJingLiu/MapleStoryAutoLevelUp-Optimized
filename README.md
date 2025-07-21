@@ -151,7 +151,8 @@ python -m tools.AutoDiceRoller --attribute 4,4,?,?
 ```
 ## Discord
 Join the Discord for more detail discussions
-https://discord.gg/3e9rSS3p
+
+https://discord.gg/DqjtJGNEx7
 
 ## Legacy Version
 This project previously use full-size screenshot map for camera localization
