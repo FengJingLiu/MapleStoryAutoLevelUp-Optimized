@@ -164,8 +164,8 @@ ui_coords:
   "random_channel_confirm": [585, 420]  # 📐 Confirm button after clicking channel switch
   "select_character": [888, 275]        # 📐 Select character button during login
   login_button_thres: 0.05              # 📏 threshold to detect a login button on game window
-  login_button_top_left: [838, 376]     # 📐 top left corner of login button search ragne
-  login_button_bottom_right: [940, 432] # 📐 bottom right corner of login button search ragne
+  login_button_top_left: [838, 317]     # 📐 top left corner of login button search ragne
+  login_button_bottom_right: [940, 373] # 📐 bottom right corner of login button search ragne
 
 route:
   # 🧭 Route Following

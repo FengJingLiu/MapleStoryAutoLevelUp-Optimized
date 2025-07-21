@@ -232,6 +232,10 @@ class MapleStoryAutoBot:
             cfg['rune_enable_msg_eng']['bottom_right'], cfg['game_window']['size'])
         cfg['rune_solver']['arrow_box_coord'] = normalize_pixel_coordinate(
             cfg['rune_solver']['arrow_box_coord'], cfg['game_window']['size'])
+        cfg['ui_coords']['login_button_top_left'] = normalize_pixel_coordinate(
+            cfg['ui_coords']['login_button_top_left'], cfg['game_window']['size'])
+        cfg['ui_coords']['login_button_bottom_right'] = normalize_pixel_coordinate(
+            cfg['ui_coords']['login_button_bottom_right'], cfg['game_window']['size'])
 
         # Print mode on log
         logger.info(f"[load_config] Config AutoBot as {cfg['bot']['mode']} mode")
@@ -1201,7 +1205,8 @@ class MapleStoryAutoBot:
             logger.info(f"[ensure_is_in_party] Find party enable button({round(score_enable, 2)})")
             h, w = self.img_create_party_enable.shape[:2]
             click_in_game_window(self.capture.window_title,
-                (loc_enable[0] + w // 2, loc_enable[1] + h // 2)
+                (loc_enable[0] + w // 2,
+                 loc_enable[1] + h // 2 + self.cfg['game_window']['title_bar_height'])
             )
         else:
             logger.info("[ensure_is_in_party] Cannot find create party button."
@@ -1400,13 +1405,18 @@ class MapleStoryAutoBot:
         x1, y1 = self.cfg["ui_coords"]["login_button_bottom_right"]
         img_roi = self.img_frame[y0:y1, x0:x1]
 
+        # Draw rectange on debug image
+        draw_rectangle(self.img_frame_debug, (x0, y0),
+                       (y1-y0, x1-x0), (0, 255, 0), "login_button box")
+
         # Find the 'login' button
         loc, score, _ = find_pattern_sqdiff(
                         img_roi, self.img_login_button)
         if score < self.cfg["ui_coords"]["login_button_thres"]:
             h, w = self.img_login_button.shape[:2]
             logger.info(f"[get_login_button_location] Found login button with score({score})")
-            return (x0 + loc[0] + w // 2, y0 + loc[1] + h // 2)
+            return (x0 + loc[0] + w // 2,
+                    y0 + loc[1] + h // 2 + self.cfg['game_window']['title_bar_height'])
         else:
             return None
 
