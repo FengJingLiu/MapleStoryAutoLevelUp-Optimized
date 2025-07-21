@@ -652,8 +652,12 @@ class MainWindow(QMainWindow):
         self.label_config_path.setStyleSheet("color: green")
 
         # Load customized yaml
-        self.cfg = override_cfg(self.cfg, load_yaml(path))
-        self.path_cfg_custom = path
+        try:
+            self.cfg = override_cfg(self.cfg, load_yaml(path))
+        except FileNotFoundError:
+            logger.warning(f"[UI] Unable to find config file: {path}")
+        else:
+            self.path_cfg_custom = path
 
         # Re-apply config to UI
         self.apply_config_to_ui()
