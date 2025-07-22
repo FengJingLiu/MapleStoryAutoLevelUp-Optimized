@@ -6,6 +6,12 @@ An auto leveling up bot for Maple Story Artale
 
 [▶ Watch demo on YouTube](https://www.youtube.com/watch?v=QeEXLHO8KN4)
 
+## Download
+[![Latest Release](https://img.shields.io/github/v/release/KenYu910645/MapleStoryAutoLevelUp)](https://github.com/KenYu910645/MapleStoryAutoLevelUp/releases/latest)
+
+📥 **[Download the latest version here](https://github.com/KenYu910645/MapleStoryAutoLevelUp/releases/latest)**
+
+## Features
 This work purely-based on Computer Vision technique, it doesn't required access game's memory. Instead, it detects image pattern(i.e., player red health bar and monsters) on game window screen and send simulated keyboard command to the game to control player's character.
 
 ✅ No game's memory access required
