@@ -49,7 +49,7 @@ This work purely-based on Computer Vision technique, it doesn't required access 
 
 ✅ Support global/taiwan Artale server
 
-✅ Support English and Tranditional Chinese Language
+✅ Support English and Traditional Chinese Language
 
 ## Environment
 * Windows11/MacOS
@@ -68,7 +68,7 @@ This project is mostly developed and tested on MapleStory Artale Taiwan Server a
 pip install -r requirements.txt
 ```
 
-### Run with UI (Recommand)
+### Run with UI (Recommend)
 Run command
 ```
 python -m src.main
@@ -77,10 +77,10 @@ Press 'F1' or 'start' button to start auto bot
 
 Tune the configuration to suit your character
 
-Note that the advanced settings is still work in prograss.
+Note that the advanced settings is still work in progress.
 If you need to change advanced configs, please modify config_default.yaml
 
-### Run wihtout UI
+### Run without UI
 #### Run script
 ```
 python -m src.engine.MapleStoryAutoLevelUp
@@ -104,8 +104,8 @@ Edit your map selection in the config file:
 bot:
   map: ""  # Set the map name. See available maps in config/config_data.yaml
 ```
-* Press 'F1' to pasue/continue the script control
-* Press 'F2' to take a screenshot, which will be saved to scrennshot/
+* Press 'F1' to pause/continue the script control
+* Press 'F2' to take a screenshot, which will be saved to screenshot/
 * Press 'F12' to terminate script
 
 ## Supported Map
@@ -133,7 +133,7 @@ python -m tools.routeRecorder --new_map <map_directory_name>
   Operate your character in the game and make sure you explore the whole map.
 * Press 'F4' to update the current scanned map to debug window. If you are satisfied with current map, proceed to record route by pressing 'F3', it will refresh the whole route map.
 * When recording route map, you can attack mobs on the way as the attack key won't be recorded.
-* Typically, a raw record route map won't work very well. Use Paint tool to edit the route map, and find tune the route 
+* Typically, a raw record route map won't work very well. Use Paint tool to edit the route map, and fine tune the route
 
 ## Want to Make a New Monster? → Mob Maker
 
@@ -183,7 +183,7 @@ Therefore, I developed a new localization scheme based on minimap, and all the p
 ```
 python -m src.legacy.mapleStoryAutoLevelUp_legacy.py --map <name_of_the_map> --monsters <name_of_the_monsters> --attack <skill>
 
-Exmaple:
+Example:
 python -m src.legacy.mapleStoryAutoLevelUp_legacy.py --map lost_time_1 --monsters evolved_ghost --attack aoe_skill
 ```
 
