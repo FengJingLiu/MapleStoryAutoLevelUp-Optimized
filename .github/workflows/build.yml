@@ -30,9 +30,23 @@ jobs:
       run: |
         pyinstaller --noconsole --onefile src/main.py -p . -n MapleStoryAutoLevelUp --hidden-import=pkg_resources.py2_warn --hidden-import=pkg_resources.extern
 
+    - name: Package files into zip
+      run: |
+        mkdir release
+        cp dist/MapleStoryAutoLevelUp.exe release/
+        cp README.md release/
+        cp -r config release/
+        cp -r minimaps release/
+        cp -r monster release/
+        cp -r nametag release/
+        cp -r rune release/
+        cp -r misc release/
+        # Add whatever else your exe needs to run
+        powershell Compress-Archive -Path release/* -DestinationPath MapleStoryAutoLevelUp.zip
+
     - name: Upload Release Asset
       uses: softprops/action-gh-release@v1
       with:
-        files: dist/MapleStoryAutoLevelUp.exe
+        files: MapleStoryAutoLevelUp.zip
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
