@@ -1,6 +1,6 @@
-# MapleStory Artale 自動練等腳本
+# 楓之谷Artale 自動練等腳本
 
-一款用於 Maple Story Artale 的自動練等腳本機器人
+一款用於楓之谷Artale的自動練等腳本機器人
 
 <img src="media/intro2.gif" width="100%">
 
