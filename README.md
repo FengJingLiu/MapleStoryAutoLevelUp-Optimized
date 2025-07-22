@@ -1,4 +1,5 @@
 # Maple Story Auto Level Up
+[English](README.md) | [繁體中文](README.zh.md)
 
 An auto leveling up bot for Maple Story Artale
 
