@@ -212,7 +212,7 @@ rune_warning_cn:
   # When this warning appears, the bot will pause combat and start searching for the rune instead.
   top_left: [513, 137]        # 🟦 Top-left corner of the rune warning message (img_frame coord)
   bottom_right: [768, 177]    # 🟥 Bottom-right corner of the rune warning (img_frame coord)
-  diff_thres: 0.1             # 📏 Matching threshold [0.0 ~ 1.0], higher = stricter match
+  diff_thres: 0.15            # 📏 Matching threshold [0.0 ~ 1.0], higher = stricter match
 
 rune_warning_eng:
   # ⚠️ Rune Warning Detection(English)
@@ -220,7 +220,7 @@ rune_warning_eng:
   # When this warning appears, the bot will pause combat and start searching for the rune instead.
   top_left: [432, 145]        # 🟦 Top-left corner of the rune warning message (img_frame coord)
   bottom_right: [864, 171]    # 🟥 Bottom-right corner of the rune warning (img_frame coord)
-  diff_thres: 0.1             # 📏 Matching threshold [0.0 ~ 1.0], higher = stricter match
+  diff_thres: 0.15            # 📏 Matching threshold [0.0 ~ 1.0], higher = stricter match
 
 rune_enable_msg_cn:
   # ⚠️ Rune Enable Message(Chinese)
@@ -228,7 +228,7 @@ rune_enable_msg_cn:
   # When it appears, the bot will start detecting runes
   top_left: [559, 57]     # 📐 top left coordinate of rune enable msg (img_frame coord)
   bottom_right: [733, 87] # 📐 right bottom coordinate of rune enable msg (img_frame coord)
-  diff_thres: 0.1          # 📏 Match threshold [0.0 ~ 1.0], higher = stricter match
+  diff_thres: 0.15         # 📏 Match threshold [0.0 ~ 1.0], higher = stricter match
 
 rune_enable_msg_eng:
   # ⚠️ Rune Enable Message(English)
@@ -236,7 +236,7 @@ rune_enable_msg_eng:
   # When it appears, the bot will start detecting runes
   top_left: [460, 60]     # 📐 top left coordinate of rune enable msg (img_frame coord)
   bottom_right: [702, 83] # 📐 right bottom coordinate of rune enable msg (img_frame coord)
-  diff_thres: 0.1          # 📏 Match threshold [0.0 ~ 1.0], higher = stricter match
+  diff_thres: 0.15         # 📏 Match threshold [0.0 ~ 1.0], higher = stricter match
 
 rune_detect:
   # ✨ Rune Detection Box
