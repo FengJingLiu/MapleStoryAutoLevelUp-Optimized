@@ -93,7 +93,10 @@ class AutoDiceRoller:
 
         # Make sure resolution is as expected
         if self.cfg["game_window"]["size"] != self.frame.shape[:2]:
-            text = f"Unexpeted window size: {self.frame.shape[:2]} (expect {self.cfg["game_window"]["size"]})"
+            text = (
+                f"Unexpeted window size: {self.frame.shape[:2]} "
+                f"(expect {self.cfg['game_window']['size']})"
+            )
             logger.error(text)
             return
 
