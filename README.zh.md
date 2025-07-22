@@ -1,28 +1,28 @@
-# Maple Story 自動練等工具
+# MapleStory Artale 自動練等腳本
 
-一款用於 Maple Story Artale 的自動練等機器人
+一款用於 Maple Story Artale 的自動練等腳本機器人
 
 <img src="media/intro2.gif" width="100%">
 
-[▶ 在 YouTube 上觀看示範](https://www.youtube.com/watch?v=QeEXLHO8KN4)
+[▶ 在 YouTube 上觀看Demo](https://www.youtube.com/watch?v=QeEXLHO8KN4)
 
 ## 下載
 [![Latest Release](https://img.shields.io/github/v/release/KenYu910645/MapleStoryAutoLevelUp)](https://github.com/KenYu910645/MapleStoryAutoLevelUp/releases/latest)
 
 📥 **[點此下載最新版](https://github.com/KenYu910645/MapleStoryAutoLevelUp/releases/latest)**
 
-## Windows 執行方式
-1. 執行 MapleStory World，並將遊戲設定為視窗模式，且視窗大小調至最小
+## 執行方式
+1. 執行 MapleStory World，並將遊戲設定為視窗模式，且視窗大小縮至最小
 2. 開啟遊戲左上角的小地圖
-3. 在遊戲中建立隊伍（按下 `P` 並點擊「建立」），確保角色上方出現紅色血條
+3. 在遊戲中建立隊伍（按下 `P` 並點擊「建立」），確保遊戲角色上方出現紅色血條
 4. 將角色移動到想要練功的地圖
 5. **[下載最新版本](https://github.com/KenYu910645/MapleStoryAutoLevelUp/releases/latest)**
 6. 解壓縮 MapleStoryAutoLevelUp.zip，執行 MapleStoryAutoLevelUp.exe
 7. 在 UI 主頁面調整設定
 8. 按下 `Start` 按鈕或 `F1` 鍵開始腳本
-9. 享受遊戲！
+9. Enjoy!
 
-## 功能
+## 功能介紹
 本專案完全以電腦視覺技術實作，無需讀取遊戲記憶體。透過偵測遊戲畫面上的圖像（例如角色的紅色血條與怪物），並模擬鍵盤輸入來控制角色。
 
 ✅ 不需讀取遊戲記憶體
@@ -45,7 +45,7 @@
 
 ✅ 自動換頻道
 
-✅ 建角自動擲骰
+✅ 角色建立自動擲骰
 
 ✅ 支援全球與台服 Artale 伺服器
 
@@ -59,7 +59,7 @@
 注意：本專案不支援虛擬機環境，僅供娛樂與學術用途。
 
 ## 支援的 MapleStory 版本
-本專案主要在 MapleStory Artale 台灣與全球伺服器開發與測試。
+本專案主要在 MapleStory Artale Taiwan與Global伺服器開發與測試。
 
 ## 執行方式（開發者用）
 
@@ -129,7 +129,7 @@ python -m tools.routeRecorder --new_map <map_directory_name>
 * 若為大型地圖，建議先探索一次地圖再開始記錄路徑
 * 按下 `F4` 更新目前掃描地圖至除錯視窗，若滿意即可按 `F3` 重新記錄路徑
 * 記錄時可邊打怪，攻擊鍵不會被記錄
-* 原始路徑通常效果不好，可利用繪圖軟體微調
+* 原始路徑通常效果不好，可利用繪圖軟體(Paint)微調
 
 ## 想新增怪物？→ Mob Maker
 
@@ -152,10 +152,10 @@ python tools/mob_maker.py
 ```bash
 python -m tools.AutoDiceRoller --attribute <STR,DEX,INT,LUK>
 
-# 例如建立全 INT 法師角色：
+# 例如建立全智法師角色：
 python -m tools.AutoDiceRoller --attribute 4,4,13,4
 
-# 亦可使用問號代表不指定數值
+# 亦可使用問號表示不指定數值
 python -m tools.AutoDiceRoller --attribute 4,4,?,?
 ```
 ## Discord
