@@ -431,8 +431,9 @@ def get_minimap_loc_size(img_frame):
             continue
 
         # Check 1px white left and right margins
-        if not (np.all(img_frame[y0:y0:rh, x0] == white) and \
-                np.all(img_frame[y0:y0:rh, x1] == white)):
+        # Ensures the candidate region is framed by white borders like the minimap
+        if not (np.all(img_frame[y0:y0+rh, x0] == white) and \
+                np.all(img_frame[y0:y0+rh, x1] == white)):
             continue
 
         # Create a mask of non-white pixels
