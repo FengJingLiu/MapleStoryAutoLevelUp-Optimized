@@ -97,7 +97,7 @@ python -m src.engine.MapleStoryAutoLevelUp --disable_viz
 ```
 python -m src.engine.MapleStoryAutoLevelUp --record
 ```
-#### Choose map via config.yaml
+#### Choose map via config_custom.yaml
 Edit your map selection in the config file:
 ```
 # In config/config_default.yaml

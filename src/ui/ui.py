@@ -625,7 +625,7 @@ class MainWindow(QMainWindow):
 
     def load_config(self, error_label, path=None):
         '''
-        Load config.yaml from file and apply settings to UI
+        Load config_custom.yaml from file and apply settings to UI
         '''
         if path is None:
             path, _ = QFileDialog.getOpenFileName(
