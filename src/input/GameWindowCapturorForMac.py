@@ -62,7 +62,9 @@ class GameWindowCapturor:
 
         self.window_title = get_window_title(cfg["game_window"]["title"])
         if self.window_title is None:
-            logger.error(f"[GameWindowCapturor] Unable to find window titles that contain {cfg["game_window"]["title"]}")
+            logger.error(
+                f"[GameWindowCapturor] Unable to find window titles that contain {cfg['game_window']['title']}"
+            )
             return -1
 
         self.fps = 0
