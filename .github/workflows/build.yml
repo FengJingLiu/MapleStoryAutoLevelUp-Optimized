@@ -28,7 +28,7 @@ jobs:
 
     - name: Build EXE
       run: |
-        pyinstaller --noconsole --onefile src/main.py -p . -n MapleStoryAutoLevelUp --hidden-import=pkg_resources.py2_warn --hidden-import=pkg_resources.extern
+        pyinstaller --noconsole --onefile src/main.py -p . -n MapleStoryAutoLevelUp --icon=media/icon.ico --hidden-import=pkg_resources.py2_warn --hidden-import=pkg_resources.extern
 
     - name: Package files into zip
       run: |
