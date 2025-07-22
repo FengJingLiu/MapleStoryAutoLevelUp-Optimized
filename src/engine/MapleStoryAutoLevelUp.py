@@ -23,7 +23,7 @@ from src.utils.global_var import WINDOW_WORKING_SIZE
 from src.utils.logger import logger
 from src.utils.common import (find_pattern_sqdiff, draw_rectangle, screenshot, nms,
     load_image, get_mask, get_minimap_loc_size, get_player_location_on_minimap,
-    is_mac, nms_matches, override_cfg, load_yaml, get_all_other_player_locations_on_minimap,
+    is_mac, override_cfg, load_yaml, get_all_other_player_locations_on_minimap,
     click_in_game_window, mask_route_colors, to_opencv_hsv, debug_minimap_colors,
     activate_game_window, is_img_16_to_9, normalize_pixel_coordinate
 )
@@ -128,13 +128,13 @@ class MapleStoryAutoBot:
         self.fsm.add_state(SolvingRuneState("solving_rune", self))
         self.fsm.add_state(AuxiliaryState  ("aux"         , self))
         self.fsm.add_state(PatrolState     ("patrol"      , self))
-        self.fsm.add_transition("hunting", "finding_rune")
-        self.fsm.add_transition("finding_rune", "hunting")
-        self.fsm.add_transition("finding_rune", "near_rune")
-        self.fsm.add_transition("finding_rune", "solving_rune")
-        self.fsm.add_transition("near_rune", "finding_rune")
-        self.fsm.add_transition("near_rune", "solving_rune")
-        self.fsm.add_transition("solving_rune", "hunting")
+        self.fsm.add_transition("hunting", "finding_rune") # When saw a "Rune has created" messgae
+        self.fsm.add_transition("finding_rune", "hunting") # After finding rune timeout
+        self.fsm.add_transition("finding_rune", "near_rune") # When detect a nearby rune
+        self.fsm.add_transition("finding_rune", "solving_rune") # When enter the arrow minimap
+        self.fsm.add_transition("near_rune", "finding_rune") # After rune solving timeout
+        self.fsm.add_transition("near_rune", "solving_rune") # When enter the arrow minimap
+        self.fsm.add_transition("solving_rune", "hunting") # After rune solving
         self.fsm.set_init_state("hunting")
 
     def update_signals(self, image_debug_signal, route_map_viz_signal):
@@ -304,10 +304,16 @@ class MapleStoryAutoBot:
         self.terminate_threads()
 
     def enable_viz(self):
+        '''
+        Enable AutoBot to generate debug image
+        '''
         self.is_need_show_debug_window = True
         logger.debug("[enable_viz] is_show_debug_window = True")
 
     def disable_viz(self):
+        '''
+        Disable AutoBot to generate debug image
+        '''
         self.is_need_show_debug_window = False
         logger.debug("[disable_viz] is_show_debug_window = False")
 
@@ -1727,10 +1733,6 @@ class MapleStoryAutoBot:
 
         # Update FPS timer
         self.t_last_frame = time.time()
-
-        # Check FPS, TODO: too verbose, only print if many frames has high latency
-        # if self.fps < 5:
-        #     logger.warning(f"FPS({self.fps}) is too low, AutoBot cannot run properly!")
 
         # Print profiler result
         if self.cfg["profiler"]["enable"] and \
