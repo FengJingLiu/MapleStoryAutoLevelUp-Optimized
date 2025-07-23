@@ -160,17 +160,18 @@ class RouteRecorder():
             logger.warning("Failed to capture game frame.")
             return
 
+        # Cut the title bar and resize raw frame to (1296, 759)
+        frame_no_title = self.frame[self.cfg["game_window"]["title_bar_height"]:, :]
+
         # Make sure the window ratio is as expected
-        if self.cfg["game_window"]["size"] != self.frame.shape[:2]:
-            text = f"Unexpeted window size: {self.frame.shape[:2]} "\
+        if self.cfg["game_window"]["size"] != frame_no_title.shape[:2]:
+            text = f"Unexpeted window size: {frame_no_title.shape[:2]} "\
                     f"(expect {self.cfg['game_window']['size']})\n"
             text += "Please use windowed mode & smallest resolution."
             logger.error(text)
             return
 
-        # Cut the title bar and resize raw frame to (1296, 700)
-        y_start = self.cfg["game_window"]["title_bar_height"]
-        return cv2.resize(self.frame[y_start:, :], WINDOW_WORKING_SIZE,
+        return cv2.resize(frame_no_title, WINDOW_WORKING_SIZE,
                    interpolation=cv2.INTER_NEAREST)
 
     def __init__(self, args):
