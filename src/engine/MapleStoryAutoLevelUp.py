@@ -25,7 +25,7 @@ from src.utils.common import (find_pattern_sqdiff, draw_rectangle, screenshot, n
     load_image, get_mask, get_minimap_loc_size, get_player_location_on_minimap,
     is_mac, override_cfg, load_yaml, get_all_other_player_locations_on_minimap,
     click_in_game_window, mask_route_colors, to_opencv_hsv, debug_minimap_colors,
-    activate_game_window, is_img_16_to_9, normalize_pixel_coordinate
+    activate_game_window, is_img_16_to_9, normalize_pixel_coordinate, resize_game_window
 )
 from src.input.KeyBoardController import KeyBoardController, press_key
 from src.input.KeyBoardListener import KeyBoardListener
@@ -1238,14 +1238,30 @@ class MapleStoryAutoBot:
         click_in_game_window(window_title, ui_coords["random_channel_confirm"])
         time.sleep(1)
 
-        while self.get_login_button_location() is None:
-            self.img_frame = self.get_img_frame()
-            logger.info("Waiting for login button to show up...")
+        loc_login_button = None
+        while loc_login_button is None and not self.is_terminated:
+            try:
+                self.img_frame = self.get_img_frame()
+                loc_login_button = self.get_login_button_location()
+                if loc_login_button is None:
+                    logger.info("Waiting for login button to show up...")
+            except Exception as e:
+                logger.warning(f"Exception occurred while waiting for login button: {e}")
+                if not is_mac():
+                    resize_game_window(
+                        self.cfg['game_window']['size'][1] + 14,
+                        self.cfg['game_window']['size'][0] + \
+                        self.cfg['game_window']['title_bar_height'] + 7,
+                        window_title) # Magical offset
+                logger.info("Retrying login button detection...")
+
             time.sleep(3)
-        time.sleep(3) # Wait screen to become brighter
+        logger.info(f"login_button button found: {loc_login_button}")
+
+        time.sleep(3)  # wait the screen to be brighter
 
         # Click login button
-        click_in_game_window(window_title, self.get_login_button_location())
+        click_in_game_window(window_title, loc_login_button)
         time.sleep(2)
 
         # Click "Select Character"
