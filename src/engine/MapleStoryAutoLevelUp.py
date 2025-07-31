@@ -25,7 +25,7 @@ from src.utils.common import (find_pattern_sqdiff, draw_rectangle, screenshot, n
     load_image, get_mask, get_minimap_loc_size, get_player_location_on_minimap,
     is_mac, override_cfg, load_yaml, get_all_other_player_locations_on_minimap,
     click_in_game_window, mask_route_colors, to_opencv_hsv, debug_minimap_colors,
-    activate_game_window, is_img_16_to_9, normalize_pixel_coordinate, resize_game_window
+    activate_game_window, is_img_16_to_9, normalize_pixel_coordinate, resize_window
 )
 from src.input.KeyBoardController import KeyBoardController, press_key
 from src.input.KeyBoardListener import KeyBoardListener
@@ -1248,11 +1248,7 @@ class MapleStoryAutoBot:
             except Exception as e:
                 logger.warning(f"Exception occurred while waiting for login button: {e}")
                 if not is_mac():
-                    resize_game_window(
-                        self.cfg['game_window']['size'][1] + 14,
-                        self.cfg['game_window']['size'][0] + \
-                        self.cfg['game_window']['title_bar_height'] + 7,
-                        window_title) # Magical offset
+                    resize_window(window_title, width=1296, height=759)
                 logger.info("Retrying login button detection...")
 
             time.sleep(3)

@@ -831,47 +831,17 @@ def normalize_pixel_coordinate(coord, window_size):
 
     return (norm_x, norm_y)
 
-def resize_game_window(width, height, title):
-    """
-    Resize the target window to the specified size (including window frame).
-    """
-    hwnd = find_window_by_title(title)
+def resize_window(window_title, width=1296, height=759):
+    # 取得視窗句柄
+    hwnd = win32gui.FindWindow(None, window_title)
+    if hwnd == 0:
+        print(f"找不到視窗: {window_title}")
+        return
 
-    if hwnd:
-        logger.info(f"[resize_game_window] Found window: {win32gui.GetWindowText(hwnd)}")
+    # 取得目前視窗位置
+    rect = win32gui.GetWindowRect(hwnd)
+    x, y = rect[0], rect[1]  # 保持視窗左上角位置不變
 
-        # Get current window position and size
-        left, top, right, bottom = win32gui.GetWindowRect(hwnd)
-        logger.info(f"[resize_game_window] Original size: {right - left}x{bottom - top}")
-
-        # Resize the window
-        win32gui.SetWindowPos(hwnd, 0, left, top, width, height,
-                              win32con.SWP_NOZORDER | win32con.SWP_NOACTIVATE)
-
-        # Wait briefly to allow resize to apply
-        time.sleep(0.1)
-
-        # Confirm the new size
-        new_left, new_top, new_right, new_bottom = win32gui.GetWindowRect(hwnd)
-        new_width = new_right - new_left
-        new_height = new_bottom - new_top
-        logger.info(f"[resize_game_window] Resized to: {new_width}x{new_height}")
-
-        return True
-    else:
-        logger.warning("[resize_game_window] Window not found.")
-        return False
-
-def find_window_by_title(title):
-    """
-    Find the window handle (HWND) of a visible window that contains the target title.
-    """
-    def enum_windows_proc(hwnd, results):
-        if win32gui.IsWindowVisible(hwnd):
-            if title in win32gui.GetWindowText(hwnd):
-                results.append(hwnd)
-        return True
-
-    matching_windows = []
-    win32gui.EnumWindows(enum_windows_proc, matching_windows)
-    return matching_windows[0] if matching_windows else None
+    # 調整視窗大小
+    win32gui.MoveWindow(hwnd, x, y, width, height, True)
+    print(f"已將「{window_title}」調整為 {width}x{height}")
