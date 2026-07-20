@@ -308,12 +308,14 @@ game_window:
 
 email:
   # 📩 Email
-  # Send email to notify user
-  # This feature is currently work in prograss
-  enable: False                                   # ✅
-  sender_email: "maplestoryautolevelup@gmail.com" # Your don't have to change this
-  sender_password: "REMOVED_GMAIL_APP_PASSWORD"             # Your don't have to change this
-  receiver_email: "luckyyu910645@gmailcom"        # 📩 Put your email here
+  # Experimental email notification settings.
+  # Never commit real credentials. tools/email_test.py reads credentials from
+  # MAPLE_BOT_SENDER_EMAIL, MAPLE_BOT_EMAIL_PASSWORD, and
+  # MAPLE_BOT_RECEIVER_EMAIL environment variables.
+  enable: False
+  sender_email: ""
+  sender_password: ""
+  receiver_email: ""
 
 system:
   # ⚙️ System Settings

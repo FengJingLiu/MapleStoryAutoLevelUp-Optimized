@@ -31,6 +31,7 @@ else:
 # Local import
 from src.utils.logger import logger
 from src.utils.global_var import WINDOW_WORKING_SIZE
+from src.utils.detection import get_iou, nms
 
 OS_NAME = platform.system()
 
@@ -162,70 +163,6 @@ def load_image(path, mode=cv2.IMREAD_COLOR):
 
     return img
 
-def nms(monsters, iou_threshold=0.3):
-    '''
-    Apply Non-Maximum Suppression (NMS) to remove overlapping detections.
-
-    Parameters:
-    - monsters: List of dictionaries, each representing a detected monster with:
-        - "position": (x, y) top-left corner
-        - "size": (width, height)
-        - "score": similarity/confidence score from template matching
-    - iou_threshold: Float, intersection-over-union threshold to suppress overlapping boxes
-
-    Returns:
-    - List of filtered monster dictionaries after applying NMS
-    '''
-    boxes = []
-    for m in monsters:
-        x, y = m["position"]
-        w, h = m["size"]
-        # [x1, y1, x2, y2, score, original_data]
-        boxes.append([x, y, x + w, y + h, m["score"], m])
-
-    # Sort by score descending
-    boxes.sort(key=lambda x: x[4], reverse=True)
-
-    keep = []
-    while boxes:
-        best = boxes.pop(0)
-        keep.append(best[5])  # original monster_info
-
-        boxes = [b for b in boxes if get_iou(best, b) < iou_threshold]
-
-    return keep
-
-def get_iou(box1, box2):
-    '''
-    Calculate the Intersection over Union (IoU) between two bounding boxes.
-
-    Each box is expected to be a tuple or list with at least 4 values:
-    (x1, y1, x2, y2), where:
-        - (x1, y1) is the top-left corner
-        - (x2, y2) is the bottom-right corner
-
-    Returns:
-        A float representing the IoU value (0.0 ~ 1.0).
-        If there is no overlap, returns 0.0.
-    '''
-    x1, y1, x2, y2 = box1[:4]
-    x1_p, y1_p, x2_p, y2_p = box2[:4]
-
-    inter_x1 = max(x1, x1_p)
-    inter_y1 = max(y1, y1_p)
-    inter_x2 = min(x2, x2_p)
-    inter_y2 = min(y2, y2_p)
-
-    if inter_x2 <= inter_x1 or inter_y2 <= inter_y1:
-        return 0.0
-
-    inter_area = (inter_x2 - inter_x1) * (inter_y2 - inter_y1)
-    area1 = (x2 - x1) * (y2 - y1)
-    area2 = (x2_p - x1_p) * (y2_p - y1_p)
-    union = area1 + area2 - inter_area
-
-    return inter_area / union
-
 def screenshot(img, suffix="screenshot"):
     '''
     Save the given image as a screenshot file.
@@ -261,11 +198,29 @@ def draw_rectangle(img, top_left, size, color, text,
     - color: Tuple (B, G, R), color of the rectangle and text.
     - text: String to display above the rectangle.
     '''
+    if img is None:
+        return
+
     bottom_right = (top_left[0] + size[1],
                     top_left[1] + size[0])
     cv2.rectangle(img, top_left, bottom_right, color, thickness)
     cv2.putText(img, text, (top_left[0], top_left[1] - 10),
                 cv2.FONT_HERSHEY_SIMPLEX, text_height, color, thickness)
+
+def draw_circle(img, *args, **kwargs):
+    """Draw a circle when a debug image is available."""
+    if img is not None:
+        cv2.circle(img, *args, **kwargs)
+
+def draw_line(img, *args, **kwargs):
+    """Draw a line when a debug image is available."""
+    if img is not None:
+        cv2.line(img, *args, **kwargs)
+
+def draw_text(img, *args, **kwargs):
+    """Draw text when a debug image is available."""
+    if img is not None:
+        cv2.putText(img, *args, **kwargs)
 
 def pad_to_size(img, size, pad_value=0):
     '''

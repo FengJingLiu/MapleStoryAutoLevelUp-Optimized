@@ -2,6 +2,19 @@
 
 一款用於楓之谷Artale的自動練等腳本機器人
 
+## 優化分支
+
+此儲存庫由 [@Micheal-tcy](https://github.com/Micheal-tcy) 維護，基於
+[KenYu910645/MapleStoryAutoLevelUp](https://github.com/KenYu910645/MapleStoryAutoLevelUp)。
+原作者、提交紀錄與 MIT 授權資訊均予以保留。
+
+目前修正包含 SQDIFF 偵測排序、偵測框尺寸一致性、關閉除錯視窗時的
+穩定性、暫停與重新啟動流程、公開郵件憑證，以及 Windows/Python 3.12
+自動化測試。
+
+> [!WARNING]
+> 自動操作可能違反遊戲服務條款並導致帳號風險，使用前請先確認伺服器規則。
+
 <img src="media/intro2.gif" width="100%">
 
 [▶ 在 YouTube 上觀看Demo](https://www.youtube.com/watch?v=QeEXLHO8KN4)
@@ -57,6 +70,12 @@
 * OpenCV4.11
 
 注意：本專案不支援虛擬機環境，僅供娛樂與學術用途。
+
+### 郵件測試憑證
+
+實驗性的 `tools/email_test.py` 不再包含憑證。執行前請設定
+`MAPLE_BOT_SENDER_EMAIL`、`MAPLE_BOT_EMAIL_PASSWORD` 與
+`MAPLE_BOT_RECEIVER_EMAIL` 環境變數，且不要將真實密碼提交至設定檔。
 
 ## 支援的 MapleStory 版本
 本專案主要在 MapleStory Artale Taiwan與Global伺服器開發與測試。

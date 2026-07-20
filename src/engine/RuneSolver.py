@@ -12,7 +12,7 @@ import numpy as np
 # Local import
 from src.utils.logger import logger
 from src.utils.common import (find_pattern_sqdiff, draw_rectangle, screenshot,
-    load_image, get_mask, nms_matches, to_opencv_hsv
+    draw_circle, load_image, get_mask, nms_matches, to_opencv_hsv
 )
 from src.input.KeyBoardController import press_key
 
@@ -112,7 +112,7 @@ class RuneSolver:
                 # Circle Debug
                 for (cx, cy, r) in circles:
                     # Offset back to original coordinates on full image
-                    cv2.circle(img_debug, (x + cx, y + cy), r, (0, 0, 255), 2)
+                    draw_circle(img_debug, (x + cx, y + cy), r, (0, 0, 255), 2)
 
                 # Loop through all possible arrows template and choose the most possible one
                 best_score = float('inf')
@@ -305,8 +305,8 @@ class RuneSolver:
             )
 
         # Draw rune location on debug window
-        cv2.circle(img_debug, self.loc_rune,
-                   radius=5, color=(0, 255, 255), thickness=-1)
+        draw_circle(img_debug, self.loc_rune,
+                    radius=5, color=(0, 255, 255), thickness=-1)
 
         screenshot(img_debug, "rune_detected")
 
@@ -394,7 +394,7 @@ class RuneSolver:
                 circles = np.around(circles[0]).astype(int)  # Flatten and round
                 for (cx, cy, r) in circles:
                     # Offset back to original coordinates on full image
-                    cv2.circle(img_debug, (x + cx, y + cy), r, (0, 255, 0), 1)
+                    draw_circle(img_debug, (x + cx, y + cy), r, (0, 255, 0), 1)
 
         return num_circles >= 3
 

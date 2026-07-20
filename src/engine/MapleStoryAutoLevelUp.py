@@ -21,12 +21,14 @@ import yaml
 # Local import
 from src.utils.global_var import WINDOW_WORKING_SIZE
 from src.utils.logger import logger
-from src.utils.common import (find_pattern_sqdiff, draw_rectangle, screenshot, nms,
+from src.utils.common import (find_pattern_sqdiff, draw_rectangle, draw_circle,
+    draw_line, draw_text, screenshot, nms,
     load_image, get_mask, get_minimap_loc_size, get_player_location_on_minimap,
     is_mac, override_cfg, load_yaml, get_all_other_player_locations_on_minimap,
     click_in_game_window, mask_route_colors, to_opencv_hsv, debug_minimap_colors,
     activate_game_window, is_img_16_to_9, normalize_pixel_coordinate, resize_window
 )
+from src.utils.detection import detection_center, detection_to_box, intersection_area
 from src.input.KeyBoardController import KeyBoardController, press_key
 from src.input.KeyBoardListener import KeyBoardListener
 if is_mac():
@@ -249,6 +251,12 @@ class MapleStoryAutoBot:
         '''
         Start all threads
         '''
+        if self.thread_auto_bot is not None and self.thread_auto_bot.is_alive():
+            raise RuntimeError("MapleStoryAutoBot is already running")
+
+        # Allow the same UI controller to start the bot again after a pause.
+        self.is_terminated = False
+
         # Start keyboard controller thread
         self.kb = KeyBoardController(self.cfg)
         if self.is_disable_control:
@@ -468,10 +476,10 @@ class MapleStoryAutoBot:
         text = f"NameTag,{round(score, 2)}," + \
                 f"{'cached' if is_cached else 'missed'}," + \
                 f"{tag_type}"
-        cv2.putText(self.img_frame_debug, text,
-                    (self.loc_nametag[0],
-                     self.loc_nametag[1] + self.img_nametag.shape[0] + 30),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+        draw_text(self.img_frame_debug, text,
+                  (self.loc_nametag[0],
+                   self.loc_nametag[1] + self.img_nametag.shape[0] + 30),
+                  cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
 
         return loc_player
 
@@ -544,13 +552,15 @@ class MapleStoryAutoBot:
         )
 
         # Draw local minimap rectangle
-        camera_bottom_right = (
-            self.loc_minimap_global[0] + self.img_minimap.shape[1],
-            self.loc_minimap_global[1] + self.img_minimap.shape[0]
+        draw_rectangle(
+            self.img_route_debug,
+            self.loc_minimap_global,
+            self.img_minimap.shape[:2],
+            (0, 255, 255),
+            "",
+            thickness=1,
         )
-        cv2.rectangle(self.img_route_debug, self.loc_minimap_global,
-                      camera_bottom_right, (0, 255, 255), 1)
-        cv2.putText(
+        draw_text(
             self.img_route_debug,
             f"Minimap,score({round(score, 2)})",
             (self.loc_minimap_global[0], self.loc_minimap_global[1]+15),
@@ -559,9 +569,9 @@ class MapleStoryAutoBot:
         )
 
         # Draw player center
-        cv2.circle(self.img_route_debug,
-                   loc_player_global, radius=2,
-                   color=(0, 255, 255), thickness=-1)
+        draw_circle(self.img_route_debug,
+                    loc_player_global, radius=2,
+                    color=(0, 255, 255), thickness=-1)
 
         return loc_player_global
 
@@ -628,7 +638,7 @@ class MapleStoryAutoBot:
         )
         # Draw a straigt line from map_loc_player to color_code["pixel"]
         if nearest is not None:
-            cv2.line(
+            draw_line(
                 self.img_route_debug,
                 self.loc_player_global, # start point
                 nearest["pixel"],       # end point
@@ -636,13 +646,13 @@ class MapleStoryAutoBot:
                 1                       # thickness
             )
             # Print color code on debug image
-            cv2.putText(
+            draw_text(
                 self.img_frame_debug, f"Route Action: {nearest['command']}",
                 (650, 30),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255),
                 2, cv2.LINE_AA
             )
-            cv2.putText(
+            draw_text(
                 self.img_frame_debug, f"Route Index: {self.idx_routes}",
                 (650, 90),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255),
@@ -650,13 +660,13 @@ class MapleStoryAutoBot:
             )
 
         if nearest_up_down is not None:
-            cv2.putText(
+            draw_text(
                 self.img_frame_debug, f"Route Action: {nearest_up_down['command']}",
                 (650, 60),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255),
                 2, cv2.LINE_AA
             )
-            cv2.line(
+            draw_line(
                 self.img_route_debug,
                 self.loc_player_global,  # start point
                 nearest_up_down["pixel"],# end point
@@ -714,27 +724,16 @@ class MapleStoryAutoBot:
 
         nearest_monster = None
         min_distance = float('inf')
+        attack_box = (x0, y0, x1, y1)
         for monster in self.monsters:
-            mx1, my1 = monster["position"]
-            mw, mh = monster["size"]
-            mx2 = mx1 + mw
-            my2 = my1 + mh
-
-            # Calculate intersection
-            ix1 = max(x0, mx1)
-            iy1 = max(y0, my1)
-            ix2 = min(x1, mx2)
-            iy2 = min(y1, my2)
-
-            iw = max(0, ix2 - ix1)
-            ih = max(0, iy2 - iy1)
-            inter_area = iw * ih
+            inter_area = intersection_area(
+                attack_box, detection_to_box(monster))
 
             min_mob_area = min(img.shape[0]*img.shape[1] for _, imgs in self.monsters_info.items() for img, _ in imgs)
             inter_area_thres = min(min_mob_area, self.cfg['monster_detect']['max_mob_area_trigger'])
             if inter_area >= inter_area_thres:
                 # Compute distance to player center
-                monster_center = (mx1 + mw // 2, my1 + mh // 2)
+                monster_center = detection_center(monster)
                 dx = monster_center[0] - self.loc_player[0]
                 dy = monster_center[1] - self.loc_player[1]
                 distance = abs(dx) + abs(dy)  # Manhattan distance
@@ -1252,6 +1251,11 @@ class MapleStoryAutoBot:
                 logger.info("Retrying login button detection...")
 
             time.sleep(3)
+
+        if self.is_terminated:
+            logger.info("[channel_change] Cancelled during shutdown")
+            return
+
         logger.info(f"login_button button found: {loc_login_button}")
 
         time.sleep(3)  # wait the screen to be brighter
@@ -1277,17 +1281,30 @@ class MapleStoryAutoBot:
         '''
         terminate all threads
         '''
+        self.is_terminated = True
+
         # Terminate keyboard controller
         if self.kb is not None:
             self.kb.is_terminated = True
+            self.kb.release_all_key()
         # Terminate game window capturor
         if self.capture is not None:
             self.capture.stop()
         # Terminate health monitor
         if self.health_monitor is not None:
             self.health_monitor.stop()
-        self.is_terminated = True
-        logger.info(f"[terminate_threads] Terminated all threads")
+
+        # Wait for the main loop unless termination was requested by that loop.
+        thread = self.thread_auto_bot
+        if thread is not None and thread.is_alive() and \
+            thread is not threading.current_thread():
+            thread.join(timeout=5)
+            if thread.is_alive():
+                logger.warning("[terminate_threads] Main loop did not stop within 5 seconds")
+            else:
+                self.thread_auto_bot = None
+
+        logger.info("[terminate_threads] Terminated all threads")
 
     def get_attack_direction(self, monster_left, monster_right):
         '''
@@ -1296,17 +1313,13 @@ class MapleStoryAutoBot:
         # Compute distance for left
         distance_left = float('inf')
         if monster_left is not None:
-            mx, my = monster_left["position"]
-            mw, mh = monster_left["size"]
-            center_left = (mx + mw // 2, my + mh // 2)
+            center_left = detection_center(monster_left)
             distance_left = abs(center_left[0] - self.loc_player[0]) + \
                             abs(center_left[1] - self.loc_player[1])
         # Compute distance for right
         distance_right = float('inf')
         if monster_right is not None:
-            mx, my = monster_right["position"]
-            mw, mh = monster_right["size"]
-            center_right = (mx + mw // 2, my + mh // 2)
+            center_right = detection_center(monster_right)
             distance_right = abs(center_right[0] - self.loc_player[0]) + \
                             abs(center_right[1] - self.loc_player[1])
         # Choose attack direction and nearest monster
@@ -1317,9 +1330,7 @@ class MapleStoryAutoBot:
         def is_monster_on_correct_side(monster, direction):
             if monster is None:
                 return False
-            mx, my = monster["position"]
-            mw, mh = monster["size"]
-            monster_center_x = mx + mw // 2
+            monster_center_x = detection_center(monster)[0]
             player_x = self.loc_player[0]
 
             if direction == "left":
@@ -1360,8 +1371,8 @@ class MapleStoryAutoBot:
             left_side_ok = is_monster_on_correct_side(monster_left, "left") if monster_left else False
             right_side_ok = is_monster_on_correct_side(monster_right, "right") if monster_right else False
             debug_text = f"L:{distance_left:.0f}({left_side_ok}) R:{distance_right:.0f}({right_side_ok}) Dir:{attack_direction}"
-            cv2.putText(self.img_frame_debug, debug_text,
-                        (10, 450), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 2)
+            draw_text(self.img_frame_debug, debug_text,
+                      (10, 450), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 2)
         return attack_direction
 
     def is_need_change_channel(self, loc_other_players):
@@ -1637,9 +1648,9 @@ class MapleStoryAutoBot:
             self.loc_player = loc_player
 
         # Draw player center for debugging
-        cv2.circle(self.img_frame_debug,
-                self.loc_player, radius=3,
-                color=(0, 0, 255), thickness=-1)
+        draw_circle(self.img_frame_debug,
+                    self.loc_player, radius=3,
+                    color=(0, 0, 255), thickness=-1)
 
         # Get player location on minimap
         loc_player_minimap = get_player_location_on_minimap(
@@ -1764,7 +1775,7 @@ class MapleStoryAutoBot:
             time.sleep(0.3)
             self.ensure_is_in_party()
 
-        while not self.kb.is_terminated:
+        while not self.is_terminated and not self.kb.is_terminated:
 
             t_start = time.time()
 

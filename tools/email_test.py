@@ -9,9 +9,23 @@ sys.path.append(os.path.abspath(os.path.join(__file__, "../../")))
 from src.utils.logger import logger
 from src.utils.common import check_inbox, send_email
 
-SENDER_EMAIL = "maplestoryautolevelup@gmail.com"
-PASSWORD = "REMOVED_GMAIL_APP_PASSWORD"
-RECEIVER_EMAIL = "luckyyu910645@gmail.com" # TODO: change this
+SENDER_EMAIL = os.environ.get("MAPLE_BOT_SENDER_EMAIL", "")
+PASSWORD = os.environ.get("MAPLE_BOT_EMAIL_PASSWORD", "")
+RECEIVER_EMAIL = os.environ.get("MAPLE_BOT_RECEIVER_EMAIL", "")
+
+def validate_email_config():
+    missing = [
+        name for name, value in {
+            "MAPLE_BOT_SENDER_EMAIL": SENDER_EMAIL,
+            "MAPLE_BOT_EMAIL_PASSWORD": PASSWORD,
+            "MAPLE_BOT_RECEIVER_EMAIL": RECEIVER_EMAIL,
+        }.items()
+        if not value
+    ]
+    if missing:
+        raise RuntimeError(
+            "Missing required environment variables: " + ", ".join(missing)
+        )
 
 def wait_for_reply(token, timeout_sec=90, search_interval=10):
     '''
@@ -34,6 +48,8 @@ def wait_for_reply(token, timeout_sec=90, search_interval=10):
     return None
 
 if __name__ == "__main__":
+    validate_email_config()
+
     parser = argparse.ArgumentParser()
     parser.add_argument(
         '--cfg',

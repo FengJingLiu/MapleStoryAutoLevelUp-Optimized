@@ -1,12 +1,12 @@
-opencv-python
-numpy
-pyautogui
-pynput
-requests
-pyyaml
-PySide6
-ruamel.yaml
-pyinstaller
-pywin32; sys_platform == "win32"
-windows-capture ; sys_platform == "win32"
-pyobjc-framework-Quartz ; sys_platform == "darwin" # TODO: dev macOS in another branch
+opencv-python>=4.11,<4.12
+numpy>=2.0,<2.3
+pyautogui>=0.9.54,<0.10
+pynput>=1.7.7,<2
+requests>=2.32,<3
+PyYAML>=6.0.2,<7
+PySide6>=6.8,<6.10
+ruamel.yaml>=0.18.10,<0.19
+pyinstaller>=6.12,<7
+pywin32>=308; sys_platform == "win32"
+windows-capture>=1.4,<2; sys_platform == "win32"
+pyobjc-framework-Quartz>=11; sys_platform == "darwin" # macOS support is experimental

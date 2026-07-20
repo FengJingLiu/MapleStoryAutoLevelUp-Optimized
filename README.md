@@ -3,6 +3,26 @@
 
 An auto leveling up bot for Maple Story Artale
 
+## Optimized Fork
+
+This repository is maintained by
+[@Micheal-tcy](https://github.com/Micheal-tcy) and is based on
+[KenYu910645/MapleStoryAutoLevelUp](https://github.com/KenYu910645/MapleStoryAutoLevelUp).
+The original authors and commit attribution are preserved under the MIT License.
+
+The optimized fork currently includes:
+
+- Correct SQDIFF non-maximum suppression (lower scores are better)
+- A consistent `(height, width)` convention for detection sizes
+- Safe operation when debug visualization is disabled
+- Safer pause/restart and window-capture lifecycle handling
+- Removal of committed email credentials
+- Windows/Python 3.12 unit-test automation
+
+> [!WARNING]
+> Automated gameplay may violate a game's terms of service and can put an
+> account at risk. Review the rules for your server before using this project.
+
 <img src="media/intro2.gif" width="100%">
 
 [▶ Watch demo on YouTube](https://www.youtube.com/watch?v=QeEXLHO8KN4)
@@ -58,6 +78,17 @@ This work purely-based on Computer Vision technique, it doesn't required access 
 * OpenCV4.11
 
 Note: this project DOES NOT support virtual environment(VM), it's only for recreational and academical use.
+
+### Email Test Credentials
+
+The experimental `tools/email_test.py` utility does not contain credentials.
+Set these environment variables before running it:
+
+- `MAPLE_BOT_SENDER_EMAIL`
+- `MAPLE_BOT_EMAIL_PASSWORD`
+- `MAPLE_BOT_RECEIVER_EMAIL`
+
+Never commit real passwords or app passwords to a config file.
 
 ## Supported MapleStory Version
 This project is mostly developed and tested on MapleStory Artale Taiwan Server and Global Server

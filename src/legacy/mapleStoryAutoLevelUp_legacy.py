@@ -17,6 +17,7 @@ import cv2
 from config.legacy.config_legacy import Config
 from src.utils.logger import logger
 from src.utils.common import find_pattern_sqdiff, draw_rectangle, screenshot, nms, load_image, get_mask
+from src.utils.detection import detection_center, detection_to_box, intersection_area
 from KeyBoardController import KeyBoardController
 from GameWindowCapturorSelector import GameWindowCapturor
 
@@ -300,29 +301,21 @@ class MapleStoryBot:
 
         nearest_monster = None
         min_distance = float('inf')
+        attack_box = (x0, y0, x1, y1)
         for monster in self.monster_info:
-            mx1, my1 = monster["position"]
-            mw, mh = monster["size"]
-            mx2 = mx1 + mw
-            my2 = my1 + mh
+            monster_box = detection_to_box(monster)
+            inter_area = intersection_area(attack_box, monster_box)
 
-            # Calculate intersection
-            ix1 = max(x0, mx1)
-            iy1 = max(y0, my1)
-            ix2 = min(x1, mx2)
-            iy2 = min(y1, my2)
-
-            iw = max(0, ix2 - ix1)
-            ih = max(0, iy2 - iy1)
-            inter_area = iw * ih
-
-            monster_area = mw * mh
+            monster_area = (
+                (monster_box[2] - monster_box[0]) *
+                (monster_box[3] - monster_box[1])
+            )
             if monster_area == 0:
                 continue  # skip degenerate box
 
             if inter_area/monster_area >= overlap_threshold:
                 # Compute distance to player center
-                monster_center = (mx1 + mw // 2, my1 + mh // 2)
+                monster_center = detection_center(monster)
                 dx = monster_center[0] - self.loc_player[0]
                 dy = monster_center[1] - self.loc_player[1]
                 distance = abs(dx) + abs(dy)  # Manhattan distance
@@ -1243,18 +1236,14 @@ class MapleStoryBot:
             # Compute distance for left
             distance_left = float('inf')
             if monster_left is not None:
-                mx, my = monster_left["position"]
-                mw, mh = monster_left["size"]
-                center_left = (mx + mw // 2, my + mh // 2)
+                center_left = detection_center(monster_left)
                 distance_left = abs(center_left[0] - self.loc_player[0]) + \
                                 abs(center_left[1] - self.loc_player[1])
 
             # Compute distance for right
             distance_right = float('inf')
             if monster_right is not None:
-                mx, my = monster_right["position"]
-                mw, mh = monster_right["size"]
-                center_right = (mx + mw // 2, my + mh // 2)
+                center_right = detection_center(monster_right)
                 distance_right = abs(center_right[0] - self.loc_player[0]) + \
                                 abs(center_right[1] - self.loc_player[1])
 
