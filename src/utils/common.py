@@ -743,17 +743,80 @@ def activate_game_window(window_title):
         win32gui.BringWindowToTop(hwnd)
         win32gui.SetActiveWindow(hwnd)
 
-def get_game_window_title_by_token(token):
+def get_game_window_title_by_token(token, exact_match=False):
     '''
-    Only work in Windows OS
+    Find a visible window whose title matches `token`.
+
+    Works on Windows OS. The bot is not tied to "MapleStory Worlds" - any
+    program window can be targeted by passing the right `token`.
+
+    Args:
+        token: the (sub)string to look for in window titles.
+        exact_match: when True, only a window whose full title equals `token`
+                     (case-insensitive) is returned. When False, a substring
+                     match is used; an exact match is still preferred when one
+                     exists among the candidates.
+
+    Returns:
+        The matched window title, or None if nothing matched.
     '''
+    if not token:
+        return None
+
     def callback(hwnd, matches):
+        # Only consider visible windows with a non-empty title
+        if not win32gui.IsWindowVisible(hwnd):
+            return
         title = win32gui.GetWindowText(hwnd)
-        if token.lower() in title.lower():
+        if not title:
+            return
+        if exact_match:
+            if token.lower() == title.lower():
+                matches.append(title)
+        elif token.lower() in title.lower():
             matches.append(title)
+
     matches = []
     win32gui.EnumWindows(callback, matches)
-    return matches[0] if matches else None
+
+    if not matches:
+        return None
+
+    # Prefer an exact (case-insensitive) match when available
+    for title in matches:
+        if title.lower() == token.lower():
+            return title
+    return matches[0]
+
+def list_visible_window_titles():
+    '''
+    Return a de-duplicated, sorted list of the titles of all visible top-level
+    windows. Used by the UI to let the user pick the target program.
+
+    Cross-platform: uses win32 on Windows and Quartz on macOS.
+    '''
+    titles = []
+    if is_mac():
+        window_list = Quartz.CGWindowListCopyWindowInfo(
+            Quartz.kCGWindowListOptionOnScreenOnly |
+            Quartz.kCGWindowListExcludeDesktopElements,
+            Quartz.kCGNullWindowID
+        )
+        for window in window_list:
+            title = window.get(Quartz.kCGWindowName, '')
+            if title:
+                titles.append(title)
+    else:
+        def callback(hwnd, collected):
+            if not win32gui.IsWindowVisible(hwnd):
+                return
+            title = win32gui.GetWindowText(hwnd)
+            if title:
+                collected.append(title)
+        win32gui.EnumWindows(callback, titles)
+
+    # De-duplicate while keeping things tidy for the UI
+    return sorted(set(titles), key=lambda s: s.lower())
 
 def is_img_16_to_9(img, cfg):
     """

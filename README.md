@@ -18,6 +18,40 @@ The optimized fork currently includes:
 - Safer pause/restart and window-capture lifecycle handling
 - Removal of committed email credentials
 - Windows/Python 3.12 unit-test automation
+- **Target any program window, not just "MapleStory Worlds"** (see below)
+
+## Target Any Program Window
+
+The bot is no longer hard-wired to the `MapleStory Worlds` window. You can point
+it at any other MapleStory client, private-server client, or emulator window.
+
+**From the UI (recommended):** open the *Main* tab and use the new **🎯 Target
+Program** panel:
+
+- **Window** – pick an open window from the drop-down (click **🔄 Refresh** to
+  re-scan), or type part of its title.
+- **Exact title match** – require the full window title to match instead of a
+  substring (useful when several windows share similar names).
+- **Auto-resize window** – force-resize the target window on start. Keep it on
+  for MapleStory (detection expects a fixed resolution); turn it **off** for
+  programs that must not be moved/resized.
+
+**From config:** edit the `game_window` section in your config file:
+
+```yaml
+game_window:
+  title: "Your Window Title"  # substring of the target window title
+  exact_match: False          # True = require an exact full-title match
+  auto_resize: True           # False = do not resize the target window
+  resize_width: 1296          # window width used when auto_resize is True
+  resize_height: 759          # window height used when auto_resize is True
+```
+
+> [!NOTE]
+> The computer-vision detection (minimap, party red bar, monsters, runes) is
+> tuned for MapleStory. Targeting a non-MapleStory program lets you capture and
+> control that window, but the built-in detections may need their own templates
+> to work well.
 
 > [!WARNING]
 > Automated gameplay may violate a game's terms of service and can put an

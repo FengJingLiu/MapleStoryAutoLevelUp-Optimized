@@ -11,10 +11,15 @@ import Quartz
 # Local import
 from src.utils.logger import logger
 
-def get_window_title(token):
+def get_window_title(token, exact_match=False):
     '''
-    Get window title that contain token
+    Get a window title that matches token.
+
+    Not tied to "MapleStory Worlds" - any program window can be targeted.
+    When exact_match is True, only a title equal to token is returned.
     '''
+    if not token:
+        return None
     window_list = Quartz.CGWindowListCopyWindowInfo(
         Quartz.kCGWindowListOptionOnScreenOnly | Quartz.kCGWindowListExcludeDesktopElements,
         Quartz.kCGNullWindowID
@@ -22,7 +27,12 @@ def get_window_title(token):
     # Get all exist windows
     for window in window_list:
         title = window.get(Quartz.kCGWindowName, '')
-        if token in title:
+        if not title:
+            continue
+        if exact_match:
+            if token == title:
+                return title
+        elif token in title:
             return title
     return None
 
@@ -60,7 +70,10 @@ class GameWindowCapturor:
         self.lock = threading.Lock()
         self.is_terminated = False
 
-        self.window_title = get_window_title(cfg["game_window"]["title"])
+        self.window_title = get_window_title(
+            cfg["game_window"]["title"],
+            exact_match=cfg["game_window"].get("exact_match", False),
+        )
         if self.window_title is None:
             logger.error(
                 f"[GameWindowCapturor] Unable to find window titles that contain {cfg['game_window']['title']}"

@@ -299,12 +299,23 @@ route_recoder:
   map_padding: 30           # 🖤 Padding (in pixels) added as margin around the edge of the map
 
 game_window:
-  # 🪟 Game Window
-  # Basic information about the game window setup
-  title: "MapleStory Worlds"   # 🎮 Game window title (used to detect the correct window)
-  size: [693, 1282]            # 📐 Game window size [height, width] in pixels, (Excluded title bar size)
+  # 🪟 Game Window / Target Program
+  # Basic information about the target program window setup.
+  # ⚠️ This project is NOT limited to "MapleStory Worlds". You can target any
+  #    windowed program by changing the `title` below (or picking it from the
+  #    "Target Program" list in the UI Main tab). The bot captures whatever
+  #    window matches `title` and feeds it to the detection pipeline.
+  title: "MapleStory Worlds"   # 🎮 Target window title (substring match by default)
+  exact_match: False           # 🎯 True = require the full title to match exactly, False = substring match
+  size: [693, 1282]            # 📐 Expected client size [height, width] in pixels, (Excluded title bar size)
   ratio_tolerance: 0.08        # 📐 Game window 16:9 tolerance
   title_bar_height: 59         # 📐 Title Bar Height (Note it's before window resize)
+  auto_resize: True            # 🔧 Force-resize the target window on capture start.
+                               #     Set to False for programs that must NOT be resized
+                               #     (e.g. windows already at the right size, or apps that
+                               #      break/reset when moved). Aux mode only needs 16:9.
+  resize_width: 1296           # 📐 Target window width (incl. borders) when auto_resize is True
+  resize_height: 759           # 📐 Target window height (incl. title bar) when auto_resize is True
 
 email:
   # 📩 Email

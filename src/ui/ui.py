@@ -25,7 +25,8 @@ from src.utils.ui import (
     create_error_label, SingleKeyEdit, QtLogHandler, create_advance_setting_gbox,
 )
 from src.utils.common import (
-    load_yaml, override_cfg, is_mac, save_yaml, get_cfg_diff, load_yaml_with_comments
+    load_yaml, override_cfg, is_mac, save_yaml, get_cfg_diff, load_yaml_with_comments,
+    list_visible_window_titles
 )
 
 # window size for each tab
@@ -123,6 +124,10 @@ class MainWindow(QMainWindow):
         # Control group box
         self.control_gbox = self.create_control_gbox()
         scroll_layout.addWidget(self.control_gbox)
+
+        # Target program / game window group box
+        self.target_program_gbox = self.create_target_program_gbox()
+        scroll_layout.addWidget(self.target_program_gbox)
 
         # Attack setting group box
         self.attack_gbox = self.create_attack_gbox()
@@ -543,6 +548,94 @@ class MainWindow(QMainWindow):
         return gbox
         logger.info(f"[UI] Map selected: {map_name}")
 
+    def create_target_program_gbox(self):
+        '''
+        Creates a group box that lets the user pick which program/window to
+        target. This makes the bot usable with windows other than
+        "MapleStory Worlds" (e.g. other MapleStory clients or emulators).
+        '''
+        gbox = QGroupBox("🎯 Target Program")
+        layout = QVBoxLayout()
+        layout.setSpacing(6)
+
+        # --- Window selector row ---
+        window_row = QHBoxLayout()
+        window_row.setSpacing(8)
+        window_row.setAlignment(Qt.AlignLeft)
+
+        window_row.addWidget(QLabel("Window:"))
+
+        # Editable combo box: user can pick an open window or type a title token
+        self.target_window_combo = QComboBox()
+        self.target_window_combo.setEditable(True)
+        self.target_window_combo.setMinimumWidth(360)
+        self.target_window_combo.setToolTip(
+            "Pick an open window, or type part of its title.\n"
+            "The bot will capture whichever window matches this text."
+        )
+        window_row.addWidget(self.target_window_combo)
+
+        self.button_refresh_windows = QPushButton("🔄 Refresh")
+        self.button_refresh_windows.setToolTip("Re-scan currently open windows")
+        self.button_refresh_windows.clicked.connect(self.refresh_window_list)
+        window_row.addWidget(self.button_refresh_windows)
+
+        layout.addLayout(window_row)
+
+        # --- Options row ---
+        options_row = QHBoxLayout()
+        options_row.setSpacing(16)
+        options_row.setAlignment(Qt.AlignLeft)
+
+        self.checkbox_exact_match = QCheckBox("Exact title match")
+        self.checkbox_exact_match.setToolTip(
+            "When checked, only a window whose full title exactly matches the\n"
+            "text above is used. Otherwise a substring match is used."
+        )
+        options_row.addWidget(self.checkbox_exact_match)
+
+        self.checkbox_auto_resize = QCheckBox("Auto-resize window")
+        self.checkbox_auto_resize.setToolTip(
+            "Force-resize the target window on start (needed for MapleStory\n"
+            "detection). Uncheck for programs that should not be resized."
+        )
+        options_row.addWidget(self.checkbox_auto_resize)
+
+        layout.addLayout(options_row)
+
+        gbox.setLayout(layout)
+
+        # Populate the window list once at startup
+        self.refresh_window_list()
+
+        return gbox
+
+    def refresh_window_list(self):
+        '''
+        Re-scan the open windows and repopulate the target window combo box,
+        preserving whatever the user has currently typed/selected.
+        '''
+        current_text = self.target_window_combo.currentText() if \
+            hasattr(self, "target_window_combo") else ""
+        try:
+            titles = list_visible_window_titles()
+        except Exception as e:
+            logger.warning(f"[UI] Failed to list windows: {e}")
+            titles = []
+
+        self.target_window_combo.blockSignals(True)
+        self.target_window_combo.clear()
+        self.target_window_combo.addItems(titles)
+        # Restore previous selection/text so a refresh never wipes user input
+        if current_text:
+            idx = self.target_window_combo.findText(current_text)
+            if idx != -1:
+                self.target_window_combo.setCurrentIndex(idx)
+            else:
+                self.target_window_combo.setEditText(current_text)
+        self.target_window_combo.blockSignals(False)
+        logger.info(f"[UI] Found {len(titles)} open windows")
+
     def create_attack_widget(self):
         '''
         Create a wedge widget: "Press key ➜ [KEY] for Mode A/B"
@@ -724,6 +817,12 @@ class MainWindow(QMainWindow):
         for key, cd in zip(buff_cfg["keys"], buff_cfg["cooldown"]):
             self.add_buff_row(key=key, cooldown=str(cd))  # <- new version below
 
+        # === Target Program / Game Window ===
+        gw_cfg = self.cfg.get("game_window", {})
+        self.target_window_combo.setEditText(gw_cfg.get("title", ""))
+        self.checkbox_exact_match.setChecked(bool(gw_cfg.get("exact_match", False)))
+        self.checkbox_auto_resize.setChecked(bool(gw_cfg.get("auto_resize", True)))
+
         # === Bot Mode ===
         index = 0
         if self.cfg["bot"]["mode"] == "aux":
@@ -746,6 +845,7 @@ class MainWindow(QMainWindow):
     def set_gbox_enabled(self, enabled: bool):
         gray_style = "color: lightgray;" if not enabled else ""
         gboxs = [
+            self.target_program_gbox,
             self.attack_gbox,
             self.key_binding_gbox,
             self.pet_skill_gbox,
@@ -938,6 +1038,14 @@ class MainWindow(QMainWindow):
 
         # Map selection
         self.cfg["bot"]["map"] = self.selected_map
+
+        # Target program / game window
+        self.cfg.setdefault("game_window", {})
+        title = self.target_window_combo.currentText().strip()
+        if title:
+            self.cfg["game_window"]["title"] = title
+        self.cfg["game_window"]["exact_match"] = self.checkbox_exact_match.isChecked()
+        self.cfg["game_window"]["auto_resize"] = self.checkbox_auto_resize.isChecked()
 
     def update_debug_canvas(self, img):
         if img is None:

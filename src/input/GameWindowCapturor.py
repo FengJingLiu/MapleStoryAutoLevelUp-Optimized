@@ -34,17 +34,28 @@ class GameWindowCapturor:
             self.frame = load_image(f"test/{test_image_name}.png")
             return
 
-        # Get game window title
-        self.window_title = get_game_window_title_by_token(cfg["game_window"]["title"])
+        # Get target program / game window title
+        game_window_cfg = cfg["game_window"]
+        self.window_title = get_game_window_title_by_token(
+            game_window_cfg["title"],
+            exact_match=game_window_cfg.get("exact_match", False),
+        )
 
         if self.window_title is None:
             raise RuntimeError(
-                f"[GameWindowCapturor] Unable to find window title containing: {cfg['game_window']['title']}"
+                f"[GameWindowCapturor] Unable to find window title containing: {game_window_cfg['title']}"
             )
         else:
-            logger.info(f"[GameWindowCapturor] Found game window title: {self.window_title}")
+            logger.info(f"[GameWindowCapturor] Found target window title: {self.window_title}")
 
-        resize_window(self.window_title, width=1296, height=759)
+        # Only force-resize when enabled. Non-MapleStory programs often should
+        # not be resized, so this is configurable via game_window.auto_resize.
+        if game_window_cfg.get("auto_resize", True):
+            resize_window(
+                self.window_title,
+                width=game_window_cfg.get("resize_width", 1296),
+                height=game_window_cfg.get("resize_height", 759),
+            )
 
         # Create capture handler
         self.capture = WindowsCapture(window_name=self.window_title)
