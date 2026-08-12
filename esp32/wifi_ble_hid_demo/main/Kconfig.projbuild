@@ -1,0 +1,36 @@
+menu "Wi-Fi BLE HID Demo"
+
+    config HID_WIFI_SSID
+        string "Wi-Fi SSID"
+        default ""
+        help
+            2.4 GHz Wi-Fi network name. ESP32-S3 does not support 5 GHz Wi-Fi.
+
+    config HID_WIFI_PASSWORD
+        string "Wi-Fi password"
+        default ""
+        help
+            Leave empty only for an open network. The generated sdkconfig is ignored by Git.
+
+    config HID_DEVICE_NAME
+        string "Bluetooth HID device name"
+        default "Maple-ESP32-Keyboard"
+
+    config HID_TCP_PORT
+        int "TCP command port"
+        range 1024 65535
+        default 3333
+
+    config HID_LEASE_TIMEOUT_MS
+        int "Client lease timeout (milliseconds)"
+        range 1000 30000
+        default 3000
+        help
+            All keys are released and the TCP client is disconnected after this idle time.
+
+    config HID_MAX_TAP_MS
+        int "Maximum TAP duration (milliseconds)"
+        range 10 5000
+        default 1000
+
+endmenu

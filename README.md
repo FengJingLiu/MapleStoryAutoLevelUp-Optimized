@@ -113,6 +113,37 @@ This work purely-based on Computer Vision technique, it doesn't required access 
 
 Note: this project DOES NOT support virtual environment(VM), it's only for recreational and academical use.
 
+## ESP32-S3 Keyboard Input
+
+The `main` branch sends all automated keyboard output to the ESP32-S3 over a
+persistent TCP connection. The intended capture-card topology is:
+
+```text
+Game PC B --HDMI--> capture card / PotPlayer on computer A --> bot detection
+Computer A --Wi-Fi--> ESP32-S3 --Bluetooth HID--> game PC B
+```
+
+Pair `Maple-ESP32-Keyboard` with game PC B before starting the bot, then set the
+board address in `config/config_default.yaml`:
+
+```yaml
+esp32_hid:
+  remote_target: True
+  host: "192.168.9.113"
+  port: 3333
+```
+
+`ESP32_HID_HOST` and `ESP32_HID_PORT` can override the YAML values. Startup
+fails closed unless the board reports `BLE_READY=1`; `--disable_control` skips
+the ESP32 connection for detection-only debugging. With `remote_target: True`,
+computer A's foreground window is intentionally ignored because MapleStory is
+assumed to stay in front on B. Pausing, disconnecting, and exiting release every
+held key; stale capture video also suspends input until fresh frames return.
+The current firmware is keyboard-only, so remote mode does not run
+any mouse-dependent workflow: party-window handling, channel switching,
+automatic login/character selection, and local window activation are all
+disabled. Firmware and setup instructions are in `esp32/README.md`.
+
 ### Email Test Credentials
 
 The experimental `tools/email_test.py` utility does not contain credentials.

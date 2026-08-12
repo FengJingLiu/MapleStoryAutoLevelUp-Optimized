@@ -121,6 +121,9 @@ class MapleStoryAutoBot:
         self.health_monitor = None # Health monitor
         self.profiler = None # Profiler, for performance issue debugging
         self.rune_solver = None # Rune solver
+        self._shutdown_lock = threading.Lock()
+        self._components_stopped = True
+        self._input_suspended_for_capture = False
 
         # Finite State Machine
         self.fsm = FiniteStateMachine()
@@ -147,10 +150,75 @@ class MapleStoryAutoBot:
         self.image_debug_signal = image_debug_signal
         self.route_map_viz_signal = route_map_viz_signal
 
+    def remote_keyboard_target(self):
+        """Return whether HID input goes to game computer B, not this PC."""
+        return self.cfg.get("esp32_hid", {}).get("remote_target", False)
+
+    def click_game_ui(self, coord, action):
+        """Click only when the captured window and game are on the same PC."""
+        if self.remote_keyboard_target():
+            logger.warning(
+                f"[{action}] Skipped local mouse click: ESP32 is paired to the "
+                "remote game computer and the current HID firmware is keyboard-only"
+            )
+            return False
+        click_in_game_window(self.capture.window_title, coord)
+        return True
+
+    def suspend_input_for_capture_loss(self):
+        """Fail closed once when the capture stream becomes stale."""
+        if self.kb is None or getattr(self, "_input_suspended_for_capture", False):
+            return False
+        self.kb.set_command("none none none")
+        if hasattr(self.kb, "set_capture_available"):
+            self.kb.set_capture_available(False)
+        else:
+            self.kb.disable()
+        self._input_suspended_for_capture = True
+        logger.warning("[capture] Input suspended because video frames stopped")
+        return True
+
+    def resume_input_after_capture(self):
+        """Resume only a suspension caused by capture loss, not a user pause."""
+        if self.kb is None or not getattr(
+            self, "_input_suspended_for_capture", False
+        ):
+            return False
+        if hasattr(self.kb, "set_capture_available"):
+            self.kb.set_capture_available(True)
+        else:
+            self.kb.enable()
+        self._input_suspended_for_capture = False
+        logger.info("[capture] Fresh video frames restored; input resumed")
+        return True
+
     def load_config(self, cfg):
         '''
         load_config
         '''
+        if cfg.get("esp32_hid", {}).get("remote_target", False):
+            # This capture-card setup controls computer B with a keyboard-only
+            # HID descriptor. Mouse-driven channel flows cannot be completed
+            # from computer A and must not repeatedly pause the combat loop.
+            logger.info(
+                "[load_config] Remote keyboard-only mode: all mouse-dependent "
+                "workflows are disabled"
+            )
+            for section_name in ("channel_change", "scheduled_channel_switching"):
+                section = cfg.get(section_name, {})
+                if section.get("enable", False):
+                    logger.warning(
+                        f"[load_config] Disabled {section_name}.enable: "
+                        "remote channel changes require mouse HID"
+                    )
+                    section["enable"] = False
+
+            if cfg.get("watchdog", {}).get("last_attack_timeout_action") == "change_channel":
+                logger.warning(
+                    "[load_config] Watchdog channel changes are unavailable in "
+                    "keyboard-only capture-card mode"
+                )
+
         # Parse color code in config
         self.color_code = {
             tuple(map(int, k.split(','))): v
@@ -256,52 +324,68 @@ class MapleStoryAutoBot:
 
         # Allow the same UI controller to start the bot again after a pause.
         self.is_terminated = False
+        if not hasattr(self, "_shutdown_lock"):
+            self._shutdown_lock = threading.Lock()
+        with self._shutdown_lock:
+            self._components_stopped = False
+        self._input_suspended_for_capture = False
+        self.kb = None
+        self.capture = None
+        self.health_monitor = None
+        self.profiler = None
+        self.rune_solver = None
 
-        # Start keyboard controller thread
-        self.kb = KeyBoardController(self.cfg)
-        if self.is_disable_control:
-            self.kb.disable() # Disable keyboard controller for debugging
+        try:
+            # Validate and start the capture source on computer A before opening
+            # the ESP32's only TCP input session.
+            if self.args.test_image == '':
+                self.capture = GameWindowCapturor(self.cfg)
+            else:
+                self.capture = GameWindowCapturor(self.cfg, self.args.test_image)
 
-        # Start game window capturing thread
-        if self.args.test_image == '':
-            self.capture = GameWindowCapturor(self.cfg)
-        else:
-            self.capture = GameWindowCapturor(self.cfg, self.args.test_image)
+            self.kb = KeyBoardController(
+                self.cfg,
+                connect_input=not self.is_disable_control,
+                capture_available=not self.remote_keyboard_target(),
+            )
+            self._input_suspended_for_capture = self.remote_keyboard_target()
 
-        # Start health monitoring thread
-        self.health_monitor = HealthMonitor(self.cfg, self.kb)
-        if self.cfg["health_monitor"]["enable"] and \
-            not self.is_disable_control:
-            self.health_monitor.start()
+            self.health_monitor = HealthMonitor(self.cfg, self.kb)
+            if self.cfg["health_monitor"]["enable"] and \
+                not self.is_disable_control:
+                self.health_monitor.start()
 
-        # Init profiler
-        self.profiler = Profiler(self.cfg)
+            self.profiler = Profiler(self.cfg)
+            self.rune_solver = RuneSolver(self.cfg)
 
-        # Init rune solver
-        self.rune_solver = RuneSolver(self.cfg)
+            # Reset all timers
+            self.t_last_frame = time.time()
+            self.t_watch_dog = time.time()
+            self.t_last_teleport = time.time()
+            self.t_last_attack = time.time()
+            self.t_last_minimap_update = time.time()
+            self.t_to_change_channel = time.time()
 
-        # Reset all timers
-        self.t_last_frame = time.time()
-        self.t_watch_dog = time.time()
-        self.t_last_teleport = time.time()
-        self.t_last_attack = time.time()
-        self.t_last_minimap_update = time.time()
-        self.t_to_change_channel = time.time()
+            # Set init state
+            if self.args.init_state != "":
+                self.fsm.set_init_state(self.args.init_state) # For debugging
+            elif self.cfg["bot"]["mode"] == "aux":
+                self.fsm.set_init_state("aux")
+            elif self.cfg["bot"]["mode"] == "patrol":
+                self.fsm.set_init_state("patrol")
+            else:
+                self.fsm.set_init_state("hunting")
 
-        # Set init state
-        if self.args.init_state != "":
-            self.fsm.set_init_state(self.args.init_state) # For debugging
-        elif self.cfg["bot"]["mode"] == "aux":
-            self.fsm.set_init_state("aux")
-        elif self.cfg["bot"]["mode"] == "patrol":
-            self.fsm.set_init_state("patrol")
-        else:
-            self.fsm.set_init_state("hunting")
-
-        # Start Auto Bot main thread
-        self.thread_auto_bot = threading.Thread(target=self.loop)
-        self.thread_auto_bot.start()
-        self.is_first_frame = True
+            self.is_first_frame = True
+            self.thread_auto_bot = threading.Thread(target=self.loop)
+            self.thread_auto_bot.start()
+        except BaseException:
+            # A failed start must not leave the capture thread or ESP32's
+            # single-client TCP connection alive and break the next retry.
+            self.is_terminated = True
+            self._stop_components()
+            self.thread_auto_bot = None
+            raise
 
         logger.info("[MapleStoryAutoBot] Started")
 
@@ -1191,6 +1275,12 @@ class MapleStoryAutoBot:
         '''
         ensure_is_in_party
         '''
+        if self.remote_keyboard_target():
+            logger.info(
+                "[ensure_is_in_party] Disabled in remote keyboard-only mode"
+            )
+            return False
+
         # open party window
         press_key(self.cfg["key"]["party"])
 
@@ -1209,9 +1299,10 @@ class MapleStoryAutoBot:
         if score_enable < thres:
             logger.info(f"[ensure_is_in_party] Find party enable button({round(score_enable, 2)})")
             h, w = self.img_create_party_enable.shape[:2]
-            click_in_game_window(self.capture.window_title,
+            self.click_game_ui(
                 (loc_enable[0] + w // 2,
-                 loc_enable[1] + h // 2 + self.cfg['game_window']['title_bar_height'])
+                 loc_enable[1] + h // 2 + self.cfg['game_window']['title_bar_height']),
+                "ensure_is_in_party",
             )
         else:
             logger.info("[ensure_is_in_party] Cannot find create party button."
@@ -1219,12 +1310,20 @@ class MapleStoryAutoBot:
 
         # close party window
         press_key(self.cfg["key"]["party"])
+        return True
 
     def channel_change(self):
         '''
         channel_change
         '''
         logger.info("[channel_change] Start")
+
+        if self.remote_keyboard_target():
+            logger.error(
+                "[channel_change] Disabled in capture-card mode: changing "
+                "channels requires mouse HID support on game computer B"
+            )
+            return False
 
         window_title = self.capture.window_title
         ui_coords = self.cfg["ui_coords"]
@@ -1258,7 +1357,7 @@ class MapleStoryAutoBot:
 
         if self.is_terminated:
             logger.info("[channel_change] Cancelled during shutdown")
-            return
+            return False
 
         logger.info(f"login_button button found: {loc_login_button}")
 
@@ -1280,23 +1379,63 @@ class MapleStoryAutoBot:
 
         self.fsm.set_init_state("hunting")
         self.t_last_attack = time.time() # Update timer
+        return True
+
+    def _stop_components(self):
+        """Idempotently stop all producers and the remote HID session."""
+        if not hasattr(self, "_shutdown_lock"):
+            # Keep lightweight test doubles created with __new__ compatible.
+            self._shutdown_lock = threading.Lock()
+            self._components_stopped = False
+
+        with self._shutdown_lock:
+            if self._components_stopped:
+                return
+            self._components_stopped = True
+
+            # Signal every producer first, then immediately close the input
+            # gate and release keys before waiting for any worker to join.
+            if self.health_monitor is not None:
+                try:
+                    if hasattr(self.health_monitor, "request_stop"):
+                        self.health_monitor.request_stop()
+                    else:
+                        self.health_monitor.is_terminated = True
+                except Exception as exc:
+                    logger.error(f"[shutdown] Failed to signal health monitor: {exc}")
+            if self.kb is not None:
+                try:
+                    if hasattr(self.kb, "disable"):
+                        self.kb.disable()
+                    else:
+                        self.kb.is_terminated = True
+                        if hasattr(self.kb, "release_all_key"):
+                            self.kb.release_all_key()
+                except Exception as exc:
+                    logger.error(f"[shutdown] Failed to release keyboard input: {exc}")
+
+            if self.health_monitor is not None:
+                try:
+                    self.health_monitor.stop()
+                except Exception as exc:
+                    logger.error(f"[shutdown] Failed to stop health monitor: {exc}")
+            if self.kb is not None and hasattr(self.kb, "stop"):
+                try:
+                    self.kb.stop()
+                except Exception as exc:
+                    logger.error(f"[shutdown] Failed to stop keyboard input: {exc}")
+            if self.capture is not None:
+                try:
+                    self.capture.stop()
+                except Exception as exc:
+                    logger.error(f"[shutdown] Failed to stop capture: {exc}")
 
     def terminate_threads(self):
         '''
         terminate all threads
         '''
         self.is_terminated = True
-
-        # Terminate keyboard controller
-        if self.kb is not None:
-            self.kb.is_terminated = True
-            self.kb.release_all_key()
-        # Terminate game window capturor
-        if self.capture is not None:
-            self.capture.stop()
-        # Terminate health monitor
-        if self.health_monitor is not None:
-            self.health_monitor.stop()
+        self._stop_components()
 
         # Wait for the main loop unless termination was requested by that loop.
         thread = self.thread_auto_bot
@@ -1570,11 +1709,13 @@ class MapleStoryAutoBot:
         # Get game window frame
         img_frame = self.get_img_frame()
         if img_frame is None:
-            if not is_mac():
+            self.suspend_input_for_capture_loss()
+            if not is_mac() and not self.remote_keyboard_target():
                 activate_game_window(self.capture.window_title)
             return -1 # Wait for game window to be ready
         else:
             self.img_frame = img_frame
+            self.resume_input_after_capture()
 
         # Grayscale game window
         self.img_frame_gray = cv2.cvtColor(self.img_frame, cv2.COLOR_BGR2GRAY)
@@ -1597,16 +1738,18 @@ class MapleStoryAutoBot:
         # Get minimap coordinate and size on game window
         minimap_result = get_minimap_loc_size(self.img_frame)
         if minimap_result is None:
-            if time.time() - self.t_last_minimap_update > 30:
+            if not self.remote_keyboard_target() and \
+                time.time() - self.t_last_minimap_update > 30:
                 # Unable to get minimap for 30 seconds -> assume it's login screen
                 loc_login_button = self.get_login_button_location()
                 if loc_login_button:
                     logger.info("Found login button on screen. Proceed to login.")
-                    click_in_game_window(self.capture.window_title,
-                                         loc_login_button)
+                    self.click_game_ui(loc_login_button, "auto_login")
                     time.sleep(3)
-                    click_in_game_window(self.capture.window_title,
-                                         self.cfg["ui_coords"]["select_character"])
+                    self.click_game_ui(
+                        self.cfg["ui_coords"]["select_character"],
+                        "auto_login",
+                    )
                     time.sleep(2)
         else:
             x, y, w, h = minimap_result
@@ -1713,13 +1856,24 @@ class MapleStoryAutoBot:
             cfg_action = self.cfg["watchdog"]["last_attack_timeout_action"]
             if cfg_action == "change_channel":
                 logger.info("[Attack Timeout] Change channel!")
-                self.channel_change()
+                if self.remote_keyboard_target():
+                    logger.warning(
+                        "[Attack Timeout] Skipped channel change: the remote "
+                        "ESP32 firmware does not provide mouse HID"
+                    )
+                    # Do not retry an unavailable mouse operation every frame.
+                    self.t_last_attack = time.time()
+                else:
+                    self.channel_change()
             elif cfg_action == "go_home":
                 logger.info("[Attack Timeout] Return home!")
-                press_key(self.cfg["key"]["return_home"])
-                # Terminate Autobot
-                self.is_terminated = True
-                self.kb.is_terminated = True
+                if press_key(self.cfg["key"].get("return_home", "")):
+                    # Terminate only after an acknowledged or uncertain TAP;
+                    # uncertain TAPs are never replayed automatically.
+                    self.is_terminated = True
+                    self.kb.is_terminated = True
+                else:
+                    self.t_last_attack = time.time()
             else:
                 logger.info(f"Unsupported timeout mode: {cfg_action}")
 
@@ -1728,6 +1882,10 @@ class MapleStoryAutoBot:
         ######################
         ### State Behavior ###
         ######################
+        # Every action is a one-frame request. Individual states may replace
+        # it below; this gives the keyboard controller a clean action edge and
+        # prevents stale attack/jump/teleport TAP commands from repeating.
+        self.cmd_action = "none"
         self.fsm.do_state_stuff()
 
         self.is_first_frame = False
@@ -1773,40 +1931,51 @@ class MapleStoryAutoBot:
         Auto Bot main loop
         Only run when call autobot from UI framework and AutoBotController
         '''
-        # Make sure player is in party
-        if not is_mac():
-            activate_game_window(self.capture.window_title)
-            time.sleep(0.3)
-            self.ensure_is_in_party()
+        try:
+            # Computer B is already foreground in capture-card mode. Focusing
+            # PotPlayer on A is unrelated to where the BLE keyboard types.
+            if not is_mac() and not self.remote_keyboard_target():
+                activate_game_window(self.capture.window_title)
+                time.sleep(0.3)
+                self.ensure_is_in_party()
 
-        while not self.is_terminated and not self.kb.is_terminated:
+            while not self.is_terminated and not self.kb.is_terminated:
+                t_start = time.time()
 
-            t_start = time.time()
+                # Process one game window frame
+                self.is_frame_done = False
+                ret = self.run_once()
 
-            # Process one game window frame
-            self.is_frame_done = False
-            ret = self.run_once()
+                # Only proceed if the frame is valid
+                if ret == 0:
+                    # Draw image on debug window
+                    if self.is_show_debug_window and self.is_ui:
+                        img_frame_debug_emit = self.img_frame_debug[:
+                            self.cfg["ui_coords"]["ui_y_start"], :].copy()
+                        img_route_debug_emit = self.img_route_debug.copy()
+                        self.image_debug_signal.emit(img_frame_debug_emit)
+                        self.route_map_viz_signal.emit(img_route_debug_emit)
 
-            # Only proceed if the frame is valid
-            if ret == 0:
-                # Draw image on debug window
-                if self.is_show_debug_window and self.is_ui:
-                    img_frame_debug_emit = self.img_frame_debug[:
-                        self.cfg["ui_coords"]["ui_y_start"], :].copy()
-                    img_route_debug_emit = self.img_route_debug.copy()
-                    self.image_debug_signal.emit(img_frame_debug_emit)
-                    self.route_map_viz_signal.emit(img_route_debug_emit)
-            else:
-                pass
-                # logger.warning("Skipped debug window update due to invalid frame.")
+                self.is_frame_done = True
 
-            self.is_frame_done = True
-
-            # Cap FPS to save system resource
-            frame_duration = time.time() - t_start
-            target_duration = 1.0 / self.cfg["system"]["fps_limit_main"]
-            if frame_duration < target_duration:
-                time.sleep(target_duration - frame_duration)
+                # Cap FPS to save system resource
+                frame_duration = time.time() - t_start
+                target_duration = 1.0 / self.cfg["system"]["fps_limit_main"]
+                if frame_duration < target_duration:
+                    time.sleep(target_duration - frame_duration)
+        except BaseException as exc:
+            logger.error(f"[MapleStoryAutoBot] Main loop failed: {exc}")
+            raise
+        finally:
+            # Never leave the independent keyboard/heartbeat threads alive if
+            # detection or UI rendering crashes; a remote movement key could
+            # otherwise be renewed indefinitely on computer B.
+            try:
+                self.terminate_threads()
+            except Exception as exc:
+                logger.error(f"[MapleStoryAutoBot] Emergency cleanup failed: {exc}")
+            if self.thread_auto_bot is threading.current_thread():
+                self.thread_auto_bot = None
 
 def main(args):
     '''

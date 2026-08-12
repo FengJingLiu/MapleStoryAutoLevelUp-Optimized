@@ -12,3 +12,4 @@ test/
 *config_custom.yaml
 *.exe
 *.spec
+esp32/wifi_ble_hid_demo/sdkconfig.defaults

@@ -9,6 +9,19 @@ bot:
   attack: "directional" # Options: "aoe_skill" "directional"
   map: "" # Please refer to config/config_data.yaml
 
+esp32_hid:
+  # All simulated keyboard output is sent over Wi-Fi to the ESP32-S3,
+  # which forwards it to the paired computer as a physical Bluetooth LE HID keyboard.
+  # ESP32_HID_HOST and ESP32_HID_PORT environment variables override these values.
+  remote_target: True         # True when BLE is paired to a separate game PC.
+  host: "192.168.9.113"
+  port: 3333
+  connect_timeout: 1.0
+  request_timeout: 2.0       # Must be longer than the longest key tap.
+  heartbeat_interval: 1.0    # Firmware releases all keys if its 3 s lease expires.
+  reconnect_interval: 0.5
+  state_refresh_interval: 1.0 # Reassert held movement after a brief BLE reconnect.
+
 key:
   # 🎮 Keyboard Mapping
   # Adjust the keys to match your in-game keybindings.
@@ -316,6 +329,7 @@ game_window:
                                #      break/reset when moved). Aux mode only needs 16:9.
   resize_width: 1296           # 📐 Target window width (incl. borders) when auto_resize is True
   resize_height: 759           # 📐 Target window height (incl. title bar) when auto_resize is True
+  frame_timeout: 1.0           # 🛑 Release remote input if captured video stops updating.
 
 email:
   # 📩 Email

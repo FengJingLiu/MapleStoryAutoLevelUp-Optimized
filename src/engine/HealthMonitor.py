@@ -61,14 +61,23 @@ class HealthMonitor:
             self.thread.start()
             logger.info("[Health Monitor] Started")
 
-    def stop(self):
+    def request_stop(self):
+        """Signal the monitor without waiting for its worker thread."""
+        self.is_terminated = True
+
+    def stop(self, timeout=5.0):
         '''
         Stop health monitoring thread
         '''
-        self.is_terminated = True
-        if self.thread:
-            self.thread.join()
-            logger.info("[Health Monitor] Terminated")
+        self.request_stop()
+        if self.thread and self.thread is not threading.current_thread():
+            self.thread.join(timeout=timeout)
+            if self.thread.is_alive():
+                logger.warning(
+                    f"[Health Monitor] Did not stop within {timeout} seconds"
+                )
+            else:
+                logger.info("[Health Monitor] Terminated")
 
     def enable(self):
         '''
@@ -164,11 +173,15 @@ class HealthMonitor:
                 hp_cd    = self.cfg["health_monitor"]["add_hp_cooldown"]
                 mp_cd    = self.cfg["health_monitor"]["add_mp_cooldown"]
                 watchdog_timeout = self.cfg["health_monitor"]["return_home_watch_dog_timeout"]
+                add_hp_key = self.cfg["key"].get("add_hp", "")
+                add_mp_key = self.cfg["key"].get("add_mp", "")
+                has_add_hp_key = isinstance(add_hp_key, str) and bool(add_hp_key.strip())
+                has_add_mp_key = isinstance(add_mp_key, str) and bool(add_mp_key.strip())
 
                 # Check if need to heal (with cooldown)
                 if self.cfg["health_monitor"]["force_heal"]:
                     # Ignore cooldown and force keycontroller to heal first
-                    if self.hp_percent < hp_thres:
+                    if has_add_hp_key and self.hp_percent < hp_thres:
                         if not self.kb.is_need_force_heal:
                             logger.info(f"[Health Monitor] Force heal triggered, "
                                         f"HP: {self.hp_percent:.1f}%")
@@ -176,11 +189,11 @@ class HealthMonitor:
                     else:
                         self.kb.is_need_force_heal = False
                 else:
-                    if (self.hp_percent <= hp_thres and
+                    if (has_add_hp_key and self.hp_percent <= hp_thres and
                         t_cur - self.t_last_heal > hp_cd):
-                        self._heal()
-                        logger.info(f"[Health Monitor] Auto heal triggered, HP: {self.hp_percent:.1f}%")
-                        self.t_last_heal = t_cur
+                        if self._heal():
+                            logger.info(f"[Health Monitor] Auto heal triggered, HP: {self.hp_percent:.1f}%")
+                            self.t_last_heal = t_cur
 
                 # Check if no HP potion and need to return home
                 if self.cfg["health_monitor"]["return_home_if_no_potion"]:
@@ -192,15 +205,20 @@ class HealthMonitor:
                             logger.warning(f"[Health Monitor] HP({self.hp_percent:.1f}%) < {hp_thres:.1f}% "
                                            f"for {round(t_cur - self.t_hp_watch_dog, 2)} seconds.")
                             logger.warning(f"[Health Monitor] Return home because potion is used up.")
-                            press_key(self.cfg["key"]["return_home"]) # Return home
-                            self.is_terminated = True # Terminate Health monitor
-                            self.kb.is_terminated = True # Terminate AutoBot
+                            if press_key(self.cfg["key"].get("return_home", "")):
+                                self.is_terminated = True # Terminate Health monitor
+                                self.kb.is_terminated = True # Terminate AutoBot
+                            else:
+                                # Empty mappings and definite network failures
+                                # must not terminate before a key was sent.
+                                self.t_hp_watch_dog = t_cur
 
                 # Check if need MP (with cooldown)
-                if (self.mp_percent <= mp_thres and t_cur - self.t_last_mp > mp_cd):
-                    self._add_mp()
-                    self.t_last_mp = t_cur
-                    logger.info(f"[Health Monitor] Auto MP triggered, MP: {self.mp_percent:.1f}%")
+                if (has_add_mp_key and self.mp_percent <= mp_thres and
+                    t_cur - self.t_last_mp > mp_cd):
+                    if self._add_mp():
+                        self.t_last_mp = t_cur
+                        logger.info(f"[Health Monitor] Auto MP triggered, MP: {self.mp_percent:.1f}%")
 
                 # Sleep to avoid excessive CPU usage
                 self.limit_fps()
@@ -214,18 +232,20 @@ class HealthMonitor:
         Execute heal action
         '''
         try:
-            press_key(self.cfg["key"]["add_hp"], 0.05)
+            return bool(press_key(self.cfg["key"]["add_hp"], 0.05))
         except Exception as e:
             logger.error(f"[Health Monitor] Heal action failed: {e}")
+            return False
 
     def _add_mp(self):
         '''
         Execute MP recovery action
         '''
         try:
-            press_key(self.cfg["key"]["add_mp"], 0.05)
+            return bool(press_key(self.cfg["key"]["add_mp"], 0.05))
         except Exception as e:
             logger.error(f"[Health Monitor] MP action failed: {e}")
+            return False
 
     def limit_fps(self):
         '''

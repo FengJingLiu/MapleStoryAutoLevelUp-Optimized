@@ -21,6 +21,9 @@ class GameWindowCapturor:
     def __init__(self, cfg, test_image_name = None):
         self.cfg = cfg
         self.frame = None
+        self.last_frame_time = 0.0
+        self.is_closed = False
+        self.is_static_frame = test_image_name is not None
         self.lock = threading.Lock()
         self.is_terminated = False
         self.fps = 0
@@ -74,12 +77,17 @@ class GameWindowCapturor:
         '''
         with self.lock:
             self.frame = frame.frame_buffer
+            self.last_frame_time = time.monotonic()
+            self.is_closed = False
         self.limit_fps()
 
     def on_closed(self):
         '''
         Capture closed callback.
         '''
+        with self.lock:
+            self.frame = None
+            self.is_closed = True
         logger.warning("[GameWindowCapturor] closed.")
         cv2.destroyAllWindows()
 
@@ -88,7 +96,14 @@ class GameWindowCapturor:
         Safely get latest game window frame.
         '''
         with self.lock:
-            if self.frame is None:
+            frame_timeout = float(
+                self.cfg.get("game_window", {}).get("frame_timeout", 1.0)
+            )
+            if self.frame is None or self.is_closed or (
+                not self.is_static_frame
+                and self.last_frame_time > 0
+                and time.monotonic() - self.last_frame_time > frame_timeout
+            ):
                 return None
             return cv2.cvtColor(self.frame, cv2.COLOR_BGRA2BGR)
 
@@ -98,6 +113,9 @@ class GameWindowCapturor:
         '''
         if self.capture_control is not None:
             self.capture_control.stop()
+        with self.lock:
+            self.frame = None
+            self.is_closed = True
         logger.info("[GameWindowCapturor] Terminated")
 
     def limit_fps(self):

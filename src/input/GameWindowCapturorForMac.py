@@ -67,6 +67,8 @@ class GameWindowCapturor:
     def __init__(self, cfg):
         self.cfg = cfg
         self.frame = None
+        self.last_frame_time = 0.0
+        self.is_closed = False
         self.lock = threading.Lock()
         self.is_terminated = False
 
@@ -117,6 +119,9 @@ class GameWindowCapturor:
         Stop capturing thread
         '''
         self.is_terminated = True
+        with self.lock:
+            self.frame = None
+            self.is_closed = True
         logger.info("[GameWindowCapturor] Terminated")
 
     def update_window_region(self):
@@ -137,13 +142,21 @@ class GameWindowCapturor:
         frame = np.array(img)
         with self.lock:
             self.frame = frame
+            self.last_frame_time = time.monotonic()
+            self.is_closed = False
 
     def get_frame(self):
         '''
         安全地獲取最新的螢幕畫面
         '''
         with self.lock:
-            if self.frame is None:
+            frame_timeout = float(
+                self.cfg.get("game_window", {}).get("frame_timeout", 1.0)
+            )
+            if self.frame is None or self.is_closed or (
+                self.last_frame_time > 0
+                and time.monotonic() - self.last_frame_time > frame_timeout
+            ):
                 return None
             # cv2.imwrite("debug_frame.png", self.frame)
             return cv2.cvtColor(self.frame, cv2.COLOR_BGRA2BGR)
@@ -152,6 +165,9 @@ class GameWindowCapturor:
         '''
         捕捉結束後的回調
         '''
+        with self.lock:
+            self.frame = None
+            self.is_closed = True
         logger.warning("Capture session closed.")
         cv2.destroyAllWindows()
 
