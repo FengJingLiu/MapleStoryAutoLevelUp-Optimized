@@ -1,7 +1,8 @@
 bot:
-  map: fire_land_1
+  map: wisdom_forest
   mode: debug
 game_window:
+  capture_profile: potplayer
   title: "TV/CAM/\u8BBE\u5907 - PotPlayer"
 health_monitor:
   add_hp_percent: 0

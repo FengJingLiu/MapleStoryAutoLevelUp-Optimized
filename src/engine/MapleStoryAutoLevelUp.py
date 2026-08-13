@@ -29,7 +29,12 @@ from src.utils.common import (find_pattern_sqdiff, draw_rectangle, draw_circle,
     click_in_game_window, mask_route_colors, to_opencv_hsv, debug_minimap_colors,
     activate_game_window, normalize_pixel_coordinate, resize_window
 )
-from src.utils.detection import detection_center, detection_to_box, intersection_area
+from src.utils.detection import (
+    detection_center,
+    detection_to_box,
+    intersection_area,
+    suppress_nearby_same_class,
+)
 from src.input.CaptureFramePreprocessor import preprocess_capture_frame
 from src.input.KeyBoardController import KeyBoardController, press_key
 from src.input.KeyBoardListener import KeyBoardListener
@@ -119,6 +124,10 @@ class MapleStoryAutoBot:
         self.img_routes = []
         self.img_nametag = None
         self.img_nametag_gray = None
+        self.img_nametag_medal = None
+        self.img_nametag_medal_gray = None
+        self.img_nametag_pet = None
+        self.img_nametag_pet_gray = None
         self.img_create_party_enable = None
         self.img_create_party_disable = None
         self.img_login_button = None
@@ -242,6 +251,10 @@ class MapleStoryAutoBot:
         self.img_route_debug = None
         self.img_routes = []
         self.monsters_info = {}
+        self.img_nametag_medal = None
+        self.img_nametag_medal_gray = None
+        self.img_nametag_pet = None
+        self.img_nametag_pet_gray = None
 
         if mode == "debug":
             logger.info(
@@ -333,6 +346,40 @@ class MapleStoryAutoBot:
             self.img_nametag = load_image(f"nametag/{cfg['nametag']['name']}.png")
             self.img_nametag_gray = load_image(f"nametag/{cfg['nametag']['name']}.png",
                                                cv2.IMREAD_GRAYSCALE)
+            medal_cfg = cfg["nametag"].get("medal", {})
+            if medal_cfg.get("enable", False):
+                medal_name = (
+                    medal_cfg.get("name")
+                    or f"{cfg['nametag']['name']}_medal"
+                )
+                medal_path = f"nametag/{medal_name}.png"
+                if os.path.exists(medal_path):
+                    self.img_nametag_medal = load_image(medal_path)
+                    self.img_nametag_medal_gray = load_image(
+                        medal_path, cv2.IMREAD_GRAYSCALE
+                    )
+                else:
+                    logger.warning(
+                        f"NameTag medal template not found: {medal_path}; "
+                        "falling back to ID-only matching"
+                    )
+            pet_cfg = cfg["nametag"].get("pet", {})
+            if pet_cfg.get("enable", False):
+                pet_name = (
+                    pet_cfg.get("name")
+                    or f"{cfg['nametag']['name']}_pet"
+                )
+                pet_path = f"nametag/{pet_name}.png"
+                if os.path.exists(pet_path):
+                    self.img_nametag_pet = load_image(pet_path)
+                    self.img_nametag_pet_gray = load_image(
+                        pet_path, cv2.IMREAD_GRAYSCALE
+                    )
+                else:
+                    logger.warning(
+                        f"NameTag pet template not found: {pet_path}; "
+                        "pet-assisted matching is disabled"
+                    )
 
         # Load misc image
         lang = cfg["system"]["language"]
@@ -507,15 +554,12 @@ class MapleStoryAutoBot:
 
     def get_player_location_by_nametag(self):
         '''
-        Detects the player's location based on the nametag position in the game window.
+        Detect the player from their ID and, when configured, the medal below it.
 
-        This function works by:
-        - Extracting a vertical region of interest (ROI) where the nametag is expected.
-        - Padding the ROI to avoid template matching edge issues.
-        - Using template matching to locate the nametag, split into left and right halves
-        to improve robustness against partial occlusion.
-        - Selecting the best match (left or right) based on score and cache status.
-        - Computing the player's center position by applying a fixed offset to the nametag.
+        Overlapping ID fragments tolerate a pet or another player covering part of
+        the text. A fragment is allowed a looser score only when the medal also
+        matches at the expected center-aligned position. The medal is never used by
+        itself, because nearby players can equip the same medal.
 
         Returns:
             loc_player (tuple): The (x, y) coordinates of the player's estimated location.
@@ -524,35 +568,91 @@ class MapleStoryAutoBot:
         img_camera = self.img_frame_gray[
             :self.cfg["ui_coords"]["ui_y_start"], :]
 
-        # Get nametag image and search image
-        if self.cfg["nametag"]["mode"] == "white_mask":
+        nametag_cfg = self.cfg["nametag"]
+        mode = nametag_cfg["mode"]
+
+        # Get nametag image and search image.
+        if mode == "white_mask":
             # Apply Gaussian blur for smoother white detection
             img_camera = cv2.GaussianBlur(img_camera, (3, 3), 0)
             img_nametag = cv2.GaussianBlur(self.img_nametag_gray, (3, 3), 0)
             lower_white, upper_white = (150, 255)
-            img_roi = cv2.inRange(img_camera, lower_white, upper_white)
+            img_camera_search = cv2.inRange(
+                img_camera, lower_white, upper_white
+            )
             img_nametag  = cv2.inRange(img_nametag, lower_white, upper_white)
-        elif self.cfg["nametag"]["mode"] == "grayscale":
-            img_roi = img_camera
+        elif mode == "grayscale":
+            img_camera_search = img_camera
             img_nametag = self.img_nametag_gray
-        elif self.cfg["nametag"]["mode"] == "histogram_eq":
+        elif mode == "histogram_eq":
             # Apply histogram equalization
             img_nametag_eq = cv2.equalizeHist(self.img_nametag_gray)
             img_camera_eq = cv2.equalizeHist(img_camera)
 
             # Apply global (fixed) threshold
             _, img_nametag = cv2.threshold(img_nametag_eq, 150, 255, cv2.THRESH_BINARY)
-            _, img_roi = cv2.threshold(img_camera_eq, 150, 255, cv2.THRESH_BINARY)
+            _, img_camera_search = cv2.threshold(
+                img_camera_eq, 150, 255, cv2.THRESH_BINARY
+            )
         else:
-            logger.error(f"Unsupported nametag detection mode: {self.cfg['nametag']['mode']}")
+            logger.error(f"Unsupported nametag detection mode: {mode}")
             return
-        # cv2.imshow("img_roi", img_roi)
-        # cv2.imshow("img_nametag", img_nametag)
+
+        medal_cfg = nametag_cfg.get("medal", {})
+        img_medal_color = getattr(self, "img_nametag_medal", None)
+        img_medal_gray = getattr(self, "img_nametag_medal_gray", None)
+        use_medal = bool(
+            medal_cfg.get("enable", False)
+            and img_medal_color is not None
+            and img_medal_gray is not None
+        )
+        img_medal = None
+        medal_mask = None
+        if use_medal:
+            if mode == "white_mask":
+                img_medal = cv2.GaussianBlur(img_medal_gray, (3, 3), 0)
+                img_medal = cv2.inRange(
+                    img_medal, lower_white, upper_white
+                )
+            elif mode == "histogram_eq":
+                img_medal_eq = cv2.equalizeHist(img_medal_gray)
+                _, img_medal = cv2.threshold(
+                    img_medal_eq, 150, 255, cv2.THRESH_BINARY
+                )
+            else:
+                img_medal = img_medal_gray
+            medal_mask = get_mask(img_medal_color, (0, 255, 0))
+
+        pet_cfg = nametag_cfg.get("pet", {})
+        img_pet_color = getattr(self, "img_nametag_pet", None)
+        img_pet_gray = getattr(self, "img_nametag_pet_gray", None)
+        use_pet = bool(
+            use_medal
+            and pet_cfg.get("enable", False)
+            and img_pet_color is not None
+            and img_pet_gray is not None
+        )
+        img_pet = None
+        pet_mask = None
+        if use_pet:
+            if mode == "white_mask":
+                img_pet = cv2.GaussianBlur(img_pet_gray, (3, 3), 0)
+                img_pet = cv2.inRange(
+                    img_pet, lower_white, upper_white
+                )
+            elif mode == "histogram_eq":
+                img_pet_eq = cv2.equalizeHist(img_pet_gray)
+                _, img_pet = cv2.threshold(
+                    img_pet_eq, 150, 255, cv2.THRESH_BINARY
+                )
+            else:
+                img_pet = img_pet_gray
+            pet_mask = get_mask(img_pet_color, (0, 255, 0))
 
         # Pad search region to deal with fail detection when player is at map edge
         (pad_y, pad_x) = self.img_nametag.shape[:2]
         img_roi = cv2.copyMakeBorder(
-            img_roi,
+            img_camera_search,
             pad_y, pad_y, pad_x, pad_x,
             borderType=cv2.BORDER_REPLICATE  # replicate border for safe matching
         )
@@ -566,30 +666,73 @@ class MapleStoryAutoBot:
         else:
             last_result = None
 
-        # Get number of splits
         h, w = img_nametag.shape
-        num_splits = max(1, w // self.cfg["nametag"]["split_width"])
-        w_split = w // num_splits
-
         # Get nametag's background mask
         mask = get_mask(self.img_nametag, (0, 255, 0))
 
-        # Vertically split the nametag image
+        # ID-only mode retains the legacy equal split behavior. With a medal,
+        # use the complete ID plus overlapping fragments, so an occluder cannot
+        # remove the same glyphs from every candidate.
         nametag_splits = {}
-        for i in range(num_splits):
-            x_s = i * w_split
-            x_e = (i + 1) * w_split if i < num_splits - 1 else w
-            nametag_splits[f"{i+1}/{num_splits}"] = {
+        if use_medal:
+            regions = [("full", 0, w)]
+            fragment_width = min(
+                w,
+                max(
+                    1,
+                    int(
+                        medal_cfg.get(
+                            "id_fragment_width",
+                            nametag_cfg.get("split_width", w),
+                        )
+                    ),
+                ),
+            )
+            if fragment_width < w:
+                fragment_stride = max(
+                    1,
+                    int(
+                        medal_cfg.get(
+                            "id_fragment_stride", fragment_width // 2
+                        )
+                    ),
+                )
+                starts = list(
+                    range(0, w - fragment_width + 1, fragment_stride)
+                )
+                if starts[-1] != w - fragment_width:
+                    starts.append(w - fragment_width)
+                starts = sorted(set(starts))
+                for index, x_s in enumerate(starts, start=1):
+                    regions.append(
+                        (
+                            f"part {index}/{len(starts)}",
+                            x_s,
+                            x_s + fragment_width,
+                        )
+                    )
+        else:
+            split_width = max(1, int(nametag_cfg["split_width"]))
+            num_splits = max(1, w // split_width)
+            w_split = w // num_splits
+            regions = []
+            for i in range(num_splits):
+                x_s = i * w_split
+                x_e = (i + 1) * w_split if i < num_splits - 1 else w
+                regions.append((f"{i+1}/{num_splits}", x_s, x_e))
+
+        for tag_type, x_s, x_e in regions:
+            nametag_splits[tag_type] = {
                 "img": img_nametag[:, x_s:x_e],
                 "mask": mask[:, x_s:x_e],
                 "last_result": (
-                    (last_result[0] + x_s, last_result[1]) if last_result else None
+                    (last_result[0] + x_s, last_result[1])
+                    if last_result else None
                 ),
-                "score_penalty": 0.0,
-                "offset_x": x_s
+                "offset_x": x_s,
             }
 
-        # Match tempalte
+        # Match ID candidates.
         matches = []
         for tag_type, split in nametag_splits.items():
             loc, score, is_cached = find_pattern_sqdiff(
@@ -597,7 +740,7 @@ class MapleStoryAutoBot:
                 split["img"],
                 last_result=split["last_result"],
                 mask=split["mask"],
-                global_threshold=self.cfg["nametag"]["global_diff_thres"]
+                global_threshold=nametag_cfg["global_diff_thres"]
             )
             # A weak local result is only a candidate. Compare it with a full
             # search so a nearby rock/rope texture cannot beat the true tag.
@@ -621,27 +764,203 @@ class MapleStoryAutoBot:
                     loc, score, is_cached = global_loc, global_score, False
             w_match = split["img"].shape[1]
             h_match = split["img"].shape[0]
-            score += split["score_penalty"]
-            matches.append((tag_type, loc, score, w_match, h_match, is_cached, split["offset_x"]))
+            offset_x = split["offset_x"]
+            loc_nametag = (
+                loc[0] - offset_x - pad_x,
+                loc[1] - pad_y,
+            )
+            matches.append({
+                "tag_type": tag_type,
+                "loc_nametag": loc_nametag,
+                "id_score": float(score),
+                "is_cached": is_cached,
+                "w_match": w_match,
+                "h_match": h_match,
+                "medal_loc": None,
+                "medal_score": None,
+                "is_valid": False,
+            })
 
-        # Select best match and fix offset:
-        matches.sort(key=lambda x: x[2])
-        tag_type, loc_nametag, score, w_match, h_match, is_cached, offset_x = matches[0]
+        # Verify each ID candidate against the medal only inside a small area
+        # below it. This geometrical gate rejects the same medal under a nearby
+        # player and costs much less than a second full-frame search.
+        if use_medal:
+            medal_h, medal_w = img_medal.shape[:2]
+            tolerance = medal_cfg.get("search_tolerance", (18, 6))
+            tolerance_x = max(0, int(tolerance[0]))
+            tolerance_y = max(0, int(tolerance[1]))
+            center_offset_x = int(medal_cfg.get("center_offset_x", 0))
+            vertical_gap = int(medal_cfg.get("vertical_gap", 0))
+            camera_h, camera_w = img_camera_search.shape[:2]
+            medal_threshold = float(medal_cfg.get("diff_thres", 0.18))
+            assisted_id_threshold = float(
+                medal_cfg.get(
+                    "assisted_id_diff_thres",
+                    nametag_cfg["diff_thres"],
+                )
+            )
 
-        # Adjust match location back to full nametag coordinates
-        loc_nametag = (loc_nametag[0] - offset_x, loc_nametag[1])
-        loc_nametag = (
-            loc_nametag[0] - pad_x,
-            loc_nametag[1] - pad_y
-        )
+            for match in matches:
+                id_x, id_y = match["loc_nametag"]
+                expected_x = int(round(
+                    id_x + w / 2 - medal_w / 2 + center_offset_x
+                ))
+                expected_y = id_y + h + vertical_gap
+                x0 = max(0, expected_x - tolerance_x)
+                y0 = max(0, expected_y - tolerance_y)
+                x1 = min(
+                    camera_w,
+                    expected_x + medal_w + tolerance_x,
+                )
+                y1 = min(
+                    camera_h,
+                    expected_y + medal_h + tolerance_y,
+                )
+                medal_roi = img_camera_search[y0:y1, x0:x1]
+                if (
+                    medal_roi.shape[0] < medal_h
+                    or medal_roi.shape[1] < medal_w
+                ):
+                    match["medal_score"] = 1.0
+                    continue
+                medal_loc, medal_score, _ = find_pattern_sqdiff(
+                    medal_roi,
+                    img_medal,
+                    last_result=None,
+                    mask=medal_mask,
+                    global_threshold=0.0,
+                )
+                match["medal_loc"] = (
+                    x0 + medal_loc[0],
+                    y0 + medal_loc[1],
+                )
+                match["medal_score"] = float(medal_score)
+                match["is_valid"] = (
+                    match["id_score"] < assisted_id_threshold
+                    and medal_score < medal_threshold
+                )
+
+            # If every ID candidate is occluded, the configured pet name can
+            # recover the identity. The pet only defines a search area: the
+            # medal remains the position anchor, so pet movement cannot move
+            # the reported player coordinate directly.
+            if use_pet and not any(match["is_valid"] for match in matches):
+                pet_loc, pet_score, pet_is_cached = find_pattern_sqdiff(
+                    img_camera_search,
+                    img_pet,
+                    last_result=None,
+                    mask=pet_mask,
+                    global_threshold=0.0,
+                )
+                if pet_score < float(pet_cfg.get("diff_thres", 0.18)):
+                    pet_h, pet_w = img_pet.shape[:2]
+                    medal_h, medal_w = img_medal.shape[:2]
+                    relative_offset = pet_cfg.get(
+                        "medal_offset", (36, 17)
+                    )
+                    expected_medal_x = pet_loc[0] + int(relative_offset[0])
+                    expected_medal_y = pet_loc[1] + int(relative_offset[1])
+                    pet_medal_tolerance = pet_cfg.get(
+                        "medal_search_tolerance", (28, 10)
+                    )
+                    pet_tolerance_x = max(
+                        0, int(pet_medal_tolerance[0])
+                    )
+                    pet_tolerance_y = max(
+                        0, int(pet_medal_tolerance[1])
+                    )
+                    camera_h, camera_w = img_camera_search.shape[:2]
+                    x0 = max(0, expected_medal_x - pet_tolerance_x)
+                    y0 = max(0, expected_medal_y - pet_tolerance_y)
+                    x1 = min(
+                        camera_w,
+                        expected_medal_x + medal_w + pet_tolerance_x,
+                    )
+                    y1 = min(
+                        camera_h,
+                        expected_medal_y + medal_h + pet_tolerance_y,
+                    )
+                    medal_roi = img_camera_search[y0:y1, x0:x1]
+                    if (
+                        medal_roi.shape[0] >= medal_h
+                        and medal_roi.shape[1] >= medal_w
+                    ):
+                        pet_medal_loc, pet_medal_score, _ = (
+                            find_pattern_sqdiff(
+                                medal_roi,
+                                img_medal,
+                                last_result=None,
+                                mask=medal_mask,
+                                global_threshold=0.0,
+                            )
+                        )
+                        pet_medal_loc = (
+                            x0 + pet_medal_loc[0],
+                            y0 + pet_medal_loc[1],
+                        )
+                        if pet_medal_score < medal_threshold:
+                            center_offset_x = int(
+                                medal_cfg.get("center_offset_x", 0)
+                            )
+                            vertical_gap = int(
+                                medal_cfg.get("vertical_gap", 0)
+                            )
+                            inferred_id_x = int(round(
+                                pet_medal_loc[0]
+                                + medal_w / 2
+                                - w / 2
+                                - center_offset_x
+                            ))
+                            inferred_id_y = (
+                                pet_medal_loc[1]
+                                - h
+                                - vertical_gap
+                            )
+                            matches.append({
+                                "tag_type": "pet+medal",
+                                "loc_nametag": (
+                                    inferred_id_x, inferred_id_y
+                                ),
+                                "id_score": float(pet_score),
+                                "is_cached": pet_is_cached,
+                                "w_match": pet_w,
+                                "h_match": pet_h,
+                                "medal_loc": pet_medal_loc,
+                                "medal_score": float(pet_medal_score),
+                                "pet_loc": pet_loc,
+                                "is_valid": True,
+                            })
+        else:
+            for match in matches:
+                match["is_valid"] = (
+                    match["id_score"] < nametag_cfg["diff_thres"]
+                )
+
+        # A valid pair always wins over an invalid candidate even if the latter
+        # has a slightly lower ID-only score.
+        def match_sort_key(match):
+            combined_score = match["id_score"]
+            if match["medal_score"] is not None:
+                combined_score += match["medal_score"]
+            return (not match["is_valid"], combined_score)
+
+        matches.sort(key=match_sort_key)
+        best_match = matches[0]
+        tag_type = best_match["tag_type"]
+        loc_nametag = best_match["loc_nametag"]
+        score = best_match["id_score"]
+        medal_loc = best_match["medal_loc"]
+        medal_score = best_match["medal_score"]
+        pet_loc = best_match.get("pet_loc")
+        is_cached = best_match["is_cached"]
 
         # Only update nametag location when score is good enough. On startup,
         # never turn the default (0, 0) into a fake player coordinate when the
         # configured template is absent or does not match the current hero.
-        is_valid_match = score < self.cfg["nametag"]["diff_thres"]
+        is_valid_match = best_match["is_valid"]
         candidate_player = (
             loc_nametag[0] + w // 2,
-            loc_nametag[1] - self.cfg["nametag"]["offset"][1]
+            loc_nametag[1] - nametag_cfg["offset"][1]
         )
         camera_h, camera_w = img_camera.shape[:2]
         is_valid_match = (
@@ -678,6 +997,8 @@ class MapleStoryAutoBot:
         is_current_match = is_valid_match and not needs_jump_confirmation
         if is_current_match:
             self.loc_nametag = loc_nametag
+            if medal_loc is not None:
+                self.loc_nametag_medal = medal_loc
             self.has_valid_nametag_location = True
             self.nametag_miss_count = 0
             self.pending_nametag_location = None
@@ -697,12 +1018,37 @@ class MapleStoryAutoBot:
 
         loc_player = (
             self.loc_nametag[0] + w // 2,
-            self.loc_nametag[1] - self.cfg["nametag"]["offset"][1]
+            self.loc_nametag[1] - nametag_cfg["offset"][1]
         )
 
         # Draw name tag detection box for debugging
         draw_rectangle(self.img_frame_debug, self.loc_nametag,
                        self.img_nametag.shape, (0, 255, 0), "")
+        debug_medal_loc = (
+            medal_loc
+            if medal_loc is not None
+            else getattr(self, "loc_nametag_medal", None)
+        )
+        if use_medal and debug_medal_loc is not None:
+            draw_rectangle(
+                self.img_frame_debug,
+                debug_medal_loc,
+                self.img_nametag_medal.shape,
+                (255, 255, 0),
+                "Medal",
+                thickness=1,
+                text_height=0.5,
+            )
+        if use_pet and pet_loc is not None:
+            draw_rectangle(
+                self.img_frame_debug,
+                pet_loc,
+                self.img_nametag_pet.shape,
+                (255, 0, 255),
+                "Pet",
+                thickness=1,
+                text_height=0.5,
+            )
         match_status = "cached" if is_cached else "global"
         if needs_jump_confirmation:
             match_status = "pending jump"
@@ -712,9 +1058,16 @@ class MapleStoryAutoBot:
             )
         elif not is_current_match:
             match_status = "rejected"
-        text = f"NameTag,{round(score, 2)}," + \
-                f"{match_status}," + \
-                f"{tag_type}"
+        medal_text = ""
+        if use_medal:
+            medal_text = (
+                f",medal={medal_score:.2f}"
+                if medal_score is not None else ",medal=missing"
+            )
+        text = (
+            f"NameTag,id={score:.2f}{medal_text},"
+            f"{match_status},{tag_type}"
+        )
         draw_text(self.img_frame_debug, text,
                   (self.loc_nametag[0],
                    self.loc_nametag[1] + self.img_nametag.shape[0] + 30),
@@ -996,9 +1349,12 @@ class MapleStoryAutoBot:
         x1, y1 = bottom_right
 
         img_roi = self.img_frame[y0:y1, x0:x1]
-        match_threshold = (
+        default_match_threshold = (
             self.cfg["monster_detect"]["diff_thres"]
             if diff_thres is None else float(diff_thres)
+        )
+        threshold_by_monster = self.cfg["monster_detect"].get(
+            "diff_thres_by_monster", {}
         )
 
         # Shift player's location into ROI coordinate system
@@ -1014,20 +1370,40 @@ class MapleStoryAutoBot:
 
         monsters = []
 
-        def get_match_points(result):
-            """Return sparse SQDIFF candidates, bounded in debug mode."""
+        def get_match_points(result, match_threshold):
+            """Return sparse, bounded SQDIFF candidates.
+
+            A permissive threshold can match most pixels in the search ROI.
+            Expanding every matching pixel into a detection makes the
+            following NMS quadratic and can stall the normal-mode main loop
+            before the UI receives its first visualization frame. Keep only
+            well-separated local minima from each template in every mode.
+            """
             result = np.nan_to_num(
                 result, nan=1.0, posinf=1.0, neginf=1.0
             )
-            if not self.is_debug_mode():
-                return [
-                    (int(x), int(y), float(result[y, x]))
-                    for y, x in zip(*np.where(result <= match_threshold))
-                ]
+            if self.is_debug_mode():
+                candidate_cfg = self.cfg.get("debug", {})
+                radius = max(
+                    1, int(candidate_cfg.get("local_min_radius", 9))
+                )
+                top_k = max(
+                    1, int(candidate_cfg.get("template_top_k", 1))
+                )
+            else:
+                candidate_cfg = self.cfg.get("monster_detect", {})
+                radius = max(
+                    1, int(candidate_cfg.get("local_min_radius", 9))
+                )
+                top_k = max(
+                    1,
+                    int(
+                        candidate_cfg.get(
+                            "max_candidates_per_template", 12
+                        )
+                    ),
+                )
 
-            radius = max(
-                1, int(self.cfg.get("debug", {}).get("local_min_radius", 9))
-            )
             kernel_size = radius * 2 + 1
             local_min = cv2.erode(
                 result, np.ones((kernel_size, kernel_size), dtype=np.uint8)
@@ -1036,19 +1412,30 @@ class MapleStoryAutoBot:
                 (result <= match_threshold)
                 & (result <= local_min + 1e-7)
             )
-            candidates = sorted(
-                (
-                    (int(x), int(y), float(result[y, x]))
-                    for y, x in zip(ys, xs)
-                ),
-                key=lambda item: item[2],
-            )
-            top_k = max(
-                1, int(self.cfg.get("debug", {}).get("template_top_k", 1))
-            )
-            return candidates[:top_k]
+            if len(xs) == 0:
+                return []
+
+            scores = result[ys, xs]
+            if len(scores) > top_k:
+                # Avoid sorting and materializing Python objects for every
+                # pixel when the configured threshold is very permissive.
+                selected = np.argpartition(scores, top_k - 1)[:top_k]
+                ys = ys[selected]
+                xs = xs[selected]
+                scores = scores[selected]
+
+            order = np.argsort(scores)
+            return [
+                (int(xs[index]), int(ys[index]), float(scores[index]))
+                for index in order
+            ]
 
         for monster_name, monster_imgs in self.monsters_info.items():
+            match_threshold = float(
+                threshold_by_monster.get(
+                    monster_name, default_match_threshold
+                )
+            )
             for img_monster, mask_monster in monster_imgs:
                 h_roi, w_roi = img_roi.shape[:2]
                 h_temp, w_temp = img_monster.shape[:2]
@@ -1114,7 +1501,9 @@ class MapleStoryAutoBot:
 
                     # Apply soft threshold
                     h, w = img_monster.shape[:2]
-                    for x, y, score in get_match_points(res):
+                    for x, y, score in get_match_points(
+                        res, match_threshold
+                    ):
                         monsters.append({
                             "name": monster_name,
                             "position": (x + x0, y + y0),
@@ -1130,7 +1519,9 @@ class MapleStoryAutoBot:
                             cv2.TM_SQDIFF_NORMED,
                             mask=mask_monster)
                     h, w = img_monster.shape[:2]
-                    for x, y, score in get_match_points(res):
+                    for x, y, score in get_match_points(
+                        res, match_threshold
+                    ):
                         monsters.append({
                             "name": monster_name,
                             "position": (x + x0, y + y0),
@@ -1144,7 +1535,9 @@ class MapleStoryAutoBot:
                             cv2.TM_SQDIFF_NORMED,
                             mask=mask_monster)
                     h, w = img_monster.shape[:2]
-                    for x, y, score in get_match_points(res):
+                    for x, y, score in get_match_points(
+                        res, match_threshold
+                    ):
                         monsters.append({
                             "name": monster_name,
                             "position": (x + x0, y + y0),
@@ -1157,6 +1550,12 @@ class MapleStoryAutoBot:
 
         # Apply Non-Maximum Suppression to monster detection
         monsters = nms(monsters, iou_threshold=0.4)
+        monsters = suppress_nearby_same_class(
+            monsters,
+            center_distance=self.cfg["monster_detect"].get(
+                "merge_center_distance", 18
+            ),
+        )
 
         # Detect monster via health bar
         if self.cfg["monster_detect"]["with_enemy_hp_bar"]:
@@ -1208,12 +1607,15 @@ class MapleStoryAutoBot:
         img_roi_edges = cv2.convertScaleAbs(
             cv2.Laplacian(img_roi_gray, cv2.CV_32F)
         )
-        threshold = (
+        default_threshold = (
             float(score_thres)
             if score_thres is not None
             else float(self.cfg.get("debug", {}).get("monster_diff_thres", 0.18))
         )
         debug_cfg = self.cfg.get("debug", {})
+        threshold_by_monster = debug_cfg.get(
+            "monster_diff_thres_by_monster", {}
+        )
         radius = max(
             1,
             int(
@@ -1224,11 +1626,33 @@ class MapleStoryAutoBot:
             ),
         )
         top_k = max(1, int(debug_cfg.get("template_top_k", 1)))
+        verify_color = bool(debug_cfg.get("verify_color", True))
+        verify_candidates = max(
+            top_k,
+            int(debug_cfg.get("color_verify_candidates", 5)),
+        )
+        monster_cfg = self.cfg.get("monster_detect", {})
+        color_threshold_default = float(
+            monster_cfg.get("diff_thres", 1.0)
+        )
+        color_threshold_by_monster = monster_cfg.get(
+            "diff_thres_by_monster", {}
+        )
         kernel = np.ones((radius * 2 + 1, radius * 2 + 1), dtype=np.uint8)
 
         monsters = []
         for monster_name, monster_imgs in self.monsters_info.items():
-            for img_monster, _ in monster_imgs:
+            threshold = float(
+                threshold_by_monster.get(
+                    monster_name, default_threshold
+                )
+            )
+            color_threshold = float(
+                color_threshold_by_monster.get(
+                    monster_name, color_threshold_default
+                )
+            )
+            for img_monster, mask_monster in monster_imgs:
                 h, w = img_monster.shape[:2]
                 if h > img_roi_edges.shape[0] or w > img_roi_edges.shape[1]:
                     continue
@@ -1258,18 +1682,44 @@ class MapleStoryAutoBot:
                     ),
                     key=lambda item: item[2],
                     reverse=True,
-                )[:top_k]
-                monsters.extend(
-                    {
+                )[:verify_candidates]
+
+                verified = []
+                for x, y, score in candidates:
+                    color_score = None
+                    if verify_color:
+                        candidate_roi = img_roi[y:y+h, x:x+w]
+                        if candidate_roi.shape[:2] != (h, w):
+                            continue
+                        color_result = cv2.matchTemplate(
+                            candidate_roi,
+                            img_monster,
+                            cv2.TM_SQDIFF_NORMED,
+                            mask=mask_monster,
+                        )
+                        color_score = float(
+                            np.nan_to_num(
+                                color_result[0, 0],
+                                nan=1.0,
+                                posinf=1.0,
+                                neginf=1.0,
+                            )
+                        )
+                        if color_score > color_threshold:
+                            continue
+
+                    verified.append({
                         "name": monster_name,
                         "position": (x + x0, y + y0),
                         "size": (h, w),
                         # Keep SQDIFF-style ordering for the shared NMS helper.
                         "score": 1.0 - score,
                         "confidence": score,
-                    }
-                    for x, y, score in candidates
-                )
+                        "color_score": color_score,
+                    })
+                    if len(verified) >= top_k:
+                        break
+                monsters.extend(verified)
 
         monsters = nms(monsters, iou_threshold=0.4)
         self.draw_monster_detections(monsters, top_left, bottom_right)
@@ -1294,7 +1744,14 @@ class MapleStoryAutoBot:
             label = str(round(monster["score"], 2))
             if self.is_debug_mode():
                 visible_score = monster.get("confidence", monster["score"])
-                label = f'{monster["name"]}: {visible_score:.2f}'
+                color_score = monster.get("color_score")
+                if color_score is None:
+                    label = f'{monster["name"]}: {visible_score:.2f}'
+                else:
+                    label = (
+                        f'{monster["name"]}: E{visible_score:.2f} '
+                        f'C{color_score:.2f}'
+                    )
 
             draw_rectangle(
                 self.img_frame_debug, monster["position"], monster["size"],

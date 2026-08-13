@@ -68,8 +68,9 @@ class KeyBoardListener():
     '''
     KeyBoardListener
     '''
-    def __init__(self, cfg=None, is_autobot=True):
+    def __init__(self, cfg=None, is_autobot=True, key_event_handler=None):
         self.cfg = cfg
+        self.key_event_handler = key_event_handler
         self.t_last_run = time.time()
         self.is_enable = True
         self.debounce_interval = 1 # second
@@ -100,15 +101,26 @@ class KeyBoardListener():
 
         # Start keyboard control thread
         if is_autobot:
-            threading.Thread(target=self.run_for_autobot, daemon=True).start()
+            self.thread = threading.Thread(
+                target=self.run_for_autobot,
+                name="autobot-keyboard-listener",
+                daemon=True,
+            )
         else:
             self.cfg = cfg
             self.window_title = cfg["game_window"]["title"]
-            threading.Thread(target=self.run_for_route_recorder, daemon=True).start()
+            self.thread = threading.Thread(
+                target=self.run_for_route_recorder,
+                name="route-recorder-keyboard-listener",
+                daemon=True,
+            )
+        self.thread.start()
 
-        listener = keyboard.Listener(on_press=self.on_press,
-                                     on_release=self.on_release)
-        listener.start()
+        self.listener = keyboard.Listener(
+            on_press=self.on_press,
+            on_release=self.on_release,
+        )
+        self.listener.start()
 
     def do_nothing(self):
         pass
@@ -135,6 +147,7 @@ class KeyBoardListener():
         # Remove the key from key_pressing list if it's in there
         if k in self.key_pressing:
             self.key_pressing.remove(k)
+            self._notify_key_event(k, False)
 
     def on_press(self, key):
         '''
@@ -159,6 +172,16 @@ class KeyBoardListener():
 
         if k and k not in self.key_pressing:
             self.key_pressing.append(k)
+            self._notify_key_event(k, True)
+
+    def _notify_key_event(self, key, pressed):
+        handler = getattr(self, "key_event_handler", None)
+        if handler is None:
+            return
+        try:
+            handler(key, pressed)
+        except Exception as exc:
+            logger.error(f"[KeyBoardListener] Key event handler failed: {exc}")
 
     def toggle_enable(self):
         '''
@@ -184,6 +207,12 @@ class KeyBoardListener():
         Stop keyboard listener thread
         '''
         self.is_terminated = True
+        listener = getattr(self, "listener", None)
+        if listener is not None:
+            listener.stop()
+        thread = getattr(self, "thread", None)
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(timeout=2.0)
 
     def is_game_window_active(self):
         '''

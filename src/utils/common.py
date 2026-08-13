@@ -528,8 +528,9 @@ def get_player_location_on_minimap(
     The function works by:
     - Creating a binary mask around the configured player color.
     - Keeping connected clusters above the configured minimum area.
-    - Selecting the cluster with the smallest average color error, then returning
-      that cluster's center.
+    - Selecting the cluster with the smallest average color error.
+    - Falling back to a compact, bright yellow HSV cluster when capture-card
+      interpolation changes the marker's saturation over a rope or platform.
 
     Returns:
         (x, y): The player's location in minimap coordinates as a tuple.
@@ -550,26 +551,79 @@ def get_player_location_on_minimap(
         for label in range(1, num_labels)
         if stats[label, cv2.CC_STAT_AREA] >= min_component_area
     ]
-    if not components:
-        # logger.warning(f"Fail to locate player location on minimap.")
+    if components:
+        # Tolerance matching can include terrain pixels, so compare valid
+        # clusters instead of averaging unrelated pixels across the map.
+        target_i16 = target.astype(np.int16)
+
+        def component_score(label):
+            pixels = img_minimap[labels == label].astype(np.int16)
+            mean_color_error = np.mean(
+                np.max(np.abs(pixels - target_i16), axis=1)
+            )
+            # Prefer the cluster closest to the configured player color; use
+            # area only as the tie-breaker.
+            return (mean_color_error, -stats[label, cv2.CC_STAT_AREA])
+
+        best = min(components, key=component_score)
+        center = centroids[best]
+    elif tolerance > 0:
+        # The player marker is alpha-blended with the minimap.  On a green rope
+        # its B channel can move outside the per-channel tolerance even though
+        # its hue remains yellow.  Use HSV only as a strict-detection fallback.
+        hsv = cv2.cvtColor(img_minimap, cv2.COLOR_BGR2HSV)
+        target_bgr = np.asarray(minimap_player_color, dtype=np.uint8).reshape(
+            1, 1, 3
+        )
+        target_hsv = cv2.cvtColor(target_bgr, cv2.COLOR_BGR2HSV)[0, 0]
+        hue = hsv[:, :, 0].astype(np.int16)
+        target_hue = int(target_hsv[0])
+        hue_delta = np.abs(hue - target_hue)
+        hue_delta = np.minimum(hue_delta, 180 - hue_delta)
+        hue_tolerance = max(4, min(12, int(round(tolerance / 7))))
+        saturation_min = max(40, int(target_hsv[1]) - tolerance)
+        value_min = max(150, int(target_hsv[2]) - int(round(tolerance * 1.5)))
+        hsv_mask = (
+            (hue_delta <= hue_tolerance)
+            & (hsv[:, :, 1] >= saturation_min)
+            & (hsv[:, :, 2] >= value_min)
+        ).astype(np.uint8) * 255
+        num_labels, labels, stats, centroids = \
+            cv2.connectedComponentsWithStats(hsv_mask, connectivity=8)
+
+        # A real marker stays compact.  Reject large yellow map artwork before
+        # scoring candidates so the fallback cannot lock onto terrain.
+        min_side = min(img_minimap.shape[:2])
+        max_marker_span = max(6, int(round(min_side * 0.06)))
+        max_marker_area = max(16, max_marker_span * max_marker_span)
+        components = [
+            label
+            for label in range(1, num_labels)
+            if min_component_area <= stats[label, cv2.CC_STAT_AREA]
+            <= max_marker_area
+            and stats[label, cv2.CC_STAT_WIDTH] <= max_marker_span
+            and stats[label, cv2.CC_STAT_HEIGHT] <= max_marker_span
+        ]
+        if not components:
+            return None
+
+        def hsv_component_score(label):
+            component_mask = labels == label
+            mean_hue_error = np.mean(hue_delta[component_mask])
+            mean_value = np.mean(hsv[:, :, 2][component_mask])
+            # Hue is stable across alpha blending; brightness and area resolve
+            # ties between otherwise similar compact components.
+            return (
+                mean_hue_error,
+                -mean_value,
+                -stats[label, cv2.CC_STAT_AREA],
+            )
+
+        best = min(components, key=hsv_component_score)
+        center = centroids[best]
+    else:
         return None
 
-    # Tolerance matching can include terrain pixels, so compare valid clusters
-    # instead of averaging unrelated pixels across the map.
-    target_i16 = target.astype(np.int16)
-
-    def component_score(label):
-        pixels = img_minimap[labels == label].astype(np.int16)
-        mean_color_error = np.mean(
-            np.max(np.abs(pixels - target_i16), axis=1)
-        )
-        # Capture-card interpolation can make unrelated map pixels fall inside
-        # the broad tolerance. Prefer the cluster closest to the configured
-        # player color; use area only as the tie-breaker.
-        return (mean_color_error, -stats[label, cv2.CC_STAT_AREA])
-
-    best = min(components, key=component_score)
-    center = centroids[best]
     loc_player_minimap = (
         int(round(center[0])),
         int(round(center[1])),

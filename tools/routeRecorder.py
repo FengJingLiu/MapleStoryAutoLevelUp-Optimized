@@ -6,7 +6,6 @@ import time
 import argparse
 import sys
 import os
-import shutil
 
 # CV import
 import numpy as np
@@ -18,9 +17,10 @@ from src.utils.common import (
     find_pattern_sqdiff, draw_rectangle, screenshot,
     get_minimap_loc_size, get_player_location_on_minimap,
     resize_minimap_to_reference,
-    to_opencv_hsv, load_yaml, override_cfg, is_mac, load_image,
+    load_yaml, override_cfg, is_mac, load_image,
 )
 from src.input.KeyBoardListener import KeyBoardListener, normalize_key_name
+from src.input.Esp32KeyForwarder import Esp32KeyForwarder
 from src.input.GameWindowCapturor import GameWindowCapturor
 from src.input.CaptureFramePreprocessor import preprocess_capture_frame
 
@@ -66,6 +66,251 @@ def route_action_from_pressed_keys(key_pressing, key_cfg):
     return "", False
 
 
+def route_forward_keys_from_config(cfg):
+    """Return local gameplay keys that should be mirrored to computer B."""
+    keys = {"left", "right", "up", "down"}
+    keys.update(cfg.get("key", {}).values())
+    keys.update(cfg.get("buff_skill", {}).get("keys", []))
+    keys.update(cfg.get("route_recoder", {}).get("forward_keys", []))
+    normalized = {normalize_key_name(key) for key in keys if key}
+
+    # Route-recorder controls stay local on computer A even if a user happens
+    # to include one of them in the optional forwarding list.
+    return normalized.difference({"f1", "f2", "f3", "f4"})
+
+
+def prepare_minimap_for_alignment(
+        img_minimap,
+        player_location,
+        player_radius=5,
+        max_colored_marker_area=100,
+    ):
+    """Return a minimap copy and mask with moving UI markers excluded.
+
+    Player/party dots move independently of the minimap background.  Including
+    them in template matching can shift a repeating platform map by one level.
+    The capture-card path also reduces these dots to only a few pixels, so the
+    old HSV cleanup (which required a component larger than 10 pixels) could
+    not remove them.
+    """
+    alignment_image = img_minimap.copy()
+    match_mask = np.any(
+        alignment_image != [0, 0, 0], axis=2
+    ).astype(np.uint8) * 255
+    excluded = np.zeros(alignment_image.shape[:2], dtype=np.uint8)
+
+    if player_location is not None:
+        px, py = map(int, player_location)
+        cv2.circle(
+            excluded,
+            (px, py),
+            radius=max(1, int(player_radius)),
+            color=255,
+            thickness=-1,
+        )
+
+    # Other players/party members are rendered as compact red or blue dots.
+    # Select only small, saturated components so real minimap artwork is kept.
+    hsv = cv2.cvtColor(alignment_image, cv2.COLOR_BGR2HSV)
+    hue = hsv[:, :, 0]
+    saturation = hsv[:, :, 1]
+    value = hsv[:, :, 2]
+    colored_dot_mask = (
+        (
+            (hue <= 8)
+            | (hue >= 170)
+            | ((hue >= 85) & (hue <= 130))
+        )
+        & (saturation >= 100)
+        & (value >= 70)
+    ).astype(np.uint8) * 255
+
+    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(
+        colored_dot_mask,
+        connectivity=8,
+    )
+    max_area = max(1, int(max_colored_marker_area))
+    for label in range(1, num_labels):
+        area = stats[label, cv2.CC_STAT_AREA]
+        if area <= max_area:
+            excluded[labels == label] = 255
+
+    # Cover interpolation halos around the tiny HDMI-scaled marker pixels.
+    excluded = cv2.dilate(
+        excluded,
+        np.ones((3, 3), dtype=np.uint8),
+        iterations=1,
+    )
+    match_mask[excluded != 0] = 0
+    alignment_image[excluded != 0] = (0, 0, 0)
+    return alignment_image, match_mask
+
+
+def select_stable_minimap_match(
+        img_map,
+        img_minimap,
+        last_result,
+        mask=None,
+        local_search_radius=35,
+        local_accept_threshold=0.22,
+        global_accept_threshold=0.22,
+        teleport_score_margin=0.03,
+    ):
+    """Prefer continuity while allowing a clearly better distant match.
+
+    A portal can legitimately move the minimap by an arbitrary distance in a
+    single frame, so distance must never be a hard rejection criterion.  The
+    previous location is only a tie-breaker when repeated map artwork gives
+    similarly good local and global candidates.
+    """
+    if last_result is None:
+        location, score, _ = find_pattern_sqdiff(
+            img_map,
+            img_minimap,
+            mask=mask,
+            global_threshold=0.0,
+        )
+        return location, score, True
+
+    global_location, global_score, _ = find_pattern_sqdiff(
+        img_map,
+        img_minimap,
+        mask=mask,
+        global_threshold=0.0,
+    )
+    local_location, local_score, local_found = find_pattern_sqdiff(
+        img_map,
+        img_minimap,
+        last_result=last_result,
+        mask=mask,
+        local_search_radius=local_search_radius,
+        # Any finite local SQDIFF result is returned so it can be compared with
+        # the independently calculated global result below.
+        global_threshold=float("inf"),
+    )
+    local_ok = (
+        local_found
+        and np.isfinite(local_score)
+        and local_score <= local_accept_threshold
+    )
+    global_ok = (
+        np.isfinite(global_score)
+        and global_score <= global_accept_threshold
+    )
+
+    if not global_ok:
+        if local_ok:
+            return local_location, local_score, True
+        return last_result, min(local_score, global_score), False
+    if not local_ok or global_location == local_location:
+        return global_location, global_score, True
+
+    # A materially better distant result represents a portal/camera jump and
+    # is accepted immediately, regardless of displacement.  Similar scores
+    # indicate repeated artwork, where continuity is the safer tie-breaker.
+    if global_score + teleport_score_margin < local_score:
+        return global_location, global_score, True
+    return local_location, local_score, True
+
+
+def fill_empty_canvas_pixels(canvas, source, location):
+    """Copy visible source pixels into empty canvas pixels at ``location``.
+
+    Route pixels already drawn on the canvas are deliberately preserved.  This
+    lets the route background follow newly explored map areas without erasing
+    recorded movement/action colors.
+    """
+    x, y = map(int, location)
+    h, w = source.shape[:2]
+    canvas_slice = canvas[y:y+h, x:x+w]
+    if canvas_slice.shape[:2] != source.shape[:2]:
+        return False
+
+    source_visible = np.any(source != [0, 0, 0], axis=2)
+    canvas_empty = np.all(canvas_slice == [0, 0, 0], axis=2)
+    fill_mask = source_visible & canvas_empty
+    canvas_slice[fill_mask] = source[fill_mask]
+    return True
+
+
+def fit_debug_preview(img, preferred_scale, max_size=None):
+    """Scale a debug image up, but keep the full image inside ``max_size``."""
+    h, w = img.shape[:2]
+    scale = max(float(preferred_scale), 0.01)
+    if max_size is not None:
+        max_w, max_h = max_size
+        if max_w > 0 and max_h > 0:
+            scale = min(scale, max_w / w, max_h / h)
+    scale = max(scale, 0.01)
+
+    dst_w = max(1, int(round(w * scale)))
+    dst_h = max(1, int(round(h * scale)))
+    interpolation = cv2.INTER_NEAREST if scale >= 1.0 else cv2.INTER_AREA
+    return cv2.resize(img, (dst_w, dst_h), interpolation=interpolation), scale
+
+
+def get_debug_monitor_work_size():
+    """Return the work-area size of the monitor containing the debug windows."""
+    if os.name != "nt":
+        return None
+    try:
+        import win32api
+        import win32con
+        import win32gui
+    except ImportError:
+        return None
+
+    # These windows are created earlier in the same frame.  Prefer the route
+    # window after it exists so moving it to another monitor is also handled.
+    for title in ("Route Map Debug", "Game Window Debug", "Map"):
+        hwnd = win32gui.FindWindow(None, title)
+        if not hwnd:
+            continue
+        monitor = win32api.MonitorFromWindow(
+            hwnd,
+            win32con.MONITOR_DEFAULTTONEAREST,
+        )
+        left, top, right, bottom = win32api.GetMonitorInfo(monitor)["Work"]
+        return right - left, bottom - top
+    return None
+
+
+def prepare_route_output_directory(map_dir, confirm=input):
+    """Prepare one recording directory without deleting its saved map.
+
+    A repeated recording normally means replacing route*.png while reusing the
+    stitched map.png.  Other files in the map directory are also preserved.
+    """
+    if not os.path.isdir(map_dir):
+        os.makedirs(map_dir, exist_ok=True)
+        logger.info(f"Created new directory: {map_dir}")
+        return True
+
+    answer = confirm(
+        f"[Warning] Directory '{map_dir}' already exists. "
+        "Clear route*.png only and keep map.png? (y/n): "
+    ).strip().lower()
+    if answer != "y":
+        return False
+
+    removed = 0
+    for name in os.listdir(map_dir):
+        lower_name = name.lower()
+        if not (lower_name.startswith("route") and lower_name.endswith(".png")):
+            continue
+        path = os.path.join(map_dir, name)
+        if os.path.isfile(path):
+            os.remove(path)
+            removed += 1
+
+    map_path = os.path.join(map_dir, "map.png")
+    logger.info(
+        f"Cleared {removed} route image(s) from {map_dir}; "
+        f"map.png {'preserved' if os.path.isfile(map_path) else 'not present'}"
+    )
+    return True
+
+
 class RouteRecorder():
     '''
     Route recorder
@@ -76,8 +321,8 @@ class RouteRecorder():
         '''
         # Print text at bottom left corner
         self.fps = round(1.0 / (time.time() - self.t_last_frame))
+        preferred_text_y_start = 550
         text_y_interval = 23
-        text_y_start = 550
         dt_screenshot = time.time() - self.kb.t_func_key[1]
         dt_save_route = time.time() - self.kb.t_func_key[2]
         dt_save_map = time.time() - self.kb.t_func_key[3]
@@ -88,19 +333,44 @@ class RouteRecorder():
             f"Press 'F3' to save route{' : Saved' if dt_save_route < 0.7 else ''}",
             f"Press 'F4' to save map{' : Saved' if dt_save_map < 0.7 else ''}",
         ]
+
+        # The debug window only displays the game area above ``ui_y_start``.
+        # Keep the complete text block inside that crop instead of drawing the
+        # final shortcut lines into the hidden game-UI area below it.
+        font_face = cv2.FONT_HERSHEY_SIMPLEX
+        font_scale = 0.7
+        font_thickness = 2
+        text_size, text_baseline = cv2.getTextSize(
+            "Ag", font_face, font_scale, font_thickness
+        )
+        ui_y_start = getattr(self, "cfg", {}).get(
+            "ui_coords", {}
+        ).get("ui_y_start", self.img_frame_debug.shape[0])
+        visible_height = min(self.img_frame_debug.shape[0], int(ui_y_start))
+        first_baseline_min = text_size[1] + 4
+        last_baseline_max = max(
+            first_baseline_min,
+            visible_height - text_baseline - 4,
+        )
+        text_y_start = min(
+            preferred_text_y_start,
+            last_baseline_max - text_y_interval * (len(text_list) - 1),
+        )
+        text_y_start = max(first_baseline_min, text_y_start)
+
         for idx, text in enumerate(text_list):
             cv2.putText(
                 self.img_frame_debug, text,
                 (10, text_y_start + text_y_interval*idx),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255),
-                2, cv2.LINE_AA
+                font_face, font_scale, (0, 0, 255),
+                font_thickness, cv2.LINE_AA
             )
 
         # Draw minimap rectangle on img debug
         draw_rectangle(
             self.img_frame_debug,
             self.loc_minimap,
-            self.img_minimap.shape[:2],
+            self.img_minimap_screen.shape[:2],
             (0, 0, 255), "minimap",thickness=1
         )
 
@@ -172,7 +442,8 @@ class RouteRecorder():
                       camera_bottom_right, (0, 255, 255), 1)
         cv2.putText(
             self.img_route_debug,
-            f"Minimap,score({round(self.minimap_match_score, 2)})",
+            f"Minimap,score({round(self.minimap_match_score, 2)})"
+            f"{',held' if getattr(self, 'minimap_match_held', False) else ''}",
             (self.loc_minimap_global[0], self.loc_minimap_global[1]+15),
             cv2.FONT_HERSHEY_SIMPLEX, 0.4,
             (0, 255, 255), 1
@@ -184,23 +455,6 @@ class RouteRecorder():
                    color=(0, 255, 255), thickness=-1)
 
         return loc_player_global
-
-    def replace_color_on_map(self, lower_hsv, upper_hsv, replace_color=(0, 0, 0)):
-        '''
-        Replace pixels in self.img_map that fall within the given HSV range
-        and are part of a connected component with area > 15.
-        '''
-        hsv_map = cv2.cvtColor(self.img_map, cv2.COLOR_BGR2HSV)
-        mask = cv2.inRange(hsv_map, to_opencv_hsv(lower_hsv), to_opencv_hsv(upper_hsv))
-
-        # Connected components
-        num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
-
-        for i in range(1, num_labels):  # skip background
-            area = stats[i, cv2.CC_STAT_AREA]
-            if area > 10:
-                component_mask = (labels == i)
-                self.img_map[component_mask] = replace_color
 
     def get_img_frame(self):
         '''
@@ -261,6 +515,10 @@ class RouteRecorder():
         self.loc_player_global = (0, 0) # player location on global map
         self.loc_player_global_last = None # playeer location on global map last frame
         self.minimap_match_score = 0.0
+        self.minimap_match_held = False
+        self.input_forwarder = None
+        self.kb = None
+        self.capture = None
         # Images
         self.frame = None # raw image
         self.img_frame = None # game window frame
@@ -303,29 +561,67 @@ class RouteRecorder():
 
         self.fps_limit = self.cfg["system"]["fps_limit_route_recorder"]
 
-        # Check create new map directory
+        # Re-recording a route must preserve the previously stitched map.
         map_dir = os.path.join("minimaps", args.new_map)
-        if os.path.exists(map_dir):
-            user_input = input(f"[Warning] Directory '{map_dir}' already exists. Replace it? (y/n): ").strip().lower()
-            if user_input == 'y':
-                shutil.rmtree(map_dir)  # Delete existing directory
-                logger.info(f"Removed existing directory: {map_dir}")
-            else:
-                sys.exit(0)
-        os.makedirs(map_dir) # Create new map directory
-        logger.info(f"Created new directory: {map_dir}")
+        if not prepare_route_output_directory(map_dir):
+            sys.exit(0)
 
-        # Load exist map
+        # An explicit --map takes precedence. Otherwise automatically continue
+        # from this map directory's preserved map.png when one exists.
         if self.args.map != '':
             self.img_map = load_image(f"{self.args.map}")
+        else:
+            existing_map_path = os.path.join(map_dir, "map.png")
+            if os.path.isfile(existing_map_path):
+                self.img_map = load_image(existing_map_path)
+                logger.info(f"Loaded preserved map: {existing_map_path}")
 
-        # Start keyboard listener thread
-        self.kb = KeyBoardListener(self.cfg, is_autobot=False)
+        try:
+            route_cfg = self.cfg.get("route_recoder", {})
+            forward_input = route_cfg.get(
+                "forward_input_to_esp32",
+                self.cfg.get("esp32_hid", {}).get("remote_target", False),
+            )
+            if forward_input:
+                self.input_forwarder = Esp32KeyForwarder(
+                    self.cfg,
+                    route_forward_keys_from_config(self.cfg),
+                )
 
-        # Start game window capturing thread
-        logger.info("Waiting for game window to activate, please click on game window")
-        self.capture = GameWindowCapturor(self.cfg)
-        self.wait_for_initial_capture_frame()
+            # Start keyboard listener thread. Function keys remain local, while
+            # gameplay key edges are queued to the ESP32 forwarder above.
+            event_handler = (
+                self.input_forwarder.handle_key_event
+                if self.input_forwarder is not None
+                else None
+            )
+            self.kb = KeyBoardListener(
+                self.cfg,
+                is_autobot=False,
+                key_event_handler=event_handler,
+            )
+
+            # Start game window capturing thread
+            logger.info(
+                "Waiting for game window to activate, please click on game window"
+            )
+            self.capture = GameWindowCapturor(self.cfg)
+            self.wait_for_initial_capture_frame()
+        except BaseException:
+            self.stop()
+            raise
+
+    def stop(self):
+        """Stop capture/listener threads and guarantee remote key release."""
+        if self.kb is not None:
+            self.kb.stop()
+            self.kb = None
+        if self.input_forwarder is not None:
+            self.input_forwarder.close()
+            self.input_forwarder = None
+        if self.capture is not None:
+            self.capture.stop()
+            self.capture = None
 
     def wait_for_initial_capture_frame(self, timeout=2.0, poll_interval=0.05):
         """Wait briefly for the asynchronous Windows capture callback."""
@@ -489,11 +785,20 @@ class RouteRecorder():
             return -1
         self.loc_player_minimap = loc_player_minimap
 
+        # Build the image used for map stitching before template matching.
+        # Dynamic player/party markers must never influence the map offset or
+        # be copied into the persistent map image.
+        img_minimap_alignment, minimap_match_mask = \
+            prepare_minimap_for_alignment(
+                self.img_minimap,
+                self.loc_player_minimap,
+            )
+
         # Update map
         if self.is_first_frame:
             # copy minimap to map
             if self.img_map is None:
-                self.img_map = self.img_minimap.copy()
+                self.img_map = img_minimap_alignment.copy()
                 pad = self.cfg["route_recoder"]["map_padding"]
                 self.img_map = cv2.copyMakeBorder(
                     self.img_map,
@@ -503,78 +808,81 @@ class RouteRecorder():
                 )
                 self.loc_minimap_global = (pad, pad)
                 self.minimap_match_score = 0.0
+                self.minimap_match_held = False
             else:
-                mask = np.any(
-                    self.img_minimap != [0, 0, 0], axis=2
-                ).astype(np.uint8) * 255
                 self.loc_minimap_global, self.minimap_match_score, _ = \
                     find_pattern_sqdiff(
                         self.img_map,
-                        self.img_minimap,
-                        mask=mask,
+                        img_minimap_alignment,
+                        mask=minimap_match_mask,
                     )
                 x, y = self.loc_minimap_global
                 h, w = self.img_minimap.shape[:2]
                 self.ensure_img_map_capacity(x, y, h, w)
-
-            # Replace player "yellow" dot to black on map
-            self.replace_color_on_map(
-                (55, 40, 80),
-                (60, 100, 100)
-            )
-            # Replace other player "red" dot to black on map
-            self.replace_color_on_map((0, 80, 80),
-                                      (5, 100, 100))
 
             # Update route
             self.img_route = self.remove_color_code_pixels(self.img_map.copy())
             self.img_route_debug = self.img_route.copy()
 
         else:
-            # Create mask where pixels are not black
-            mask = np.any(self.img_minimap != [0, 0, 0], axis=2).astype(np.uint8)
-            mask = mask * 255
-
             # Perform template matching to find where the current minimap fits in the global map
-            self.loc_minimap_global, self.minimap_match_score, _ = \
-                find_pattern_sqdiff(
+            self.loc_minimap_global, self.minimap_match_score, match_accepted = \
+                select_stable_minimap_match(
                 self.img_map,
-                self.img_minimap,
+                img_minimap_alignment,
                 last_result=self.loc_minimap_global,
-                mask=mask
+                mask=minimap_match_mask,
+                local_search_radius=self.cfg["route_recoder"].get(
+                    "local_search_radius", 35
+                ),
+                local_accept_threshold=self.cfg["route_recoder"].get(
+                    "local_match_threshold", 0.22
+                ),
+                global_accept_threshold=self.cfg["route_recoder"].get(
+                    "global_match_threshold", 0.22
+                ),
+                teleport_score_margin=self.cfg["route_recoder"].get(
+                    "teleport_score_margin", 0.03
+                ),
             )
+            self.minimap_match_held = not match_accepted
             x, y = self.loc_minimap_global
             h, w = self.img_minimap.shape[:2]
             # Ensure img_map is big enough to fit the newly explored region
             self.ensure_img_map_capacity(x, y, h, w)
             x, y = self.loc_minimap_global
 
-            # Don't copy pixel near player
-            player_yellow_dot_radius = 5
-            px, py = self.loc_player_minimap
-            h, w = self.img_minimap.shape[:2]
-            x_min = max(0, px - player_yellow_dot_radius)
-            x_max = min(w, px + player_yellow_dot_radius)
-            y_min = max(0, py - player_yellow_dot_radius)
-            y_max = min(h, py + player_yellow_dot_radius)
-            # Apply the black color mask to mask player yellow dot
-            self.img_minimap[y_min:y_max, x_min:x_max] = (0, 0, 0)
-
             # Update map
-            if self.args.map == '':
-                map_slice = self.img_map[y:y+h, x:x+w]
-                if map_slice.shape[:2] != self.img_minimap.shape[:2]:
+            # A rejected jump keeps the last reliable location for preview, but
+            # must not write the unmatched frame into the persistent canvas.
+            if self.args.map == '' and match_accepted:
+                if not fill_empty_canvas_pixels(
+                    self.img_map,
+                    img_minimap_alignment,
+                    (x, y),
+                ):
                     logger.warning(
                         "Skip map update: minimap lies outside expanded map "
                         f"at {(x, y, w, h)}"
                     )
                     return -1
-                black_mask = np.all(map_slice == [0, 0, 0], axis=2)
-                map_slice[black_mask] = self.img_minimap[black_mask]
 
-            # Replace other player "red" dot to black on map
-            self.replace_color_on_map((0, 78, 78),
-                                      (5, 100, 100))
+                # img_route is a separate canvas.  Expanding it kept the
+                # coordinates aligned, but previously left all newly explored
+                # floors black.  Fill only empty background pixels so existing
+                # route/action colors remain untouched.
+                route_background = self.remove_color_code_pixels(
+                    img_minimap_alignment.copy()
+                )
+                if not fill_empty_canvas_pixels(
+                    self.img_route,
+                    route_background,
+                    (x, y),
+                ):
+                    logger.warning(
+                        "Skip route background update: minimap lies outside "
+                        f"route canvas at {(x, y, w, h)}"
+                    )
 
         cv2.imshow("Map", self.img_map)
         self.img_route_debug = self.img_route.copy()
@@ -659,13 +967,25 @@ class RouteRecorder():
             screenshot(self.img_frame)
             self.kb.is_pressed_func_key[1] = False
 
-        # Resize img_route_debug for better visualization
-        self.img_route_debug = cv2.resize(
-                    self.img_route_debug, (0, 0),
-                    fx=self.cfg["minimap"]["debug_window_upscale"],
-                    fy=self.cfg["minimap"]["debug_window_upscale"],
-                    interpolation=cv2.INTER_NEAREST)
-        cv2.imshow("Route Map Debug", self.img_route_debug)
+        # Enlarge the route preview while keeping the entire growing canvas on
+        # the monitor.  This changes visualization only; route coordinates and
+        # the saved map retain their native resolution.
+        monitor_size = get_debug_monitor_work_size()
+        max_preview_size = None
+        if monitor_size is not None:
+            screen_ratio = self.cfg["minimap"].get(
+                "debug_window_max_screen_ratio", 0.85
+            )
+            screen_ratio = min(max(float(screen_ratio), 0.1), 1.0)
+            max_preview_size = tuple(
+                max(1, int(size * screen_ratio)) for size in monitor_size
+            )
+        img_route_preview, _ = fit_debug_preview(
+            self.img_route_debug,
+            self.cfg["minimap"]["debug_window_upscale"],
+            max_size=max_preview_size,
+        )
+        cv2.imshow("Route Map Debug", img_route_preview)
 
         # Enable cached location since second frame
         self.is_first_frame = False
@@ -701,21 +1021,25 @@ if __name__ == '__main__':
         logger.error(f"RouteRecorder Init failed: {e}")
         sys.exit(1)
     else:
-        while True:
-            t_start = time.time()
+        try:
+            while True:
+                t_start = time.time()
 
-            # Process one game window frame
-            routeRecorder.run_once()
+                # Process one game window frame
+                routeRecorder.run_once()
 
-            # Exit if 'q' is pressed
-            key = cv2.waitKey(1) & 0xFF
-            if key == ord('q'):
-                break
+                # Exit if 'q' is pressed
+                key = cv2.waitKey(1) & 0xFF
+                if key == ord('q'):
+                    break
 
-            # Cap FPS to save system resource
-            frame_duration = time.time() - t_start
-            target_duration = 1.0 / routeRecorder.fps_limit
-            if frame_duration < target_duration:
-                time.sleep(target_duration - frame_duration)
-
-        cv2.destroyAllWindows()
+                # Cap FPS to save system resource
+                frame_duration = time.time() - t_start
+                target_duration = 1.0 / routeRecorder.fps_limit
+                if frame_duration < target_duration:
+                    time.sleep(target_duration - frame_duration)
+        except KeyboardInterrupt:
+            logger.info("RouteRecorder interrupted by user")
+        finally:
+            routeRecorder.stop()
+            cv2.destroyAllWindows()

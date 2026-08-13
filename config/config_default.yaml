@@ -131,11 +131,40 @@ nametag:
   jump_confirm_distance: 40 # Larger screen-space jumps must repeat before acceptance
   jump_confirm_radius: 12   # Maximum difference between two pending jump candidates
 
+  # Optional second anchor: the medal immediately below the character ID.
+  # A partial ID may use a looser threshold only when this medal also matches
+  # in the expected position. If its template is absent, detection falls back
+  # to the original ID-only behavior.
+  medal:
+    enable: False
+    name: ""                    # Empty loads nametag/<name>_medal.png
+    diff_thres: 0.16            # Medal SQDIFF threshold; lower is stricter
+    assisted_id_diff_thres: 0.24 # Maximum ID-fragment score with a valid medal
+    id_fragment_width: 30       # Overlapping ID fragment width in pixels
+    id_fragment_stride: 15      # Horizontal stride between ID fragments
+    center_offset_x: 3          # Medal center relative to ID center
+    vertical_gap: 0             # Medal top relative to the bottom of the ID
+    search_tolerance: [18, 6]   # Allowed medal displacement [x, y]
+
+  # Optional third anchor for frames where the ID is completely covered.
+  # The pet name only opens a local medal search; pet coordinates are never
+  # returned as the player position.
+  pet:
+    enable: False
+    name: ""                    # Empty loads nametag/<name>_pet.png
+    diff_thres: 0.16            # Pet-name SQDIFF threshold
+    medal_offset: [37, 17]      # Medal top-left relative to pet-name top-left
+    medal_search_tolerance: [28, 10]
+
 debug:
   # Vision-only mode: load the selected map's monsters and never send input.
-  monster_diff_thres: 0.25 # Edge correlation: higher is stricter
+  monster_diff_thres: 0.30 # Edge correlation: higher is stricter
+  monster_diff_thres_by_monster:
+    snail: 0.30
   template_top_k: 1        # Keep only the best local maximum from each template
   local_peak_radius: 9     # Suppress dense neighboring hits before NMS
+  verify_color: True       # Recheck edge candidates with normal-mode masked color matching
+  color_verify_candidates: 5 # Check several peaks so one false peak cannot hide a real mob
   scan_interval_frames: 5  # Full-camera matching is expensive; reuse boxes between scans
 
 character:
@@ -157,7 +186,16 @@ monster_detect:
   #   - "template_free" (lightest and fastest, but likely to have many wrong detection)
   # 💡 Feel free to test different modes to find what works best for your setup.
   mode: "contour_only"         # 🧠 Options: "color" "grayscale" "contour_only" "template_free"
-  diff_thres: 0.8              # 📏 Diff threshold for template matching, [0.0 ~ 1.0] Lower = stricter match
+  diff_thres: 0.8              # 📏 SQDIFF threshold, [0.0 ~ 1.0] Lower = stricter match
+  # Per-class SQDIFF overrides shared by normal mode and debug color
+  # verification. Small Wisdom Forest sprites need stricter color matches.
+  diff_thres_by_monster:
+    snail: 0.32
+    slime: 0.34
+    green_mushroom: 0.32
+  local_min_radius: 9          # Suppress dense neighboring template matches before NMS
+  max_candidates_per_template: 12 # Bound candidates so a loose threshold cannot stall normal mode
+  merge_center_distance: 18   # Merge animation-template hits for the same nearby monster
   search_box_margin: 50        # ➕ Additional margin(in pixels) around the attack box for monster searching
   contour_blur: 5              # 🌫️ Gaussian blur kernel size used for contour smoothing (in "contour_only" mode).
   with_enemy_hp_bar: True      # ❤️ Enable smarter detection using enemy HP bars.
@@ -300,14 +338,16 @@ minimap:
   # It is used to estimate the player’s current location in the world.
   player_color: [136, 255, 255]   # 🟡 BGR value of the yellow player dot on the minimap
   player_color_tolerance: 65      # Capture-card per-channel color tolerance
-  player_min_component_area: 3    # HDMI scaling can reduce the marker to 3 pixels
+  player_min_component_area: 2    # HDMI scaling can reduce the marker to 2 pixels
   other_player_color: [0, 0, 255] # 🔴 BGR value of the red other player dot on the minimap
   # Route-map files were recorded from a specific minimap raster. PotPlayer
   # may scale that UI with the HDMI desktop, so restore the recorded size
   # before matching the current minimap against map.png. Values are [h, w].
   reference_size_by_map:
     fire_land_1: [142, 259]
+    wisdom_forest: [149, 180]
   debug_window_upscale: 4         # 🔍 Zoom factor for the route debug image (for visualization only)
+  debug_window_max_screen_ratio: 0.85  # Keep the complete growing route preview on screen
   offset: [0, 0]                  # 📐 Don't set this unless playing on global server
 
 patrol:
@@ -328,6 +368,18 @@ route_recoder:
   blob_cooldown: 0.7        # ⏱️ Cooldown in seconds between recording actions like 'jump' or 'teleport'
                             #     These actions are marked as a "blob" on the route map
   map_padding: 30           # 🖤 Padding (in pixels) added as margin around the edge of the map
+  # Mirror A's gameplay keys to the ESP32/B computer while recording. F1-F4
+  # always remain local recorder controls. Add uncommon gameplay keys below.
+  forward_input_to_esp32: True
+  forward_keys: []
+  # Keep matching near the previous camera offset. Repeating platforms can
+  # otherwise produce a low SQDIFF score on the wrong floor.
+  local_search_radius: 35
+  local_match_threshold: 0.22
+  global_match_threshold: 0.22
+  # A distant global match is accepted immediately when its score is better
+  # than the local candidate by at least this amount (for in-map portals).
+  teleport_score_margin: 0.03
 
 game_window:
   capture_profile: "auto"      # Options: "auto" "direct" "potplayer"

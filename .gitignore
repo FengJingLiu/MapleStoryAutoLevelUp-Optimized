@@ -3,6 +3,8 @@ screenshot/
 !nametag/
 nametag/*
 !nametag/liu_muning.png
+!nametag/liu_muning_medal.png
+!nametag/liu_muning_pet.png
 video/
 dist/
 .venv/

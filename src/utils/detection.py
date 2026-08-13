@@ -59,3 +59,31 @@ def nms(detections, iou_threshold=0.3):
         ]
 
     return kept
+
+
+def suppress_nearby_same_class(detections, center_distance=18):
+    """Keep the best SQDIFF hit for one nearby same-class sprite.
+
+    Different animation templates can describe the same monster with boxes
+    whose sizes differ enough that IoU-based NMS keeps both.  Their centers,
+    however, remain close.  Suppress only same-class centers so adjacent
+    monsters of different classes are never merged.
+    """
+    distance = max(0, float(center_distance))
+    distance_sq = distance * distance
+    kept = []
+
+    for candidate in sorted(detections, key=lambda item: item["score"]):
+        candidate_center = detection_center(candidate)
+        is_duplicate = any(
+            candidate.get("name") == existing.get("name")
+            and (
+                (candidate_center[0] - detection_center(existing)[0]) ** 2
+                + (candidate_center[1] - detection_center(existing)[1]) ** 2
+            ) <= distance_sq
+            for existing in kept
+        )
+        if not is_duplicate:
+            kept.append(candidate)
+
+    return kept

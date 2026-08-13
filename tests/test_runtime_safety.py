@@ -1,9 +1,11 @@
 import threading
 import time
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, call, patch
 
+import cv2
 import numpy as np
 
 from src.engine.MapleStoryAutoLevelUp import MapleStoryAutoBot
@@ -148,8 +150,166 @@ class MinimapDetectionTests(unittest.TestCase):
 
         self.assertEqual(location, (31, 20))
 
+    def test_two_pixel_player_dot_survives_hdmi_downscaling(self):
+        minimap = np.zeros((50, 80, 3), dtype=np.uint8)
+        minimap[20, 30:32] = (98, 243, 213)
+
+        location = get_player_location_on_minimap(
+            minimap,
+            minimap_player_color=(136, 255, 255),
+            color_tolerance=65,
+            min_component_area=2,
+        )
+
+        self.assertEqual(location, (30, 20))
+
+    def test_player_dot_on_rope_uses_compact_hsv_fallback(self):
+        minimap = np.zeros((149, 180, 3), dtype=np.uint8)
+        # Real capture-card colors from the marker while the player hangs on a
+        # green rope.  Every pixel is outside the 65-point BGR cube.
+        minimap[52, 104] = (42, 253, 222)
+        minimap[52, 105] = (15, 224, 189)
+        minimap[53, 103] = (52, 248, 221)
+        minimap[53, 104] = (49, 255, 230)
+        minimap[53, 105] = (42, 254, 221)
+        minimap[53, 106] = (139, 197, 187)
+        minimap[54, 104] = (43, 253, 223)
+        minimap[54, 105] = (17, 226, 192)
+
+        location = get_player_location_on_minimap(
+            minimap,
+            minimap_player_color=(136, 255, 255),
+            color_tolerance=65,
+            min_component_area=2,
+        )
+
+        self.assertEqual(location, (104, 53))
+
+    def test_hsv_fallback_rejects_large_yellow_map_artwork(self):
+        minimap = np.zeros((149, 180, 3), dtype=np.uint8)
+        minimap[30:50, 60:80] = (49, 255, 230)
+
+        location = get_player_location_on_minimap(
+            minimap,
+            minimap_player_color=(136, 255, 255),
+            color_tolerance=65,
+            min_component_area=2,
+        )
+
+        self.assertIsNone(location)
+
 
 class AutoBotLifecycleTests(unittest.TestCase):
+    def _make_real_nametag_anchor_bot(self, frame):
+        project_root = Path(__file__).resolve().parents[1]
+        bot = MapleStoryAutoBot.__new__(MapleStoryAutoBot)
+        bot.cfg = {
+            "nametag": {
+                "mode": "grayscale",
+                "split_width": 30,
+                "global_diff_thres": 0.2,
+                "cache_accept_thres": 0.12,
+                "diff_thres": 0.15,
+                "max_stale_frames": 2,
+                "jump_confirm_distance": 40,
+                "jump_confirm_radius": 12,
+                "offset": (0, 30),
+                "medal": {
+                    "enable": True,
+                    "diff_thres": 0.16,
+                    "assisted_id_diff_thres": 0.24,
+                    "id_fragment_width": 30,
+                    "id_fragment_stride": 15,
+                    "center_offset_x": 3,
+                    "vertical_gap": 0,
+                    "search_tolerance": (18, 6),
+                },
+                "pet": {
+                    "enable": True,
+                    "diff_thres": 0.16,
+                    "medal_offset": (37, 17),
+                    "medal_search_tolerance": (28, 10),
+                },
+            },
+            "ui_coords": {"ui_y_start": frame.shape[0]},
+        }
+        bot.img_frame_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        bot.img_frame_debug = None
+
+        def read_template(name):
+            image = cv2.imread(str(project_root / "nametag" / name))
+            self.assertIsNotNone(image)
+            return image
+
+        bot.img_nametag = read_template("liu_muning.png")
+        bot.img_nametag_gray = cv2.cvtColor(
+            bot.img_nametag, cv2.COLOR_BGR2GRAY
+        )
+        bot.img_nametag_medal = read_template("liu_muning_medal.png")
+        bot.img_nametag_medal_gray = cv2.cvtColor(
+            bot.img_nametag_medal, cv2.COLOR_BGR2GRAY
+        )
+        bot.img_nametag_pet = read_template("liu_muning_pet.png")
+        bot.img_nametag_pet_gray = cv2.cvtColor(
+            bot.img_nametag_pet, cv2.COLOR_BGR2GRAY
+        )
+        bot.loc_nametag = (0, 0)
+        bot.has_valid_nametag_location = False
+        bot.nametag_miss_count = 0
+        bot.pending_nametag_location = None
+        return bot
+
+    def test_id_and_medal_detect_real_capture(self):
+        project_root = Path(__file__).resolve().parents[1]
+        frame = cv2.imread(str(
+            project_root
+            / "tests"
+            / "fixtures"
+            / "nametag_anchors.png"
+        ))
+        self.assertIsNotNone(frame)
+        bot = self._make_real_nametag_anchor_bot(frame)
+
+        location = bot.get_player_location_by_nametag()
+
+        self.assertEqual(location, (120, 41))
+        self.assertEqual(bot.loc_nametag, (98, 71))
+
+    def test_weak_id_without_matching_medal_is_rejected(self):
+        project_root = Path(__file__).resolve().parents[1]
+        frame = cv2.imread(str(
+            project_root
+            / "tests"
+            / "fixtures"
+            / "nametag_anchors.png"
+        ))
+        self.assertIsNotNone(frame)
+        no_medal = frame.copy()
+        no_medal[89:107, 68:178] = no_medal[108:126, 68:178]
+        bot = self._make_real_nametag_anchor_bot(no_medal)
+
+        location = bot.get_player_location_by_nametag()
+
+        self.assertIsNone(location)
+
+    def test_pet_and_medal_recover_when_entire_id_is_covered(self):
+        project_root = Path(__file__).resolve().parents[1]
+        frame = cv2.imread(str(
+            project_root
+            / "tests"
+            / "fixtures"
+            / "nametag_anchors.png"
+        ))
+        self.assertIsNotNone(frame)
+        covered = frame.copy()
+        covered[69:91, 95:147] = covered[40:62, 95:147]
+        bot = self._make_real_nametag_anchor_bot(covered)
+
+        location = bot.get_player_location_by_nametag()
+
+        self.assertEqual(location, (120, 41))
+        self.assertEqual(bot.loc_nametag, (98, 71))
+
     def test_nametag_first_miss_does_not_return_fake_player_location(self):
         bot = MapleStoryAutoBot.__new__(MapleStoryAutoBot)
         bot.cfg = {
@@ -459,6 +619,7 @@ class AutoBotLifecycleTests(unittest.TestCase):
                 "template_top_k": 1,
                 "local_peak_radius": 2,
                 "monster_diff_thres": 0.1,
+                "verify_color": False,
             },
             "monster_detect": {
                 "mode": "color",
@@ -488,6 +649,147 @@ class AutoBotLifecycleTests(unittest.TestCase):
                 for expected_x, expected_y in ((10, 10), (80, 50))
             )
         )
+
+    def test_normal_matching_bounds_candidates_before_nms(self):
+        bot = MapleStoryAutoBot.__new__(MapleStoryAutoBot)
+        rng = np.random.default_rng(7)
+        template = rng.integers(0, 256, (8, 8, 3), dtype=np.uint8)
+        mask = np.full((8, 8), 255, dtype=np.uint8)
+        bot.cfg = {
+            "bot": {"mode": "normal"},
+            "monster_detect": {
+                "mode": "color",
+                # Accept every finite result to recreate the dense-candidate
+                # failure without requiring a large screenshot fixture.
+                "diff_thres": 1.0,
+                "local_min_radius": 2,
+                "max_candidates_per_template": 5,
+                "with_enemy_hp_bar": False,
+            },
+            "character": {"width": 10, "height": 10},
+        }
+        bot.img_frame = rng.integers(
+            0, 256, (80, 120, 3), dtype=np.uint8
+        )
+        bot.img_frame_debug = None
+        bot.loc_player = (60, 40)
+        bot.monsters_info = {"green_mushroom": [(template, mask)]}
+
+        with patch(
+            "src.engine.MapleStoryAutoLevelUp.nms",
+            side_effect=lambda detections, iou_threshold: detections,
+        ) as nms_mock:
+            detections = bot.get_monsters_in_range((0, 0), (120, 80))
+
+        candidates_before_nms = nms_mock.call_args.args[0]
+        self.assertLessEqual(len(candidates_before_nms), 5)
+        self.assertLessEqual(len(detections), len(candidates_before_nms))
+        self.assertTrue(
+            all(item in candidates_before_nms for item in detections)
+        )
+
+    def test_normal_matching_uses_per_monster_threshold(self):
+        bot = MapleStoryAutoBot.__new__(MapleStoryAutoBot)
+        template = np.zeros((8, 8, 3), dtype=np.uint8)
+        mask = np.full((8, 8), 255, dtype=np.uint8)
+        bot.cfg = {
+            "bot": {"mode": "normal"},
+            "monster_detect": {
+                "mode": "color",
+                "diff_thres": 0.35,
+                "diff_thres_by_monster": {"snail": 0.28},
+                "local_min_radius": 2,
+                "max_candidates_per_template": 5,
+                "with_enemy_hp_bar": False,
+            },
+            "character": {"width": 10, "height": 10},
+        }
+        bot.img_frame = np.zeros((40, 60, 3), dtype=np.uint8)
+        bot.img_frame_debug = None
+        bot.loc_player = (30, 20)
+        bot.monsters_info = {
+            "snail": [(template, mask)],
+            "slime": [(template, mask)],
+        }
+
+        synthetic_result = np.full((33, 53), 0.30, dtype=np.float32)
+        with patch(
+            "src.engine.MapleStoryAutoLevelUp.cv2.matchTemplate",
+            return_value=synthetic_result,
+        ):
+            detections = bot.get_monsters_in_range((0, 0), (60, 40))
+
+        self.assertFalse(any(item["name"] == "snail" for item in detections))
+        self.assertTrue(any(item["name"] == "slime" for item in detections))
+
+    def test_debug_matching_uses_per_monster_threshold(self):
+        bot = MapleStoryAutoBot.__new__(MapleStoryAutoBot)
+        template = np.zeros((8, 8, 3), dtype=np.uint8)
+        mask = np.full((8, 8), 255, dtype=np.uint8)
+        bot.cfg = {
+            "bot": {"mode": "debug"},
+            "debug": {
+                "monster_diff_thres": 0.30,
+                "monster_diff_thres_by_monster": {"snail": 0.45},
+                "template_top_k": 1,
+                "local_peak_radius": 2,
+                "verify_color": False,
+            },
+        }
+        bot.img_frame = np.zeros((40, 60, 3), dtype=np.uint8)
+        bot.img_frame_debug = None
+        bot.monsters_info = {
+            "snail": [(template, mask)],
+            "slime": [(template, mask)],
+        }
+
+        synthetic_result = np.full((33, 53), 0.35, dtype=np.float32)
+        with patch(
+            "src.engine.MapleStoryAutoLevelUp.cv2.matchTemplate",
+            return_value=synthetic_result,
+        ):
+            detections = bot.get_debug_monsters_in_range(
+                (0, 0), (60, 40)
+            )
+
+        self.assertFalse(any(item["name"] == "snail" for item in detections))
+        self.assertTrue(any(item["name"] == "slime" for item in detections))
+
+    def test_debug_edge_candidate_requires_color_verification(self):
+        bot = MapleStoryAutoBot.__new__(MapleStoryAutoBot)
+        template = np.full((8, 8, 3), (0, 255, 0), dtype=np.uint8)
+        template[2:6, 2:6] = (20, 80, 180)
+        mask = np.zeros((8, 8), dtype=np.uint8)
+        mask[2:6, 2:6] = 255
+        bot.cfg = {
+            "bot": {"mode": "debug"},
+            "debug": {
+                "monster_diff_thres": 0.30,
+                "template_top_k": 1,
+                "local_peak_radius": 2,
+                "verify_color": True,
+                "color_verify_candidates": 1,
+            },
+            "monster_detect": {
+                "diff_thres": 0.8,
+                "diff_thres_by_monster": {"snail": 0.32},
+            },
+        }
+        bot.img_frame = np.zeros((40, 60, 3), dtype=np.uint8)
+        bot.img_frame_debug = None
+        bot.monsters_info = {"snail": [(template, mask)]}
+
+        edge_result = np.full((33, 53), 0.10, dtype=np.float32)
+        edge_result[5, 7] = 0.40
+        with patch(
+            "src.engine.MapleStoryAutoLevelUp.cv2.matchTemplate",
+            side_effect=[edge_result, np.array([[0.35]], dtype=np.float32)],
+        ):
+            detections = bot.get_debug_monsters_in_range(
+                (0, 0), (60, 40)
+            )
+
+        self.assertEqual(detections, [])
 
     def test_debug_loads_selected_map_monsters_without_routes(self):
         bot = MapleStoryAutoBot.__new__(MapleStoryAutoBot)

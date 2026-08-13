@@ -6,6 +6,7 @@ from src.utils.detection import (
     get_iou,
     intersection_area,
     nms,
+    suppress_nearby_same_class,
 )
 
 
@@ -60,6 +61,48 @@ class NonMaximumSuppressionTests(unittest.TestCase):
         }
 
         self.assertEqual(nms([second, first], iou_threshold=0.4), [first, second])
+
+    def test_nearby_same_class_animation_hits_keep_best_score(self):
+        worse = {
+            "name": "green_mushroom",
+            "position": (15, 13),
+            "size": (30, 18),
+            "score": 0.28,
+        }
+        better = {
+            "name": "green_mushroom",
+            "position": (10, 10),
+            "size": (20, 30),
+            "score": 0.17,
+        }
+
+        self.assertEqual(
+            suppress_nearby_same_class(
+                [worse, better], center_distance=18
+            ),
+            [better],
+        )
+
+    def test_nearby_different_classes_are_preserved(self):
+        mushroom = {
+            "name": "green_mushroom",
+            "position": (10, 10),
+            "size": (20, 30),
+            "score": 0.17,
+        }
+        slime = {
+            "name": "slime",
+            "position": (12, 11),
+            "size": (20, 30),
+            "score": 0.20,
+        }
+
+        self.assertEqual(
+            suppress_nearby_same_class(
+                [slime, mushroom], center_distance=18
+            ),
+            [mushroom, slime],
+        )
 
 
 if __name__ == "__main__":
