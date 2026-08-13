@@ -352,90 +352,228 @@ def get_minimap_loc_size(img_frame):
     Detects the location and size of the minimap within the game frame.
 
     The function works by:
-    - Thresholding the image get pure white(255,255,255) pixels.
-    - Using connected components to find white-bordered regions.
-    - Filtering candidates based on expected minimap size and margin rules:
-        - Top, bottom, left, right margins must be 1px white lines.
+    - Thresholding near-white pixels so capture-card scaling and video-player
+      interpolation do not erase the minimap border.
+    - Looking for a rectangular border in the top-left part of the frame.
+    - Requiring strong coverage on all four sides to reject text and icons.
 
     Returns:
         (x, y, w, h): Top-left coordinate and width/height of the minimap.
                     Returns None if not found.
     '''
-    white = np.array([255, 255, 255])
+    if img_frame is None or img_frame.ndim != 3:
+        return None
 
-    # Mask for pure white
-    mask_white = cv2.inRange(img_frame, white, white)
+    frame_h, frame_w = img_frame.shape[:2]
+    # The game minimap is always near the top-left. Limiting the thresholding
+    # pass matters for native 4K capture-card frames and avoids scanning the
+    # whole game scene every frame.
+    search_h = max(1, int(np.ceil(frame_h * 0.4)))
+    search_w = max(1, int(np.ceil(frame_w * 0.4)))
+    search_frame = img_frame[:search_h, :search_w]
+    near_white_min = np.array([210, 210, 210], dtype=np.uint8)
+    white_max = np.array([255, 255, 255], dtype=np.uint8)
+    mask_white = cv2.inRange(search_frame, near_white_min, white_max)
+    contours, _ = cv2.findContours(
+        mask_white,
+        cv2.RETR_EXTERNAL,
+        cv2.CHAIN_APPROX_SIMPLE,
+    )
 
-    # Connected components with stats
-    num_labels, labels, stats, centroids = \
-        cv2.connectedComponentsWithStats(mask_white, connectivity=8)
+    candidates = []
+    for contour in contours:
+        x0, y0, rw, rh = cv2.boundingRect(contour)
 
-    # Loop over components (skip label 0, which is background)
-    for i in range(1, num_labels):
-        x0, y0, rw, rh, area = stats[i]
-
-        # Filter out small blobs
-        if rw < 100 or rh < 100:
+        # The compact minimap used by the bot is in the top-left quadrant.
+        # HDMI capture can reduce its normalized height below the old 100px
+        # minimum, so use a conservative lower bound instead.
+        if rw < 80 or rh < 50:
+            continue
+        if x0 > frame_w * 0.4 or y0 > frame_h * 0.4:
+            continue
+        if rw > frame_w * 0.5 or rh > frame_h * 0.5:
             continue
 
-        x1 = x0 + rw - 1
-        y1 = y0 + rh - 1
+        candidate = mask_white[y0:y0+rh, x0:x0+rw]
+        max_border_depth = min(16, rw // 4, rh // 4)
+        row_coverages = [
+            np.mean(candidate[row, :] > 0)
+            for row in range(max_border_depth)
+        ]
+        reverse_row_coverages = [
+            np.mean(candidate[rh - 1 - row, :] > 0)
+            for row in range(max_border_depth)
+        ]
+        column_coverages = [
+            np.mean(candidate[:, col] > 0)
+            for col in range(max_border_depth)
+        ]
+        reverse_column_coverages = [
+            np.mean(candidate[:, rw - 1 - col] > 0)
+            for col in range(max_border_depth)
+        ]
+        edge_coverages = tuple(
+            max(coverages[:3])
+            for coverages in (
+                row_coverages,
+                reverse_row_coverages,
+                column_coverages,
+                reverse_column_coverages,
+            )
+        )
 
-        # Check 1px white top and bottom margins
-        if not (np.all(img_frame[y0, x0:x0+rw] == white) and \
-                np.all(img_frame[y1, x0:x0+rw] == white)):
+        # A small amount of border damage is expected after HDMI scaling, but
+        # ordinary white text will not form four mostly complete edges.
+        if min(edge_coverages) < 0.82:
             continue
 
-        # Check 1px white left and right margins
-        # Ensures the candidate region is framed by white borders like the minimap
-        if not (np.all(img_frame[y0:y0+rh, x0] == white) and \
-                np.all(img_frame[y0:y0+rh, x1] == white)):
+        def border_depth(coverages):
+            # A contour can begin one antialiased pixel before the continuous
+            # border. Start at the first strong row/column near the edge and
+            # strip the complete run from there.
+            start = next(
+                (idx for idx, coverage in enumerate(coverages[:3])
+                 if coverage >= 0.82),
+                None,
+            )
+            if start is None:
+                return 0
+            depth = start
+            for coverage in coverages[start:]:
+                if coverage < 0.82:
+                    break
+                depth += 1
+            return depth
+
+        top_depth = border_depth(row_coverages)
+        bottom_depth = border_depth(reverse_row_coverages)
+        left_depth = border_depth(column_coverages)
+        right_depth = border_depth(reverse_column_coverages)
+        inner_w = rw - left_depth - right_depth
+        inner_h = rh - top_depth - bottom_depth
+        if inner_w <= 0 or inner_h <= 0:
             continue
 
-        # Create a mask of non-white pixels
-        mask_minimap = np.any(img_frame[y0:y0+rh, x0:x0+rw] != white, axis=2).astype(np.uint8)
+        inner = candidate[
+            top_depth:top_depth + inner_h,
+            left_depth:left_depth + inner_w,
+        ]
+        # A complete white block has four perfect edges too, but it is not a
+        # minimap. Require a meaningful non-white interior.
+        if np.mean(inner == 0) < 0.15:
+            continue
 
-        # Find bounding box of mask_minimap
-        coords = cv2.findNonZero(mask_minimap)
-        if coords is None:
-            continue  # skip empty block
-        x_minimap, y_minimap, w_minimap, h_minimap = cv2.boundingRect(coords)
+        score = (min(edge_coverages), np.mean(edge_coverages), rw * rh)
+        candidates.append((score, (
+            x0 + left_depth,
+            y0 + top_depth,
+            inner_w,
+            inner_h,
+        )))
 
-        # Offset by original x0, y0 to get coords in original image
-        x_minimap += x0
-        y_minimap += y0
-
-        return x_minimap, y_minimap, w_minimap, h_minimap
+    if candidates:
+        return max(candidates, key=lambda item: item[0])[1]
 
     # logger.warning("Minimap not found in the game frame.")
     return None  # minimap not found
 
-def get_player_location_on_minimap(img_minimap, minimap_player_color=(136, 255, 255)):
+def resize_minimap_to_reference(img_minimap, cfg):
+    """Resize a captured minimap to the raster used by a stored route map.
+
+    Capture cards can carry a high-resolution game desktop that PotPlayer then
+    scales into its own window. The combat frame is normalized separately, but
+    route-map matching must use the pixel size from the original map recording.
+    Reference sizes are stored as ``[height, width]`` per map.
+    """
+    if img_minimap is None or img_minimap.size == 0:
+        return img_minimap
+
+    map_name = cfg.get("bot", {}).get("map")
+    reference_sizes = cfg.get("minimap", {}).get("reference_size_by_map", {})
+    reference_size = reference_sizes.get(map_name)
+    if reference_size is None:
+        return img_minimap
+    if not isinstance(reference_size, (list, tuple)) or len(reference_size) != 2:
+        raise ValueError(
+            f"minimap.reference_size_by_map.{map_name} must be [height, width]"
+        )
+
+    target_h, target_w = (int(reference_size[0]), int(reference_size[1]))
+    if target_h <= 0 or target_w <= 0:
+        raise ValueError(
+            f"Invalid minimap reference size for {map_name}: {reference_size}"
+        )
+    if img_minimap.shape[:2] == (target_h, target_w):
+        return img_minimap
+
+    downscaling = (
+        img_minimap.shape[0] >= target_h and img_minimap.shape[1] >= target_w
+    )
+    interpolation = cv2.INTER_AREA if downscaling else cv2.INTER_LINEAR
+    return cv2.resize(
+        img_minimap,
+        (target_w, target_h),
+        interpolation=interpolation,
+    )
+
+def get_player_location_on_minimap(
+        img_minimap,
+        minimap_player_color=(136, 255, 255),
+        color_tolerance=0,
+        min_component_area=4,
+    ):
     """
     Detects the player's position on the minimap.
 
     The function works by:
-    - Creating a binary mask of all pixels in the minimap that match the configured
-    player color exactly.
-    - Verifying that at least 4 matching pixels are found (to avoid false positives).
-    - Computing the average of these pixel coordinates to determine the center of
-    the player icon on the minimap.
+    - Creating a binary mask around the configured player color.
+    - Keeping connected clusters above the configured minimum area.
+    - Selecting the cluster with the smallest average color error, then returning
+      that cluster's center.
 
     Returns:
         (x, y): The player's location in minimap coordinates as a tuple.
                 Returns None if not enough matching pixels are found.
     """
-    mask = cv2.inRange(img_minimap,
-                        minimap_player_color,
-                        minimap_player_color)
-    coords = cv2.findNonZero(mask)
-    if coords is None or len(coords) < 4:
+    target = np.asarray(minimap_player_color, dtype=np.int16)
+    tolerance = max(0, int(color_tolerance))
+    lower = np.clip(target - tolerance, 0, 255).astype(np.uint8)
+    upper = np.clip(target + tolerance, 0, 255).astype(np.uint8)
+    mask = cv2.inRange(img_minimap, lower, upper)
+    num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(
+        mask,
+        connectivity=8,
+    )
+    min_component_area = max(1, int(min_component_area))
+    components = [
+        label
+        for label in range(1, num_labels)
+        if stats[label, cv2.CC_STAT_AREA] >= min_component_area
+    ]
+    if not components:
         # logger.warning(f"Fail to locate player location on minimap.")
         return None
 
-    # Calculate the average location of the matching pixels
-    avg = coords.mean(axis=0)[0]  # shape (1,2), so we take [0]
-    loc_player_minimap = (int(round(avg[0])), int(round(avg[1])))
+    # Tolerance matching can include terrain pixels, so compare valid clusters
+    # instead of averaging unrelated pixels across the map.
+    target_i16 = target.astype(np.int16)
+
+    def component_score(label):
+        pixels = img_minimap[labels == label].astype(np.int16)
+        mean_color_error = np.mean(
+            np.max(np.abs(pixels - target_i16), axis=1)
+        )
+        # Capture-card interpolation can make unrelated map pixels fall inside
+        # the broad tolerance. Prefer the cluster closest to the configured
+        # player color; use area only as the tie-breaker.
+        return (mean_color_error, -stats[label, cv2.CC_STAT_AREA])
+
+    best = min(components, key=component_score)
+    center = centroids[best]
+    loc_player_minimap = (
+        int(round(center[0])),
+        int(round(center[1])),
+    )
 
     return loc_player_minimap
 
@@ -853,8 +991,21 @@ def resize_window(window_title, width=1296, height=759):
     # 取得視窗句柄
     hwnd = win32gui.FindWindow(None, window_title)
     if hwnd == 0:
-        print(f"找不到視窗: {window_title}")
-        return
+        logger.warning(f"找不到視窗: {window_title}")
+        return None
+
+    # MoveWindow cannot resize a maximized/minimized window reliably. Restore
+    # it first so auto_resize means what the configuration says it means.
+    window_placement = win32gui.GetWindowPlacement(hwnd)
+    show_command = window_placement[1]
+    non_restored_states = {
+        win32con.SW_SHOWMINIMIZED,
+        win32con.SW_SHOWMAXIMIZED,
+        win32con.SW_MINIMIZE,
+    }
+    if show_command in non_restored_states:
+        win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
+        time.sleep(0.05)
 
     # 取得目前視窗位置
     rect = win32gui.GetWindowRect(hwnd)
@@ -862,4 +1013,19 @@ def resize_window(window_title, width=1296, height=759):
 
     # 調整視窗大小
     win32gui.MoveWindow(hwnd, x, y, width, height, True)
-    print(f"已將「{window_title}」調整為 {width}x{height}")
+    actual_rect = win32gui.GetWindowRect(hwnd)
+    actual_size = (
+        actual_rect[2] - actual_rect[0],
+        actual_rect[3] - actual_rect[1],
+    )
+    requested_size = (int(width), int(height))
+    if actual_size != requested_size:
+        logger.warning(
+            f"視窗「{window_title}」要求調整為 {requested_size[0]}x"
+            f"{requested_size[1]}，實際為 {actual_size[0]}x{actual_size[1]}"
+        )
+    else:
+        logger.info(
+            f"已將「{window_title}」調整為 {actual_size[0]}x{actual_size[1]}"
+        )
+    return actual_size

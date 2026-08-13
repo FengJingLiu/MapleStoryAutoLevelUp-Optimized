@@ -1,8 +1,11 @@
 build/
 screenshot/
-nametag/
+!nametag/
+nametag/*
+!nametag/liu_muning.png
 video/
 dist/
+.venv/
 test/
 *__pycache__/
 *.log

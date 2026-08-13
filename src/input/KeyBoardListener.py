@@ -11,6 +11,59 @@ from pynput import keyboard
 # Local import
 from src.utils.logger import logger
 
+
+def normalize_key_name(key_name):
+    """Return one stable name for configured and pynput-reported keys."""
+    if key_name is None:
+        return ""
+
+    raw_name = str(key_name)
+    if raw_name == " ":
+        return "space"
+
+    candidate = raw_name.strip().lower()
+    if not candidate:
+        return ""
+    if len(candidate) == 1:
+        return candidate
+
+    compact = candidate.replace("-", "").replace("_", "").replace(" ", "")
+    aliases = {
+        "spacebar": "space",
+        "control": "ctrl",
+        "lctrl": "ctrl",
+        "leftctrl": "ctrl",
+        "leftcontrol": "ctrl",
+        "ctrll": "ctrl",
+        "rctrl": "ctrl",
+        "rightctrl": "ctrl",
+        "rightcontrol": "ctrl",
+        "ctrlr": "ctrl",
+        "lshift": "shift",
+        "leftshift": "shift",
+        "shiftl": "shift",
+        "rshift": "shift",
+        "rightshift": "shift",
+        "shiftr": "shift",
+        "option": "alt",
+        "lalt": "alt",
+        "leftalt": "alt",
+        "altl": "alt",
+        "ralt": "alt",
+        "rightalt": "alt",
+        "altr": "alt",
+        "altgr": "alt",
+        "return": "enter",
+        "escape": "esc",
+        "pageup": "pageup",
+        "pgup": "pageup",
+        "pagedown": "pagedown",
+        "pgdown": "pagedown",
+        "pgdn": "pagedown",
+    }
+    return aliases.get(compact, compact)
+
+
 class KeyBoardListener():
     '''
     KeyBoardListener
@@ -73,9 +126,11 @@ class KeyBoardListener():
         '''
         try:
             # Regular keys (like 'a', '1', etc.)
-            k = key.char.lower()
+            k = normalize_key_name(key.char)
         except AttributeError:
-            k = self.movement_keys.get(key, None)
+            k = normalize_key_name(
+                self.movement_keys.get(key, getattr(key, "name", None))
+            )
 
         # Remove the key from key_pressing list if it's in there
         if k in self.key_pressing:
@@ -87,7 +142,7 @@ class KeyBoardListener():
         '''
         try:
             # Regular character keys (e.g., 'a', 'w', '1')
-            k = key.char.lower()
+            k = normalize_key_name(key.char)
         except AttributeError:
             # Handle F1, F2, F3, ... F12
             if key in self.func_keys:
@@ -96,8 +151,11 @@ class KeyBoardListener():
                     self.is_pressed_func_key[idx] = True # Polling
                     self.func_key_handlers.get(key.name.lower())()
                     self.t_func_key[idx] = time.time()
-
-            k = self.movement_keys.get(key, None)
+                k = ""
+            else:
+                k = normalize_key_name(
+                    self.movement_keys.get(key, getattr(key, "name", None))
+                )
 
         if k and k not in self.key_pressing:
             self.key_pressing.append(k)

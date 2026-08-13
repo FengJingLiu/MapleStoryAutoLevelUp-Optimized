@@ -530,7 +530,7 @@ class MainWindow(QMainWindow):
         layout_bot_mode = QHBoxLayout()
         layout_bot_mode.setSpacing(8)
         self.bot_mode = QComboBox()
-        self.bot_mode.addItems(["normal", "aux", "patrol"])
+        self.bot_mode.addItems(["normal", "aux", "patrol", "debug"])
 
         layout_bot_mode.addWidget(QLabel("Bot Mode:"))
         layout_bot_mode.addWidget(self.bot_mode)
@@ -824,12 +824,8 @@ class MainWindow(QMainWindow):
         self.checkbox_auto_resize.setChecked(bool(gw_cfg.get("auto_resize", True)))
 
         # === Bot Mode ===
-        index = 0
-        if self.cfg["bot"]["mode"] == "aux":
-            index = 1
-        elif self.cfg["bot"]["mode"] == "patrol":
-            index = 2
-        self.bot_mode.setCurrentIndex(index)
+        index = self.bot_mode.findText(self.cfg["bot"]["mode"])
+        self.bot_mode.setCurrentIndex(index if index >= 0 else 0)
 
         # Map Selection
         for i in range(self.list_widget_maps.count()):

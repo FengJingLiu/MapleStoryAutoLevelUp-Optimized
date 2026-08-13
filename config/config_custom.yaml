@@ -1,0 +1,18 @@
+bot:
+  map: fire_land_1
+  mode: debug
+game_window:
+  title: "TV/CAM/\u8BBE\u5907 - PotPlayer"
+health_monitor:
+  add_hp_percent: 0
+  add_mp_percent: 0
+  enable: false
+key:
+  aoe_skill: shift
+  directional_attack: control
+  jump: alt
+monster_detect:
+  mode: color
+nametag:
+  enable: true
+  name: liu_muning

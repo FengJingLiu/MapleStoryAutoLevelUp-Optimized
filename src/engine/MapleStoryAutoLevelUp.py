@@ -24,11 +24,13 @@ from src.utils.logger import logger
 from src.utils.common import (find_pattern_sqdiff, draw_rectangle, draw_circle,
     draw_line, draw_text, screenshot, nms,
     load_image, get_mask, get_minimap_loc_size, get_player_location_on_minimap,
+    resize_minimap_to_reference,
     is_mac, override_cfg, load_yaml, get_all_other_player_locations_on_minimap,
     click_in_game_window, mask_route_colors, to_opencv_hsv, debug_minimap_colors,
-    activate_game_window, is_img_16_to_9, normalize_pixel_coordinate, resize_window
+    activate_game_window, normalize_pixel_coordinate, resize_window
 )
 from src.utils.detection import detection_center, detection_to_box, intersection_area
+from src.input.CaptureFramePreprocessor import preprocess_capture_frame
 from src.input.KeyBoardController import KeyBoardController, press_key
 from src.input.KeyBoardListener import KeyBoardListener
 if is_mac():
@@ -45,6 +47,7 @@ from src.states.near_rune import NearRuneState
 from src.states.solving_rune import SolvingRuneState
 from src.states.auxiliary import AuxiliaryState
 from src.states.patrol import PatrolState
+from src.states.debug import DebugState
 
 class MapleStoryAutoBot:
     '''
@@ -82,6 +85,10 @@ class MapleStoryAutoBot:
         self.is_frame_done = False #
         # Coordinate (top-left coordinate)
         self.loc_nametag = (0, 0) # nametag location on game screen
+        self.has_valid_nametag_location = False
+        self.nametag_miss_count = 0
+        self.pending_nametag_location = None
+        self.screen_player_location_valid = False
         self.loc_party_red_bar = (0, 0) # party red bar location on game screen
         self.loc_minimap = (0, 0) # minimap location on game screen
         self.loc_player = (0, 0) # player location on game screen
@@ -97,6 +104,9 @@ class MapleStoryAutoBot:
         self.img_route = None # route map
         self.img_route_debug = None # route map for visualization
         self.img_minimap = np.zeros((10, 10, 3), dtype=np.uint8) # minimap on game screen
+        self.img_minimap_screen = self.img_minimap # unscaled minimap in screen coordinates
+        self.img_minimap_source = self.img_minimap # native capture-card minimap
+        self.img_capture_content = None
         # Timers
         self.t_last_frame = time.time() # Last frame timer, for fps calculation
         self.t_watch_dog = time.time() # Last movement timer
@@ -124,6 +134,8 @@ class MapleStoryAutoBot:
         self._shutdown_lock = threading.Lock()
         self._components_stopped = True
         self._input_suspended_for_capture = False
+        self._last_capture_geometry = None
+        self._last_capture_error = None
 
         # Finite State Machine
         self.fsm = FiniteStateMachine()
@@ -133,6 +145,7 @@ class MapleStoryAutoBot:
         self.fsm.add_state(SolvingRuneState("solving_rune", self))
         self.fsm.add_state(AuxiliaryState  ("aux"         , self))
         self.fsm.add_state(PatrolState     ("patrol"      , self))
+        self.fsm.add_state(DebugState      ("debug"       , self))
         self.fsm.add_transition("hunting", "finding_rune") # When saw a "Rune has created" messgae
         self.fsm.add_transition("finding_rune", "hunting") # After finding rune timeout
         self.fsm.add_transition("finding_rune", "near_rune") # When detect a nearby rune
@@ -150,9 +163,30 @@ class MapleStoryAutoBot:
         self.image_debug_signal = image_debug_signal
         self.route_map_viz_signal = route_map_viz_signal
 
+    def _emit_debug_images(self):
+        """Emit whichever visualization canvases are available for this mode."""
+        if not self.is_show_debug_window or not self.is_ui:
+            return
+
+        if self.img_frame_debug is not None and self.image_debug_signal is not None:
+            img_frame_debug_emit = self.img_frame_debug[
+                :self.cfg["ui_coords"]["ui_y_start"], :
+            ].copy()
+            self.image_debug_signal.emit(img_frame_debug_emit)
+
+        # Auxiliary mode has no route map. Keep the game-window visualization
+        # alive instead of copying a missing route canvas.
+        if self.img_route_debug is not None and self.route_map_viz_signal is not None:
+            self.route_map_viz_signal.emit(self.img_route_debug.copy())
+
     def remote_keyboard_target(self):
         """Return whether HID input goes to game computer B, not this PC."""
         return self.cfg.get("esp32_hid", {}).get("remote_target", False)
+
+    def is_debug_mode(self):
+        """Return whether this run is the vision-only debug mode."""
+        cfg = getattr(self, "cfg", None) or {}
+        return cfg.get("bot", {}).get("mode") == "debug"
 
     def click_game_ui(self, coord, action):
         """Click only when the captured window and game are on the same PC."""
@@ -196,6 +230,24 @@ class MapleStoryAutoBot:
         '''
         load_config
         '''
+        mode = cfg["bot"]["mode"]
+        if mode not in {"normal", "aux", "patrol", "debug"}:
+            logger.error(f"[load_config] Unsupported bot mode: {mode}")
+            return -1
+
+        # One UI controller can be paused and loaded again with another map or
+        # mode. Never retain route or monster resources from that prior run.
+        self.img_map = None
+        self.img_route = None
+        self.img_route_debug = None
+        self.img_routes = []
+        self.monsters_info = {}
+
+        if mode == "debug":
+            logger.info(
+                "[load_config] Debug mode is vision-only; keyboard, mouse, "
+                "health, buff, login, and channel workflows are disabled"
+            )
         if cfg.get("esp32_hid", {}).get("remote_target", False):
             # This capture-card setup controls computer B with a keyboard-only
             # HID descriptor. Mouse-driven channel flows cannot be completed
@@ -229,8 +281,8 @@ class MapleStoryAutoBot:
             for k, v in cfg["route"]["color_code_up_down"].items()
         }
 
-        if cfg["bot"]["mode"] == "normal":
-            map_name = cfg['bot']['map']
+        map_name = cfg['bot']['map']
+        if mode in {"normal", "debug"}:
             # Check if the map is supported in config_data.yaml
             if map_name not in self.data["map_mobs_mapping"]:
                 text = f"Invalid map name: {map_name}. "\
@@ -239,6 +291,7 @@ class MapleStoryAutoBot:
                 return -1
                 # raise RuntimeError(text)
 
+        if mode == "normal":
             # Load map.png from minimaps/
             self.img_map = load_image(f"minimaps/{map_name}/map.png",
                                       cv2.IMREAD_COLOR)
@@ -253,7 +306,8 @@ class MapleStoryAutoBot:
                 img = mask_route_colors(self.img_map, img, cfg["route"]["color_code_up_down"])
                 self.img_routes.append(img)
 
-            # Load monsters images from monster/<monster_name>
+        if mode in {"normal", "debug"}:
+            # Load monsters images from monster/<monster_name>.
             for monster_name in self.data["map_mobs_mapping"][map_name]:
                 imgs = []
                 for file in glob.glob(f"monster/{monster_name}/{monster_name}*.png"):
@@ -269,7 +323,10 @@ class MapleStoryAutoBot:
                     logger.error(f"No images found in monster/{monster_name}/{monster_name}*")
                     return -1
                     # raise RuntimeError(f"No images found in monster/{monster_name}/{monster_name}*")
-            logger.info(f"Loaded monsters: {list(self.monsters_info.keys())}")
+            logger.info(
+                f"Loaded monsters for {map_name}: "
+                f"{list(self.monsters_info.keys())}"
+            )
 
         # Load player's name tag
         if cfg["nametag"]["enable"]:
@@ -343,16 +400,23 @@ class MapleStoryAutoBot:
             else:
                 self.capture = GameWindowCapturor(self.cfg, self.args.test_image)
 
+            control_enabled = (
+                not self.is_disable_control
+                and not self.is_debug_mode()
+            )
             self.kb = KeyBoardController(
                 self.cfg,
-                connect_input=not self.is_disable_control,
-                capture_available=not self.remote_keyboard_target(),
+                connect_input=control_enabled,
+                capture_available=(
+                    control_enabled and not self.remote_keyboard_target()
+                ),
             )
-            self._input_suspended_for_capture = self.remote_keyboard_target()
+            self._input_suspended_for_capture = (
+                control_enabled and self.remote_keyboard_target()
+            )
 
             self.health_monitor = HealthMonitor(self.cfg, self.kb)
-            if self.cfg["health_monitor"]["enable"] and \
-                not self.is_disable_control:
+            if self.cfg["health_monitor"]["enable"] and control_enabled:
                 self.health_monitor.start()
 
             self.profiler = Profiler(self.cfg)
@@ -373,10 +437,16 @@ class MapleStoryAutoBot:
                 self.fsm.set_init_state("aux")
             elif self.cfg["bot"]["mode"] == "patrol":
                 self.fsm.set_init_state("patrol")
+            elif self.cfg["bot"]["mode"] == "debug":
+                self.fsm.set_init_state("debug")
             else:
                 self.fsm.set_init_state("hunting")
 
             self.is_first_frame = True
+            self.has_valid_nametag_location = False
+            self.nametag_miss_count = 0
+            self.pending_nametag_location = None
+            self.screen_player_location_valid = False
             self.thread_auto_bot = threading.Thread(target=self.loop)
             self.thread_auto_bot.start()
         except BaseException:
@@ -487,14 +557,14 @@ class MapleStoryAutoBot:
             borderType=cv2.BORDER_REPLICATE  # replicate border for safe matching
         )
 
-        # Get last frame name tag location
-        if self.is_first_frame:
-            last_result = None
-        else:
+        # Only use a cached search center while the prior location is valid.
+        if getattr(self, "has_valid_nametag_location", False):
             last_result = (
                 self.loc_nametag[0] + pad_x,
                 self.loc_nametag[1] + pad_y
             )
+        else:
+            last_result = None
 
         # Get number of splits
         h, w = img_nametag.shape
@@ -529,13 +599,33 @@ class MapleStoryAutoBot:
                 mask=split["mask"],
                 global_threshold=self.cfg["nametag"]["global_diff_thres"]
             )
+            # A weak local result is only a candidate. Compare it with a full
+            # search so a nearby rock/rope texture cannot beat the true tag.
+            cache_accept_thres = self.cfg["nametag"].get(
+                "cache_accept_thres", 0.12
+            )
+            # While a large jump is pending, always obtain a global candidate:
+            # the local cache is still centered on the old pre-scroll point.
+            if is_cached and (
+                score > cache_accept_thres
+                or getattr(self, "pending_nametag_location", None) is not None
+            ):
+                global_loc, global_score, _ = find_pattern_sqdiff(
+                    img_roi,
+                    split["img"],
+                    last_result=None,
+                    mask=split["mask"],
+                    global_threshold=0.0,
+                )
+                if global_score < score:
+                    loc, score, is_cached = global_loc, global_score, False
             w_match = split["img"].shape[1]
             h_match = split["img"].shape[0]
             score += split["score_penalty"]
             matches.append((tag_type, loc, score, w_match, h_match, is_cached, split["offset_x"]))
 
         # Select best match and fix offset:
-        matches.sort(key=lambda x: (not x[5], x[2]))  # prefer cached, then low score
+        matches.sort(key=lambda x: x[2])
         tag_type, loc_nametag, score, w_match, h_match, is_cached, offset_x = matches[0]
 
         # Adjust match location back to full nametag coordinates
@@ -545,9 +635,65 @@ class MapleStoryAutoBot:
             loc_nametag[1] - pad_y
         )
 
-        # Only update nametag location when score is good enough
-        if score < self.cfg["nametag"]["diff_thres"]:
+        # Only update nametag location when score is good enough. On startup,
+        # never turn the default (0, 0) into a fake player coordinate when the
+        # configured template is absent or does not match the current hero.
+        is_valid_match = score < self.cfg["nametag"]["diff_thres"]
+        candidate_player = (
+            loc_nametag[0] + w // 2,
+            loc_nametag[1] - self.cfg["nametag"]["offset"][1]
+        )
+        camera_h, camera_w = img_camera.shape[:2]
+        is_valid_match = (
+            is_valid_match
+            and 0 <= candidate_player[0] < camera_w
+            and 0 <= candidate_player[1] < camera_h
+        )
+
+        # Camera scrolling after a ladder climb can move the true tag a long
+        # way in one frame, but a single low-score texture hit can do the same.
+        # Require large jumps to appear in two consecutive frames before they
+        # replace the current control coordinate.
+        needs_jump_confirmation = False
+        if is_valid_match and getattr(self, "has_valid_nametag_location", False):
+            jump_distance = max(
+                abs(loc_nametag[0] - self.loc_nametag[0]),
+                abs(loc_nametag[1] - self.loc_nametag[1]),
+            )
+            jump_confirm_distance = self.cfg["nametag"].get(
+                "jump_confirm_distance", 40
+            )
+            if jump_distance > jump_confirm_distance:
+                pending = getattr(self, "pending_nametag_location", None)
+                jump_confirm_radius = self.cfg["nametag"].get(
+                    "jump_confirm_radius", 12
+                )
+                if pending is None or max(
+                    abs(loc_nametag[0] - pending[0]),
+                    abs(loc_nametag[1] - pending[1]),
+                ) > jump_confirm_radius:
+                    self.pending_nametag_location = loc_nametag
+                    needs_jump_confirmation = True
+
+        is_current_match = is_valid_match and not needs_jump_confirmation
+        if is_current_match:
             self.loc_nametag = loc_nametag
+            self.has_valid_nametag_location = True
+            self.nametag_miss_count = 0
+            self.pending_nametag_location = None
+        else:
+            self.nametag_miss_count = getattr(self, "nametag_miss_count", 0) + 1
+
+        max_stale_frames = self.cfg["nametag"].get("max_stale_frames", 2)
+        is_stale = (
+            not is_current_match
+            and getattr(self, "has_valid_nametag_location", False)
+            and self.nametag_miss_count <= max_stale_frames
+        )
+        if not is_current_match and not is_stale:
+            self.has_valid_nametag_location = False
+            if not needs_jump_confirmation:
+                self.pending_nametag_location = None
 
         loc_player = (
             self.loc_nametag[0] + w // 2,
@@ -557,13 +703,27 @@ class MapleStoryAutoBot:
         # Draw name tag detection box for debugging
         draw_rectangle(self.img_frame_debug, self.loc_nametag,
                        self.img_nametag.shape, (0, 255, 0), "")
+        match_status = "cached" if is_cached else "global"
+        if needs_jump_confirmation:
+            match_status = "pending jump"
+        elif is_stale:
+            match_status = (
+                f"stale {self.nametag_miss_count}/{max_stale_frames}"
+            )
+        elif not is_current_match:
+            match_status = "rejected"
         text = f"NameTag,{round(score, 2)}," + \
-                f"{'cached' if is_cached else 'missed'}," + \
+                f"{match_status}," + \
                 f"{tag_type}"
         draw_text(self.img_frame_debug, text,
                   (self.loc_nametag[0],
                    self.loc_nametag[1] + self.img_nametag.shape[0] + 30),
                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+
+        # A stale box is useful in the visualization but must never drive
+        # route or attack logic. Only a match accepted on this frame is current.
+        if not is_current_match:
+            return None
 
         return loc_player
 
@@ -574,7 +734,7 @@ class MapleStoryAutoBot:
         # Zero out minimap area in the img_frame
         img_frame = self.img_frame.copy()
         x, y = self.loc_minimap
-        h, w = self.img_minimap.shape[:2]
+        h, w = self.img_minimap_screen.shape[:2]
         img_frame[y:y+h, x:x+w] = 0
 
         # Get camera area
@@ -828,7 +988,7 @@ class MapleStoryAutoBot:
 
         return nearest_monster
 
-    def get_monsters_in_range(self, top_left, bottom_right):
+    def get_monsters_in_range(self, top_left, bottom_right, diff_thres=None):
         '''
         get_monsters_in_range
         '''
@@ -836,6 +996,10 @@ class MapleStoryAutoBot:
         x1, y1 = bottom_right
 
         img_roi = self.img_frame[y0:y1, x0:x1]
+        match_threshold = (
+            self.cfg["monster_detect"]["diff_thres"]
+            if diff_thres is None else float(diff_thres)
+        )
 
         # Shift player's location into ROI coordinate system
         px, py = self.loc_player
@@ -849,8 +1013,47 @@ class MapleStoryAutoBot:
         char_y_max = min(img_roi.shape[0], py_in_roi + self.cfg["character"]["height"] // 2)
 
         monsters = []
+
+        def get_match_points(result):
+            """Return sparse SQDIFF candidates, bounded in debug mode."""
+            result = np.nan_to_num(
+                result, nan=1.0, posinf=1.0, neginf=1.0
+            )
+            if not self.is_debug_mode():
+                return [
+                    (int(x), int(y), float(result[y, x]))
+                    for y, x in zip(*np.where(result <= match_threshold))
+                ]
+
+            radius = max(
+                1, int(self.cfg.get("debug", {}).get("local_min_radius", 9))
+            )
+            kernel_size = radius * 2 + 1
+            local_min = cv2.erode(
+                result, np.ones((kernel_size, kernel_size), dtype=np.uint8)
+            )
+            ys, xs = np.where(
+                (result <= match_threshold)
+                & (result <= local_min + 1e-7)
+            )
+            candidates = sorted(
+                (
+                    (int(x), int(y), float(result[y, x]))
+                    for y, x in zip(ys, xs)
+                ),
+                key=lambda item: item[2],
+            )
+            top_k = max(
+                1, int(self.cfg.get("debug", {}).get("template_top_k", 1))
+            )
+            return candidates[:top_k]
+
         for monster_name, monster_imgs in self.monsters_info.items():
             for img_monster, mask_monster in monster_imgs:
+                h_roi, w_roi = img_roi.shape[:2]
+                h_temp, w_temp = img_monster.shape[:2]
+                if h_temp > h_roi or w_temp > w_roi:
+                    continue
                 if self.cfg["bot"]["mode"] == "patrol":
                     pass # Don't detect monster using template in patrol mode
                 elif self.cfg["monster_detect"]["mode"] == "template_free":
@@ -910,15 +1113,13 @@ class MapleStoryAutoBot:
                     res = cv2.matchTemplate(img_roi_blur, img_monster_blur, cv2.TM_SQDIFF_NORMED)
 
                     # Apply soft threshold
-                    match_locations = np.where(res <= self.cfg["monster_detect"]["diff_thres"])
-
                     h, w = img_monster.shape[:2]
-                    for pt in zip(*match_locations[::-1]):
+                    for x, y, score in get_match_points(res):
                         monsters.append({
                             "name": monster_name,
-                            "position": (pt[0] + x0, pt[1] + y0),
+                            "position": (x + x0, y + y0),
                             "size": (h, w),
-                            "score": res[pt[1], pt[0]],
+                            "score": score,
                         })
                 elif self.cfg["monster_detect"]["mode"] == "grayscale":
                     img_monster_gray = cv2.cvtColor(img_monster, cv2.COLOR_BGR2GRAY)
@@ -928,14 +1129,13 @@ class MapleStoryAutoBot:
                             img_monster_gray,
                             cv2.TM_SQDIFF_NORMED,
                             mask=mask_monster)
-                    match_locations = np.where(res <= self.cfg["monster_detect"]["diff_thres"])
                     h, w = img_monster.shape[:2]
-                    for pt in zip(*match_locations[::-1]):
+                    for x, y, score in get_match_points(res):
                         monsters.append({
                             "name": monster_name,
-                            "position": (pt[0] + x0, pt[1] + y0),
+                            "position": (x + x0, y + y0),
                             "size": (h, w),
-                            "score": res[pt[1], pt[0]],
+                            "score": score,
                     })
                 elif self.cfg["monster_detect"]["mode"] == "color":
                     res = cv2.matchTemplate(
@@ -943,14 +1143,13 @@ class MapleStoryAutoBot:
                             img_monster,
                             cv2.TM_SQDIFF_NORMED,
                             mask=mask_monster)
-                    match_locations = np.where(res <= self.cfg["monster_detect"]["diff_thres"])
                     h, w = img_monster.shape[:2]
-                    for pt in zip(*match_locations[::-1]):
+                    for x, y, score in get_match_points(res):
                         monsters.append({
                             "name": monster_name,
-                            "position": (pt[0] + x0, pt[1] + y0),
+                            "position": (x + x0, y + y0),
                             "size": (h, w),
-                            "score": res[pt[1], pt[0]],
+                            "score": score,
                     })
                 else:
                     logger.error(f"Unexpected camera localization mode: {self.cfg['monster_detect']['mode']}")
@@ -989,8 +1188,97 @@ class MapleStoryAutoBot:
                     "score": 1.0,
                 })
 
-        # Debug
-        # Draw attack detection range
+        self.draw_monster_detections(monsters, top_left, bottom_right)
+
+        return monsters
+
+    def get_debug_monsters_in_range(
+        self, top_left, bottom_right, score_thres=None
+    ):
+        """Detect map monsters by shape across the full camera image.
+
+        Full-frame masked color SQDIFF strongly favors recurring terrain in
+        Fire Land. Laplacian edge correlation instead ranks the distinctive
+        sprite outlines above rocks and sky while remaining template-based.
+        """
+        x0, y0 = top_left
+        x1, y1 = bottom_right
+        img_roi = self.img_frame[y0:y1, x0:x1]
+        img_roi_gray = cv2.cvtColor(img_roi, cv2.COLOR_BGR2GRAY)
+        img_roi_edges = cv2.convertScaleAbs(
+            cv2.Laplacian(img_roi_gray, cv2.CV_32F)
+        )
+        threshold = (
+            float(score_thres)
+            if score_thres is not None
+            else float(self.cfg.get("debug", {}).get("monster_diff_thres", 0.18))
+        )
+        debug_cfg = self.cfg.get("debug", {})
+        radius = max(
+            1,
+            int(
+                debug_cfg.get(
+                    "local_peak_radius",
+                    debug_cfg.get("local_min_radius", 9),
+                )
+            ),
+        )
+        top_k = max(1, int(debug_cfg.get("template_top_k", 1)))
+        kernel = np.ones((radius * 2 + 1, radius * 2 + 1), dtype=np.uint8)
+
+        monsters = []
+        for monster_name, monster_imgs in self.monsters_info.items():
+            for img_monster, _ in monster_imgs:
+                h, w = img_monster.shape[:2]
+                if h > img_roi_edges.shape[0] or w > img_roi_edges.shape[1]:
+                    continue
+                template_gray = cv2.cvtColor(
+                    img_monster, cv2.COLOR_BGR2GRAY
+                )
+                template_edges = cv2.convertScaleAbs(
+                    cv2.Laplacian(template_gray, cv2.CV_32F)
+                )
+                result = cv2.matchTemplate(
+                    img_roi_edges,
+                    template_edges,
+                    cv2.TM_CCOEFF_NORMED,
+                )
+                result = np.nan_to_num(
+                    result, nan=-1.0, posinf=-1.0, neginf=-1.0
+                )
+                local_max = cv2.dilate(result, kernel)
+                ys, xs = np.where(
+                    (result >= threshold)
+                    & (result >= local_max - 1e-7)
+                )
+                candidates = sorted(
+                    (
+                        (int(x), int(y), float(result[y, x]))
+                        for y, x in zip(ys, xs)
+                    ),
+                    key=lambda item: item[2],
+                    reverse=True,
+                )[:top_k]
+                monsters.extend(
+                    {
+                        "name": monster_name,
+                        "position": (x + x0, y + y0),
+                        "size": (h, w),
+                        # Keep SQDIFF-style ordering for the shared NMS helper.
+                        "score": 1.0 - score,
+                        "confidence": score,
+                    }
+                    for x, y, score in candidates
+                )
+
+        monsters = nms(monsters, iou_threshold=0.4)
+        self.draw_monster_detections(monsters, top_left, bottom_right)
+        return monsters
+
+    def draw_monster_detections(self, monsters, top_left, bottom_right):
+        """Draw a monster search region and already-computed detections."""
+        x0, y0 = top_left
+        x1, y1 = bottom_right
         draw_rectangle(
             self.img_frame_debug, (x0, y0), (y1-y0, x1-x0),
             (255, 0, 0), "Mob Detection Box"
@@ -1003,12 +1291,15 @@ class MapleStoryAutoBot:
             else:
                 color = (0, 255, 0)
 
+            label = str(round(monster["score"], 2))
+            if self.is_debug_mode():
+                visible_score = monster.get("confidence", monster["score"])
+                label = f'{monster["name"]}: {visible_score:.2f}'
+
             draw_rectangle(
                 self.img_frame_debug, monster["position"], monster["size"],
-                color, str(round(monster['score'], 2))
+                color, label
             )
-
-        return monsters
 
     def get_img_frame(self):
         '''
@@ -1020,29 +1311,43 @@ class MapleStoryAutoBot:
             logger.warning("Failed to capture game frame.")
             return
 
-        # Cut the title bar and resize raw frame to (1296, 759)
-        frame_no_title = self.frame[self.cfg["game_window"]["title_bar_height"]:, :]
+        try:
+            img_frame, geometry = preprocess_capture_frame(
+                self.frame,
+                self.cfg,
+                window_title=getattr(self.capture, "window_title", ""),
+                skip_direct_size_check=getattr(self.args, "test_image", "") != "",
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            # A persistent bad geometry should pause remote input, but it must
+            # not flood the UI log at capture FPS.
+            text = str(exc)
+            if text != getattr(self, "_last_capture_error", None):
+                logger.error(f"[capture] {text}")
+                self._last_capture_error = text
+            return
 
-        # Make sure the window ratio is as expected
-        if self.args.test_image != "":
-            pass # Disable size check if using test image for debugging
-        elif self.cfg["bot"]["mode"] == "aux":
-            if not is_img_16_to_9(frame_no_title, self.cfg): # Aux mode allow 16:9 resolution
-                text = f"Unexpeted window size: {frame_no_title.shape[:2]} (expect window ratio 16:9)\n"
-                text += "Please use windowed mode & smallest resolution."
-                logger.error(text)
-                return
+        self._last_capture_error = None
+        geometry_key = tuple(geometry.items())
+        if geometry_key != getattr(self, "_last_capture_geometry", None):
+            logger.info(
+                "[capture] "
+                f"profile={geometry['profile']} source={geometry['source_size']} "
+                f"video_roi={geometry['video_roi']} "
+                f"content={geometry['content_size']} "
+                f"working={geometry['working_size']}"
+            )
+            self._last_capture_geometry = geometry_key
+
+        # Preserve the native PotPlayer video raster for minimap routing. The
+        # full-frame vision image is intentionally normalized for monster/UI
+        # templates, but that downscale can collapse the 2x2 player dot.
+        if geometry["profile"] == "potplayer":
+            x0, y0, x1, y1 = geometry["video_roi"]
+            self.img_capture_content = self.frame[y0:y1, x0:x1]
         else:
-            # Other mode only allow specific resolution
-            if self.cfg["game_window"]["size"] != frame_no_title.shape[:2]:
-                text = f"Unexpeted window size: {frame_no_title.shape[:2]} "\
-                       f"(expect {self.cfg['game_window']['size']})\n"
-                text += "Please use windowed mode & smallest resolution."
-                logger.error(text)
-                return
-
-        return cv2.resize(frame_no_title, WINDOW_WORKING_SIZE,
-                   interpolation=cv2.INTER_NEAREST)
+            self.img_capture_content = None
+        return img_frame
 
     def is_player_stuck(self):
         """
@@ -1174,8 +1479,19 @@ class MapleStoryAutoBot:
                 2, cv2.LINE_AA
             )
 
-        # Draw attack box on debug window
-        if self.cfg["bot"]["attack"] == "aoe_skill":
+        # Draw attack boxes only when a current screen-space player location is
+        # available. Debug mode still shows the full-frame monster box below.
+        if not getattr(self, "screen_player_location_valid", False):
+            draw_text(
+                self.img_frame_debug,
+                "Player location unavailable",
+                (500, 60),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.7,
+                (0, 0, 255),
+                2,
+            )
+        elif self.cfg["bot"]["attack"] == "aoe_skill":
             x0, y0, x1, y1 = self.get_attack_range()
             draw_rectangle(
                 self.img_frame_debug, (x0, y0),
@@ -1200,12 +1516,12 @@ class MapleStoryAutoBot:
         draw_rectangle(
             self.img_frame_debug,
             self.loc_minimap,
-            self.img_minimap.shape[:2],
+            self.img_minimap_screen.shape[:2],
             (0, 0, 255), "minimap",thickness=2
         )
 
-        # Don't draw minimap in patrol mode
-        if self.cfg["bot"]["mode"] in ["patrol", "aux"]:
+        # Modes without a route map stop after the game-window annotations.
+        if self.cfg["bot"]["mode"] in ["patrol", "aux", "debug"]:
             return
 
         # Compute crop region with boundary check
@@ -1631,6 +1947,12 @@ class MapleStoryAutoBot:
             self.cmd_action = "jump"
 
     def update_cmd_by_mob_detection(self):
+        # Never build an attack decision around an expired screen location.
+        if not getattr(self, "screen_player_location_valid", False):
+            self.monsters = []
+            self.cmd_action = "none"
+            return
+
         # Get monster search box
         margin = self.cfg["monster_detect"]["search_box_margin"]
         if self.cfg["bot"]["attack"] == "aoe_skill":
@@ -1710,7 +2032,8 @@ class MapleStoryAutoBot:
         img_frame = self.get_img_frame()
         if img_frame is None:
             self.suspend_input_for_capture_loss()
-            if not is_mac() and not self.remote_keyboard_target():
+            if not self.is_debug_mode() and \
+                not is_mac() and not self.remote_keyboard_target():
                 activate_game_window(self.capture.window_title)
             return -1 # Wait for game window to be ready
         else:
@@ -1738,7 +2061,8 @@ class MapleStoryAutoBot:
         # Get minimap coordinate and size on game window
         minimap_result = get_minimap_loc_size(self.img_frame)
         if minimap_result is None:
-            if not self.remote_keyboard_target() and \
+            if not self.is_debug_mode() and \
+                not self.remote_keyboard_target() and \
                 time.time() - self.t_last_minimap_update > 30:
                 # Unable to get minimap for 30 seconds -> assume it's login screen
                 loc_login_button = self.get_login_button_location()
@@ -1760,7 +2084,36 @@ class MapleStoryAutoBot:
             h -= 2
             # update minimap image
             self.loc_minimap = (x, y)
-            self.img_minimap = self.img_frame[y:y+h, x:x+w]
+            self.img_minimap_screen = self.img_frame[y:y+h, x:x+w]
+            self.img_minimap_source = self.img_minimap_screen
+            native_frame = getattr(self, "img_capture_content", None)
+            if native_frame is not None:
+                native_result = get_minimap_loc_size(native_frame)
+                if native_result is not None:
+                    nx, ny, nw, nh = native_result
+                    nx += 1
+                    ny += 1
+                    nw -= 2
+                    nh -= 2
+                    if nw > 0 and nh > 0:
+                        self.img_minimap_source = native_frame[
+                            ny:ny+nh, nx:nx+nw
+                        ]
+            original_minimap_size = self.img_minimap_source.shape[:2]
+            self.img_minimap = resize_minimap_to_reference(
+                self.img_minimap_source,
+                self.cfg,
+            )
+            calibrated_size = self.img_minimap.shape[:2]
+            calibration_key = (original_minimap_size, calibrated_size)
+            if original_minimap_size != calibrated_size and calibration_key != getattr(
+                self, "_last_minimap_calibration", None
+            ):
+                logger.info(
+                    "[minimap] Calibrated capture from "
+                    f"{original_minimap_size[::-1]} to {calibrated_size[::-1]}"
+                )
+                self._last_minimap_calibration = calibration_key
             self.t_last_minimap_update = time.time()
 
         self.profiler.mark("Get Minimap Location and Size")
@@ -1780,6 +2133,7 @@ class MapleStoryAutoBot:
                 self.loc_party_red_bar = loc_party_red_bar
 
         # Update player location
+        self.screen_player_location_valid = loc_player is not None
         if loc_player is not None:
             # Check if character is on ladder
             dx = abs(loc_player[0] - self.loc_player[0])
@@ -1800,11 +2154,22 @@ class MapleStoryAutoBot:
                     color=(0, 0, 255), thickness=-1)
 
         # Get player location on minimap
-        loc_player_minimap = get_player_location_on_minimap(
-                                self.img_minimap,
-                                minimap_player_color=self.cfg["minimap"]["player_color"])
-        if loc_player_minimap:
-            self.loc_player_minimap = loc_player_minimap
+        minimap_cfg = self.cfg["minimap"]
+        loc_player_minimap_source = get_player_location_on_minimap(
+            self.img_minimap_source,
+            minimap_player_color=minimap_cfg["player_color"],
+            color_tolerance=minimap_cfg.get("player_color_tolerance", 0),
+            min_component_area=minimap_cfg.get(
+                "player_min_component_area", 4
+            ),
+        )
+        if loc_player_minimap_source:
+            source_h, source_w = self.img_minimap_source.shape[:2]
+            map_h, map_w = self.img_minimap.shape[:2]
+            self.loc_player_minimap = (
+                int(round(loc_player_minimap_source[0] * map_w / source_w)),
+                int(round(loc_player_minimap_source[1] * map_h / source_h)),
+            )
 
         # Get other player location on minimap
         loc_other_players = get_all_other_player_locations_on_minimap(
@@ -1816,7 +2181,7 @@ class MapleStoryAutoBot:
         #     debug_minimap_colors(self.img_minimap, other_player_color)
 
         # Get player location on global map
-        if self.cfg["bot"]["mode"] in ["patrol", "aux"]:
+        if self.cfg["bot"]["mode"] in ["patrol", "aux", "debug"]:
             self.loc_player_global = self.loc_player_minimap
         else:
             self.loc_player_global = self.get_player_location_on_global_map()
@@ -1826,7 +2191,8 @@ class MapleStoryAutoBot:
         ######################
         ### Change Channel ###
         ######################
-        if self.cfg['channel_change']['enable'] and \
+        if not self.is_debug_mode() and \
+            self.cfg['channel_change']['enable'] and \
             self.is_need_change_channel(loc_other_players):
             self.kb.set_command("none none none")
             self.kb.release_all_key()
@@ -1836,7 +2202,8 @@ class MapleStoryAutoBot:
             self.red_dot_center_prev = None
             return 0
 
-        if self.is_time_to_change_channel():
+        if not self.is_debug_mode() and \
+            self.is_time_to_change_channel():
             self.kb.set_command("none none none")
             self.kb.release_all_key()
             self.kb.disable()
@@ -1934,7 +2301,8 @@ class MapleStoryAutoBot:
         try:
             # Computer B is already foreground in capture-card mode. Focusing
             # PotPlayer on A is unrelated to where the BLE keyboard types.
-            if not is_mac() and not self.remote_keyboard_target():
+            if not self.is_debug_mode() and \
+                not is_mac() and not self.remote_keyboard_target():
                 activate_game_window(self.capture.window_title)
                 time.sleep(0.3)
                 self.ensure_is_in_party()
@@ -1948,13 +2316,7 @@ class MapleStoryAutoBot:
 
                 # Only proceed if the frame is valid
                 if ret == 0:
-                    # Draw image on debug window
-                    if self.is_show_debug_window and self.is_ui:
-                        img_frame_debug_emit = self.img_frame_debug[:
-                            self.cfg["ui_coords"]["ui_y_start"], :].copy()
-                        img_route_debug_emit = self.img_route_debug.copy()
-                        self.image_debug_signal.emit(img_frame_debug_emit)
-                        self.route_map_viz_signal.emit(img_route_debug_emit)
+                    self._emit_debug_images()
 
                 self.is_frame_done = True
 

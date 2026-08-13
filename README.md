@@ -123,6 +123,35 @@ Game PC B --HDMI--> capture card / PotPlayer on computer A --> bot detection
 Computer A --Wi-Fi--> ESP32-S3 --Bluetooth HID--> game PC B
 ```
 
+PotPlayer is a client-drawn window: its title skin, playback controls, and
+letterbox/pillarbox pixels are included in Windows Graphics Capture. The
+`auto` capture profile detects a PotPlayer title, removes that chrome, takes
+the largest centered 16:9 HDMI region, normalizes it through the original
+1282x693 game raster, and only then produces the 1296x700 vision frame:
+
+```yaml
+game_window:
+  capture_profile: "auto"  # auto, direct, or potplayer
+  potplayer_chrome_top: 34
+  potplayer_chrome_bottom: 65
+  potplayer_video_aspect_ratio: [16, 9]
+  potplayer_resize_width: 2768
+  potplayer_resize_height: 1656
+```
+
+The PotPlayer chrome values depend on its skin and Windows DPI scale. The log
+prints the detected source size and exact video ROI whenever that geometry
+changes. Keep computer B's game image filling the HDMI output without desktop
+panels or overlays.
+
+The stored `fire_land_1/map.png` is 319x202 because the route recorder added
+about 30 pixels of black expansion padding around a 259x142 local minimap
+raster. The calibrated 2768x1656 PotPlayer outer size makes the live minimap
+closely match that local raster. The PotPlayer profile also restores the
+extracted minimap to exactly 259x142 before route matching to absorb capture
+card, skin, and DPI rounding. The rest of the frame stays on the original
+1282x693 vision raster so monster and UI templates keep their expected scale.
+
 Pair `Maple-ESP32-Keyboard` with game PC B before starting the bot, then set the
 board address in `config/config_default.yaml`:
 
@@ -143,6 +172,19 @@ The current firmware is keyboard-only, so remote mode does not run
 any mouse-dependent workflow: party-window handling, channel switching,
 automatic login/character selection, and local window activation are all
 disabled. Firmware and setup instructions are in `esp32/README.md`.
+
+For visual verification, select `debug` in the UI's **Bot Mode** list, select
+the current map, open **Game Window Viz**, and press F1. Debug mode loads that
+map's monster templates and draws full-camera detection boxes, but deliberately
+does not connect to the ESP32 or run health, buff, login, party, or channel
+workflows. Its stricter full-frame threshold can be adjusted with
+`debug.monster_diff_thres` (edge-correlation score: higher means stricter).
+Each green box shows the template name and confidence, so raise the value if
+background boxes are being accepted, or lower it if a visible monster is
+missed. Debug mode first keeps sparse local maxima (`local_peak_radius`) and at most `template_top_k`
+candidates per template, which prevents full-frame matching from drawing
+thousands of overlapping boxes. It performs that expensive scan every
+`scan_interval_frames` frames and redraws the cached result between scans.
 
 ### Email Test Credentials
 

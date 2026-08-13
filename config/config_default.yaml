@@ -5,7 +5,7 @@
 
 bot:
   # 🔁 Bot Settings
-  mode: "normal"        # Options: "normal" "aux" "patrol"
+  mode: "normal"        # Options: "normal" "aux" "patrol" "debug"
   attack: "directional" # Options: "aoe_skill" "directional"
   map: "" # Please refer to config/config_data.yaml
 
@@ -116,7 +116,7 @@ nametag:
   name: "example" # Load nametag/<name>.png as nametag template
   mode: "grayscale"  # 🧪 Comparison mode for matching the nametag, Options: "grayscale" "white_mask" "histogram_eq"
   offset: [-50, 30]  # 🎯 Pixel offset from the top-left corner of the matched nametag to the character center 
-  diff_thres: 0.2     # 📏 Matching threshold, [0.0 ~ 1.0] — lower = more tolerant, higher = stricter
+  diff_thres: 0.15    # 📏 Matching threshold [0.0 ~ 1.0]; lower is stricter (SQDIFF)
 
   global_diff_thres: 0.2  # 🧠 Global detection fallback
   # If the diff is higher than this threshold, do a full-frame search.
@@ -126,6 +126,17 @@ nametag:
   split_width: 30  # ✂️ pixels width of each vertical split
   # To avoid occlusion from ladders or background objects,
   # the nametag will be split vertically and matched in smaller parts.
+  cache_accept_thres: 0.12 # Cached scores above this are verified globally
+  max_stale_frames: 2      # Draw the last box briefly; stale points never control combat
+  jump_confirm_distance: 40 # Larger screen-space jumps must repeat before acceptance
+  jump_confirm_radius: 12   # Maximum difference between two pending jump candidates
+
+debug:
+  # Vision-only mode: load the selected map's monsters and never send input.
+  monster_diff_thres: 0.25 # Edge correlation: higher is stricter
+  template_top_k: 1        # Keep only the best local maximum from each template
+  local_peak_radius: 9     # Suppress dense neighboring hits before NMS
+  scan_interval_frames: 5  # Full-camera matching is expensive; reuse boxes between scans
 
 character:
   # 🧍 Character
@@ -288,7 +299,14 @@ minimap:
   # The minimap appears in the top-left corner of the game window.
   # It is used to estimate the player’s current location in the world.
   player_color: [136, 255, 255]   # 🟡 BGR value of the yellow player dot on the minimap
+  player_color_tolerance: 65      # Capture-card per-channel color tolerance
+  player_min_component_area: 3    # HDMI scaling can reduce the marker to 3 pixels
   other_player_color: [0, 0, 255] # 🔴 BGR value of the red other player dot on the minimap
+  # Route-map files were recorded from a specific minimap raster. PotPlayer
+  # may scale that UI with the HDMI desktop, so restore the recorded size
+  # before matching the current minimap against map.png. Values are [h, w].
+  reference_size_by_map:
+    fire_land_1: [142, 259]
   debug_window_upscale: 4         # 🔍 Zoom factor for the route debug image (for visualization only)
   offset: [0, 0]                  # 📐 Don't set this unless playing on global server
 
@@ -312,6 +330,19 @@ route_recoder:
   map_padding: 30           # 🖤 Padding (in pixels) added as margin around the edge of the map
 
 game_window:
+  capture_profile: "auto"      # Options: "auto" "direct" "potplayer"
+  # PotPlayer uses a client-drawn skin, so remove its chrome before
+  # normalizing the HDMI video to the original 1282x693 game raster.
+  potplayer_chrome_top: 34
+  potplayer_chrome_bottom: 65
+  potplayer_chrome_left: 0
+  potplayer_chrome_right: 0
+  potplayer_video_aspect_ratio: [16, 9]
+  # Calibrated against minimaps/fire_land_1/map.png with the current skin.
+  # This leaves a 2768x1557 (16:9) video viewport; its live minimap raster
+  # matches the route recording's effective 260x142 map content closely.
+  potplayer_resize_width: 2768
+  potplayer_resize_height: 1656
   # 🪟 Game Window / Target Program
   # Basic information about the target program window setup.
   # ⚠️ This project is NOT limited to "MapleStory Worlds". You can target any

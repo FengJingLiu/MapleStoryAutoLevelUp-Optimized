@@ -13,15 +13,58 @@ import numpy as np
 import cv2
 
 # local import
-from src.utils.global_var import WINDOW_WORKING_SIZE
 from src.utils.logger import logger
 from src.utils.common import (
     find_pattern_sqdiff, draw_rectangle, screenshot,
     get_minimap_loc_size, get_player_location_on_minimap,
+    resize_minimap_to_reference,
     to_opencv_hsv, load_yaml, override_cfg, is_mac, load_image,
 )
-from src.input.KeyBoardListener import KeyBoardListener
+from src.input.KeyBoardListener import KeyBoardListener, normalize_key_name
 from src.input.GameWindowCapturor import GameWindowCapturor
+from src.input.CaptureFramePreprocessor import preprocess_capture_frame
+
+
+def route_action_from_pressed_keys(key_pressing, key_cfg):
+    """Translate currently pressed configured keys into a route command."""
+    pressed = {
+        normalized
+        for key_name in tuple(key_pressing)
+        if (normalized := normalize_key_name(key_name))
+    }
+    jump_key = normalize_key_name(key_cfg.get("jump", ""))
+    teleport_key = normalize_key_name(key_cfg.get("teleport", ""))
+
+    if jump_key and jump_key in pressed:
+        if "left" in pressed:
+            return "left none jump", True
+        if "right" in pressed:
+            return "right none jump", True
+        if "down" in pressed:
+            return "none down jump", True
+        return "none none jump", True
+
+    if teleport_key and teleport_key in pressed:
+        if "left" in pressed:
+            return "left none teleport", True
+        if "right" in pressed:
+            return "right none teleport", True
+        if "down" in pressed:
+            return "none down teleport", True
+        if "up" in pressed:
+            return "none up teleport", True
+        return "", True
+
+    if "up" in pressed:
+        return "none up none", False
+    if "down" in pressed:
+        return "none down none", False
+    if "left" in pressed:
+        return "left none none", False
+    if "right" in pressed:
+        return "right none none", False
+    return "", False
+
 
 class RouteRecorder():
     '''
@@ -68,8 +111,20 @@ class RouteRecorder():
         x1 = min(self.img_route_debug.shape[1], x0 + crop_w)
         y1 = min(self.img_route_debug.shape[0], y0 + crop_h)
 
+        # A route canvas can grow while recording. A stale or invalid player
+        # coordinate must not be passed to cv2.resize as an empty crop.
+        if x1 <= x0 or y1 <= y0:
+            logger.warning(
+                "Skip route preview: player coordinate "
+                f"{self.loc_player_global} is outside route canvas "
+                f"{self.img_route_debug.shape[:2][::-1]}"
+            )
+            return
+
         # Crop region
         mini_map_crop = self.img_route_debug[y0:y1, x0:x1]
+        if mini_map_crop.size == 0:
+            return
         mini_map_crop = cv2.resize(mini_map_crop,
                                 (int(mini_map_crop.shape[1] * 3),
                                  int(mini_map_crop.shape[0] * 3)),
@@ -103,9 +158,6 @@ class RouteRecorder():
         '''
         get_player_location_on_global_map
         '''
-        self.loc_minimap_global, score, _ = find_pattern_sqdiff(
-                                        self.img_map,
-                                        self.img_minimap)
         loc_player_global = (
             self.loc_minimap_global[0] + self.loc_player_minimap[0],
             self.loc_minimap_global[1] + self.loc_player_minimap[1]
@@ -120,7 +172,7 @@ class RouteRecorder():
                       camera_bottom_right, (0, 255, 255), 1)
         cv2.putText(
             self.img_route_debug,
-            f"Minimap,score({round(score, 2)})",
+            f"Minimap,score({round(self.minimap_match_score, 2)})",
             (self.loc_minimap_global[0], self.loc_minimap_global[1]+15),
             cv2.FONT_HERSHEY_SIMPLEX, 0.4,
             (0, 255, 255), 1
@@ -160,19 +212,37 @@ class RouteRecorder():
             logger.warning("Failed to capture game frame.")
             return
 
-        # Cut the title bar and resize raw frame to (1296, 759)
-        frame_no_title = self.frame[self.cfg["game_window"]["title_bar_height"]:, :]
-
-        # Make sure the window ratio is as expected
-        if self.cfg["game_window"]["size"] != frame_no_title.shape[:2]:
-            text = f"Unexpeted window size: {frame_no_title.shape[:2]} "\
-                    f"(expect {self.cfg['game_window']['size']})\n"
-            text += "Please use windowed mode & smallest resolution."
-            logger.error(text)
+        try:
+            img_frame, geometry = preprocess_capture_frame(
+                self.frame,
+                self.cfg,
+                window_title=getattr(self.capture, "window_title", ""),
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            logger.error(f"[capture] {exc}")
             return
-
-        return cv2.resize(frame_no_title, WINDOW_WORKING_SIZE,
-                   interpolation=cv2.INTER_NEAREST)
+        if geometry["profile"] == "potplayer":
+            x0, y0, x1, y1 = geometry["video_roi"]
+            self.img_capture_content = self.frame[y0:y1, x0:x1]
+        else:
+            self.img_capture_content = None
+        geometry_key = (
+            geometry["profile"],
+            geometry["source_size"],
+            geometry["video_roi"],
+            geometry["content_size"],
+            geometry["working_size"],
+        )
+        if geometry_key != getattr(self, "_last_capture_geometry", None):
+            logger.info(
+                "[capture] "
+                f"profile={geometry['profile']} source={geometry['source_size']} "
+                f"video_roi={geometry['video_roi']} "
+                f"content={geometry['content_size']} "
+                f"working={geometry['working_size']}"
+            )
+            self._last_capture_geometry = geometry_key
+        return img_frame
 
     def __init__(self, args):
         '''
@@ -190,6 +260,7 @@ class RouteRecorder():
         self.loc_minimap_global = (0, 0) # minimap location on global map
         self.loc_player_global = (0, 0) # player location on global map
         self.loc_player_global_last = None # playeer location on global map last frame
+        self.minimap_match_score = 0.0
         # Images
         self.frame = None # raw image
         self.img_frame = None # game window frame
@@ -209,6 +280,15 @@ class RouteRecorder():
             cfg = override_cfg(cfg, load_yaml("config/config_macOS.yaml"))
         # Override with user customized config
         self.cfg = override_cfg(cfg, load_yaml(f"config/config_{args.cfg}.yaml"))
+        # Reference-size calibration is keyed by the logical map name. For a
+        # new recording this is --new_map; when extending an existing image,
+        # infer it from the parent directory if possible.
+        calibration_map = args.new_map
+        if args.map:
+            parent_name = os.path.basename(os.path.dirname(args.map))
+            if parent_name:
+                calibration_map = parent_name
+        self.cfg["bot"]["map"] = calibration_map
 
         # Parse color_code
         self.color_code = {
@@ -245,6 +325,19 @@ class RouteRecorder():
         # Start game window capturing thread
         logger.info("Waiting for game window to activate, please click on game window")
         self.capture = GameWindowCapturor(self.cfg)
+        self.wait_for_initial_capture_frame()
+
+    def wait_for_initial_capture_frame(self, timeout=2.0, poll_interval=0.05):
+        """Wait briefly for the asynchronous Windows capture callback."""
+        deadline = time.monotonic() + max(0.0, float(timeout))
+        while time.monotonic() < deadline:
+            if self.capture.get_frame() is not None:
+                return True
+            time.sleep(max(0.0, float(poll_interval)))
+        logger.warning(
+            "No game frame arrived during capture warm-up; retrying in main loop"
+        )
+        return False
 
     def ensure_img_map_capacity(self, x, y, h, w):
         '''
@@ -265,7 +358,7 @@ class RouteRecorder():
         expand_right = max(0, expand_right)
         # If no expansion needed, return
         if expand_top == 0 and expand_bottom == 0 and expand_left == 0 and expand_right == 0:
-            return
+            return (0, 0)
 
         # Create new canvas and paste old image
         new_h = map_h + expand_top + expand_bottom
@@ -275,11 +368,28 @@ class RouteRecorder():
         new_map[expand_top:expand_top + map_h, expand_left:expand_left + map_w] = self.img_map
         self.img_map = new_map
 
+        # The route image uses the same global coordinate system as img_map.
+        # Keep both canvases aligned whenever newly explored areas add padding.
+        if self.img_route is not None:
+            route_h, route_w = self.img_route.shape[:2]
+            new_route = np.zeros((new_h, new_w, 3), dtype=self.img_route.dtype)
+            new_route[
+                expand_top:expand_top + route_h,
+                expand_left:expand_left + route_w,
+            ] = self.img_route
+            self.img_route = new_route
+
         # Also update all global coordinates that depend on the map (optional)
         self.loc_minimap_global = (
             self.loc_minimap_global[0] + expand_left,
             self.loc_minimap_global[1] + expand_top
         )
+        if self.loc_player_global_last is not None:
+            self.loc_player_global_last = (
+                self.loc_player_global_last[0] + expand_left,
+                self.loc_player_global_last[1] + expand_top,
+            )
+        return (expand_left, expand_top)
 
     def remove_color_code_pixels(self, img):
         """
@@ -312,27 +422,72 @@ class RouteRecorder():
 
         # Get minimap from game window
         if self.is_first_frame:
-            x, y, w, h = get_minimap_loc_size(self.img_frame)
+            minimap_result = get_minimap_loc_size(self.img_frame)
+            if minimap_result is None:
+                logger.warning("Minimap not found; waiting for the next frame")
+                return -1
+            x, y, w, h = minimap_result
             # Discard 1 pixel boundary of the minimap
             x += 1
             y += 1
             w -= 2
             h -= 2
             self.loc_minimap = (x, y)
-            self.img_minimap = self.img_frame[y:y+h, x:x+w]
+            self.minimap_screen_size = (h, w)
+            self.img_minimap_screen = self.img_frame[y:y+h, x:x+w]
         else:
             x, y = self.loc_minimap
-            h, w = self.img_minimap.shape[:2]
-            self.img_minimap = self.img_frame[y:y+h, x:x+w]
+            h, w = self.minimap_screen_size
+            self.img_minimap_screen = self.img_frame[y:y+h, x:x+w]
+
+        self.img_minimap_source = self.img_minimap_screen
+        native_frame = getattr(self, "img_capture_content", None)
+        if native_frame is not None:
+            native_result = get_minimap_loc_size(native_frame)
+            if native_result is not None:
+                nx, ny, nw, nh = native_result
+                nx += 1
+                ny += 1
+                nw -= 2
+                nh -= 2
+                if nw > 0 and nh > 0:
+                    self.img_minimap_source = native_frame[ny:ny+nh, nx:nx+nw]
+        self.img_minimap = resize_minimap_to_reference(
+            self.img_minimap_source,
+            self.cfg,
+        )
 
         # Replace black pixels (0, 0, 0) with (1, 1, 1)
         black_mask = np.all(self.img_minimap == [0, 0, 0], axis=-1)
         self.img_minimap[black_mask] = [1, 1, 1]
 
         # Get player location on minimap
-        loc_player_minimap = get_player_location_on_minimap(self.img_minimap)
-        if loc_player_minimap:
-            self.loc_player_minimap = loc_player_minimap
+        minimap_cfg = self.cfg["minimap"]
+        loc_player_minimap_source = get_player_location_on_minimap(
+            self.img_minimap_source,
+            minimap_player_color=minimap_cfg["player_color"],
+            color_tolerance=minimap_cfg.get("player_color_tolerance", 0),
+            min_component_area=minimap_cfg.get(
+                "player_min_component_area", 4
+            ),
+        )
+        loc_player_minimap = None
+        if loc_player_minimap_source:
+            source_h, source_w = self.img_minimap_source.shape[:2]
+            map_h, map_w = self.img_minimap.shape[:2]
+            loc_player_minimap = (
+                int(round(loc_player_minimap_source[0] * map_w / source_w)),
+                int(round(loc_player_minimap_source[1] * map_h / source_h)),
+            )
+        if loc_player_minimap is None:
+            now = time.monotonic()
+            if now - getattr(self, "_last_player_warning_time", 0.0) >= 1.0:
+                logger.warning(
+                    "Player dot not found on minimap; skipping this frame"
+                )
+                self._last_player_warning_time = now
+            return -1
+        self.loc_player_minimap = loc_player_minimap
 
         # Update map
         if self.is_first_frame:
@@ -346,6 +501,21 @@ class RouteRecorder():
                     borderType=cv2.BORDER_CONSTANT,
                     value=(0, 0, 0)  # Black padding
                 )
+                self.loc_minimap_global = (pad, pad)
+                self.minimap_match_score = 0.0
+            else:
+                mask = np.any(
+                    self.img_minimap != [0, 0, 0], axis=2
+                ).astype(np.uint8) * 255
+                self.loc_minimap_global, self.minimap_match_score, _ = \
+                    find_pattern_sqdiff(
+                        self.img_map,
+                        self.img_minimap,
+                        mask=mask,
+                    )
+                x, y = self.loc_minimap_global
+                h, w = self.img_minimap.shape[:2]
+                self.ensure_img_map_capacity(x, y, h, w)
 
             # Replace player "yellow" dot to black on map
             self.replace_color_on_map(
@@ -366,15 +536,18 @@ class RouteRecorder():
             mask = mask * 255
 
             # Perform template matching to find where the current minimap fits in the global map
-            self.loc_minimap_global, score, _ = find_pattern_sqdiff(
+            self.loc_minimap_global, self.minimap_match_score, _ = \
+                find_pattern_sqdiff(
                 self.img_map,
                 self.img_minimap,
+                last_result=self.loc_minimap_global,
                 mask=mask
             )
             x, y = self.loc_minimap_global
             h, w = self.img_minimap.shape[:2]
             # Ensure img_map is big enough to fit the newly explored region
             self.ensure_img_map_capacity(x, y, h, w)
+            x, y = self.loc_minimap_global
 
             # Don't copy pixel near player
             player_yellow_dot_radius = 5
@@ -390,6 +563,12 @@ class RouteRecorder():
             # Update map
             if self.args.map == '':
                 map_slice = self.img_map[y:y+h, x:x+w]
+                if map_slice.shape[:2] != self.img_minimap.shape[:2]:
+                    logger.warning(
+                        "Skip map update: minimap lies outside expanded map "
+                        f"at {(x, y, w, h)}"
+                    )
+                    return -1
                 black_mask = np.all(map_slice == [0, 0, 0], axis=2)
                 map_slice[black_mask] = self.img_minimap[black_mask]
 
@@ -404,41 +583,10 @@ class RouteRecorder():
         self.loc_player_global = self.get_player_location_on_global_map()
 
         # Determine which color code to use based on user input
-        action = ""
-        is_draw_blob = False
-        key_press = self.kb.key_pressing
-        if "space" in key_press:
-            if "left" in key_press:
-                action = "left none jump"
-            elif "right" in key_press:
-                action = "right none jump"
-            elif "down" in key_press:
-                action = "none down jump"
-            else:
-                action = "none none jump"
-            is_draw_blob = True
-        elif "e" in key_press: # Teleport skill
-            if "left" in key_press:
-                action = "left none teleport"
-            elif "right" in key_press:
-                action = "right none teleport"
-            elif "down" in key_press:
-                action = "none down teleport"
-            elif "up" in key_press:
-                action = "none up teleport"
-            else:
-                action = ""
-            is_draw_blob = True
-        elif "up" in key_press:
-            action = "none up none"
-        elif "down" in key_press:
-            action = "none down none"
-        elif "left" in key_press:
-            action = "left none none"
-        elif "right" in key_press:
-            action = "right none none"
-        else:
-            action = ""
+        action, is_draw_blob = route_action_from_pressed_keys(
+            self.kb.key_pressing,
+            self.cfg["key"],
+        )
 
         # Check if need to change route
         if self.kb.is_pressed_func_key[2]: # 'F3' is pressed

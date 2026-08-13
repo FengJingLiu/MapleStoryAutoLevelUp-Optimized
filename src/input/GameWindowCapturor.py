@@ -13,6 +13,10 @@ import cv2
 # local import
 from src.utils.logger import logger
 from src.utils.common import get_game_window_title_by_token, load_image, resize_window
+from src.input.CaptureFramePreprocessor import (
+    get_capture_resize_size,
+    resolve_capture_profile,
+)
 
 class GameWindowCapturor:
     '''
@@ -54,10 +58,19 @@ class GameWindowCapturor:
         # Only force-resize when enabled. Non-MapleStory programs often should
         # not be resized, so this is configurable via game_window.auto_resize.
         if game_window_cfg.get("auto_resize", True):
-            resize_window(
+            resize_width, resize_height = get_capture_resize_size(
+                game_window_cfg, self.window_title
+            )
+            actual_size = resize_window(
                 self.window_title,
-                width=game_window_cfg.get("resize_width", 1296),
-                height=game_window_cfg.get("resize_height", 759),
+                width=resize_width,
+                height=resize_height,
+            )
+            logger.info(
+                "[GameWindowCapturor] "
+                f"Resize profile={resolve_capture_profile(game_window_cfg, self.window_title)} "
+                f"requested_outer_size={(resize_width, resize_height)} "
+                f"actual_outer_size={actual_size}"
             )
 
         # Create capture handler
