@@ -1,5 +1,5 @@
 #include "ble_keyboard.h"
-#include "wifi_control.h"
+#include "serial_control.h"
 
 #include "esp_err.h"
 #include "esp_log.h"
@@ -16,7 +16,7 @@ void app_main(void)
     }
     ESP_ERROR_CHECK(err);
 
-    ESP_LOGI(TAG, "starting ESP32-S3 Wi-Fi + BLE HID demo");
+    ESP_LOGI(TAG, "starting ESP32-S3 USB serial + BLE HID bridge");
     ESP_ERROR_CHECK(ble_keyboard_init());
-    ESP_ERROR_CHECK(wifi_control_start());
+    ESP_ERROR_CHECK(serial_control_start());
 }

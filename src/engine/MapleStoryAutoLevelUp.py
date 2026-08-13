@@ -489,7 +489,7 @@ class MapleStoryAutoBot:
 
         try:
             # Validate and start the capture source on computer A before opening
-            # the ESP32's only TCP input session.
+            # the ESP32's USB serial input session.
             if self.args.test_image == '':
                 self.capture = GameWindowCapturor(self.cfg)
             else:
@@ -546,7 +546,7 @@ class MapleStoryAutoBot:
             self.thread_auto_bot.start()
         except BaseException:
             # A failed start must not leave the capture thread or ESP32's
-            # single-client TCP connection alive and break the next retry.
+            # serial connection alive and break the next retry.
             self.is_terminated = True
             self._stop_components()
             self.thread_auto_bot = None

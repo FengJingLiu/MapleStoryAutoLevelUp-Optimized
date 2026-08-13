@@ -132,6 +132,19 @@ uv pip install --python .venv\Scripts\python.exe -r requirements.txt
 .venv\Scripts\python.exe -c "import torch; print(torch.cuda.is_available(), torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'CPU')"
 ```
 
+鍵盤指令由電腦 A 經 USB 串口傳給 ESP32-S3，再由 ESP32-S3 透過 BLE HID
+送到遊戲電腦 B。預設會自動尋找 ESP32-S3 USB Serial/JTAG 裝置；也可固定端口：
+
+```yaml
+esp32_hid:
+  remote_target: True
+  serial_port: "auto"  # 或 "COM6"
+  baudrate: 115200
+```
+
+環境變數 `ESP32_HID_SERIAL_PORT` 可覆蓋設定檔。固件編譯與測試方式請參閱
+`esp32/README.md`。
+
 ### 建議使用 UI 執行
 執行以下指令
 ```bash

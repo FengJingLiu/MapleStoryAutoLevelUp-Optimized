@@ -1,12 +1,14 @@
-"""Thread-safe client for the ESP32 Wi-Fi to BLE HID keyboard bridge."""
+"""Thread-safe USB serial client for the ESP32 to BLE HID keyboard bridge."""
 
 from __future__ import annotations
 
 import os
-import socket
 import threading
 import time
 from collections.abc import Callable, Iterable
+
+import serial
+from serial.tools import list_ports
 
 
 class Esp32HidTapUncertainError(ConnectionError):
@@ -145,24 +147,70 @@ def usage_token(value: str | int) -> str:
     return f"0x{usage:02X}"
 
 
+ESPRESSIF_USB_SERIAL_JTAG_VID = 0x303A
+ESPRESSIF_USB_SERIAL_JTAG_PID = 0x1001
+
+
+def resolve_serial_port(
+    configured_port: str | None,
+    port_lister: Callable[[], Iterable[object]] | None = None,
+) -> str:
+    """Resolve ``auto`` to the single attached ESP32-S3 USB Serial/JTAG port."""
+    candidate = str(configured_port or "auto").strip()
+    if candidate and candidate.lower() != "auto":
+        return candidate
+
+    devices = list((port_lister or list_ports.comports)())
+    matches = [
+        device
+        for device in devices
+        if getattr(device, "vid", None) == ESPRESSIF_USB_SERIAL_JTAG_VID
+        and getattr(device, "pid", None) == ESPRESSIF_USB_SERIAL_JTAG_PID
+    ]
+    if not matches:
+        raise ConnectionError(
+            "ESP32-S3 USB Serial/JTAG port was not found; connect the board "
+            "or set esp32_hid.serial_port explicitly"
+        )
+    if len(matches) > 1:
+        ports = ", ".join(str(getattr(item, "device", item)) for item in matches)
+        raise ConnectionError(
+            f"multiple ESP32-S3 serial ports found ({ports}); set "
+            "esp32_hid.serial_port explicitly"
+        )
+    return str(getattr(matches[0], "device", matches[0]))
+
+
+def _open_serial_without_reset(**kwargs):
+    """Open pyserial without toggling ESP32 boot/reset control lines."""
+    transport = serial.Serial()
+    for name, value in kwargs.items():
+        setattr(transport, name, value)
+    transport.dtr = False
+    transport.rts = False
+    transport.open()
+    return transport
+
+
 class Esp32HidClient:
-    """One persistent, reconnecting connection to the ESP32 HID bridge."""
+    """One persistent, reconnecting USB serial connection to the HID bridge."""
 
     def __init__(
         self,
-        host: str,
-        port: int = 3333,
+        serial_port: str = "auto",
+        baudrate: int = 115200,
         connect_timeout: float = 1.0,
         request_timeout: float = 2.0,
         heartbeat_interval: float = 1.0,
         reconnect_interval: float = 0.5,
         state_refresh_interval: float = 1.0,
-        socket_factory: Callable[..., socket.socket] | None = None,
+        serial_factory: Callable[..., object] | None = None,
+        port_lister: Callable[[], Iterable[object]] | None = None,
     ) -> None:
-        if not host:
-            raise ValueError("ESP32 HID host is required")
-        if not 1 <= int(port) <= 65535:
-            raise ValueError("ESP32 HID port must be in the range 1..65535")
+        if not str(serial_port or "").strip():
+            raise ValueError("ESP32 HID serial port is required")
+        if int(baudrate) <= 0:
+            raise ValueError("ESP32 HID serial baudrate must be positive")
         if min(connect_timeout, request_timeout) <= 0:
             raise ValueError("ESP32 HID timeouts must be positive")
         if heartbeat_interval < 0 or reconnect_interval < 0:
@@ -170,16 +218,17 @@ class Esp32HidClient:
         if state_refresh_interval <= 0:
             raise ValueError("ESP32 HID state refresh interval must be positive")
 
-        self.host = host
-        self.port = int(port)
+        self.configured_serial_port = str(serial_port).strip()
+        self.serial_port = ""
+        self.baudrate = int(baudrate)
         self.connect_timeout = float(connect_timeout)
         self.request_timeout = float(request_timeout)
         self.heartbeat_interval = float(heartbeat_interval)
         self.reconnect_interval = float(reconnect_interval)
         self.state_refresh_interval = float(state_refresh_interval)
-        self._socket_factory = socket_factory or socket.create_connection
-        self._socket: socket.socket | None = None
-        self._receive_buffer = bytearray()
+        self._serial_factory = serial_factory or _open_serial_without_reset
+        self._port_lister = port_lister
+        self._serial: object | None = None
         self._pressed: set[int] = set()
         self._state_dirty = False
         self._io_lock = threading.RLock()
@@ -205,11 +254,17 @@ class Esp32HidClient:
     @classmethod
     def from_config(cls, cfg: dict) -> "Esp32HidClient":
         section = cfg.get("esp32_hid", {})
-        host = os.environ.get("ESP32_HID_HOST", section.get("host", ""))
-        port = int(os.environ.get("ESP32_HID_PORT", section.get("port", 3333)))
+        serial_port = os.environ.get(
+            "ESP32_HID_SERIAL_PORT", section.get("serial_port", "auto")
+        )
+        baudrate = int(
+            os.environ.get(
+                "ESP32_HID_SERIAL_BAUDRATE", section.get("baudrate", 115200)
+            )
+        )
         return cls(
-            host=host,
-            port=port,
+            serial_port=serial_port,
+            baudrate=baudrate,
             connect_timeout=float(section.get("connect_timeout", 1.0)),
             request_timeout=float(section.get("request_timeout", 2.0)),
             heartbeat_interval=float(section.get("heartbeat_interval", 1.0)),
@@ -221,51 +276,65 @@ class Esp32HidClient:
     def closed(self) -> bool:
         return self._closed
 
-    def _make_socket(self) -> socket.socket:
-        sock = self._socket_factory(
-            (self.host, self.port), timeout=self.connect_timeout
+    @property
+    def endpoint(self) -> str:
+        port = self.serial_port or self.configured_serial_port
+        return f"{port}@{self.baudrate}"
+
+    def _make_serial(self):
+        selected_port = resolve_serial_port(
+            self.configured_serial_port, self._port_lister
         )
-        sock.settimeout(self.request_timeout)
-        try:
-            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-        except (AttributeError, OSError):
-            pass
-        return sock
+        transport = self._serial_factory(
+            port=selected_port,
+            baudrate=self.baudrate,
+            timeout=self.request_timeout,
+            write_timeout=self.request_timeout,
+        )
+        self.serial_port = selected_port
+        if hasattr(transport, "reset_input_buffer"):
+            transport.reset_input_buffer()
+        if hasattr(transport, "reset_output_buffer"):
+            transport.reset_output_buffer()
+        return transport
 
     @staticmethod
-    def _close_socket(sock: socket.socket | None) -> None:
-        if sock is None:
+    def _transport_is_open(transport) -> bool:
+        return transport is not None and bool(getattr(transport, "is_open", True))
+
+    @staticmethod
+    def _close_serial(transport) -> None:
+        if transport is None:
             return
-        try:
-            sock.shutdown(socket.SHUT_RDWR)
-        except OSError:
-            pass
-        sock.close()
+        transport.close()
 
     def _disconnect_locked(self) -> None:
-        sock, self._socket = self._socket, None
-        self._receive_buffer.clear()
+        transport, self._serial = self._serial, None
         self._pressed.clear()
         self._state_dirty = True
         self._last_status = 0.0
         self._last_state_write = 0.0
-        self._close_socket(sock)
+        self._close_serial(transport)
 
-    def _receive_line_from_locked(self, sock: socket.socket) -> str:
-        while b"\n" not in self._receive_buffer:
-            data = sock.recv(512)
-            if not data:
-                raise ConnectionError("ESP32 closed the TCP connection")
-            self._receive_buffer.extend(data)
-            if len(self._receive_buffer) > 4096:
-                raise RuntimeError("ESP32 response is too long")
-        raw, _, remainder = self._receive_buffer.partition(b"\n")
-        self._receive_buffer = bytearray(remainder)
-        return raw.rstrip(b"\r").decode("ascii", errors="replace")
+    @staticmethod
+    def _receive_line_from_locked(transport) -> str:
+        data = transport.read_until(expected=b"\n", size=4097)
+        if not data:
+            raise TimeoutError("timed out waiting for ESP32 serial response")
+        if len(data) > 4096:
+            raise RuntimeError("ESP32 response is too long")
+        if b"\n" not in data:
+            raise TimeoutError("timed out waiting for a complete ESP32 serial response")
+        return data.rstrip(b"\r\n").decode("ascii", errors="replace")
 
-    def _raw_request_on_locked(self, sock: socket.socket, command: str) -> str:
-        sock.sendall(command.encode("ascii") + b"\n")
-        response = self._receive_line_from_locked(sock)
+    def _raw_request_on_locked(self, transport, command: str) -> str:
+        payload = command.encode("ascii") + b"\n"
+        written = transport.write(payload)
+        if written != len(payload):
+            raise ConnectionError("ESP32 serial write was incomplete")
+        if hasattr(transport, "flush"):
+            transport.flush()
+        response = self._receive_line_from_locked(transport)
         self._last_io = time.monotonic()
         if command == "STATUS":
             self._last_status = self._last_io
@@ -283,30 +352,30 @@ class Esp32HidClient:
     def _connect_locked(self) -> None:
         if self._closed:
             raise RuntimeError("ESP32 HID client is closed")
-        if self._socket is not None:
+        if self._transport_is_open(self._serial):
             return
+        if self._serial is not None:
+            self._disconnect_locked()
 
         elapsed = time.monotonic() - self._last_connect_attempt
         if self._last_connect_attempt and elapsed < self.reconnect_interval:
             time.sleep(self.reconnect_interval - elapsed)
         self._last_connect_attempt = time.monotonic()
 
-        sock = self._make_socket()
-        self._receive_buffer.clear()
+        transport = self._make_serial()
         try:
-            status = self._raw_request_on_locked(sock, "STATUS")
-            if "WIFI=1" not in status or "BLE_READY=1" not in status:
+            status = self._raw_request_on_locked(transport, "STATUS")
+            if "SERIAL=1" not in status or "BLE_READY=1" not in status:
                 raise ConnectionError(f"ESP32 BLE HID is not ready: {status}")
-            self._raw_request_on_locked(sock, "RELEASE_ALL")
+            self._raw_request_on_locked(transport, "RELEASE_ALL")
         except BaseException:
-            self._receive_buffer.clear()
-            self._close_socket(sock)
+            self._close_serial(transport)
             raise
 
         self._pressed.clear()
         self._state_dirty = False
         self._last_state_write = 0.0
-        self._socket = sock
+        self._serial = transport
 
     def _request_locked(self, command: str, retry_safe: bool) -> str:
         attempts = 2 if retry_safe else 1
@@ -315,9 +384,9 @@ class Esp32HidClient:
         for attempt in range(attempts):
             try:
                 self._connect_locked()
-                assert self._socket is not None
+                assert self._serial is not None
                 request_attempted = True
-                return self._raw_request_on_locked(self._socket, command)
+                return self._raw_request_on_locked(self._serial, command)
             except (OSError, TimeoutError, ConnectionError) as exc:
                 last_error = exc
                 self._disconnect_locked()
@@ -410,7 +479,7 @@ class Esp32HidClient:
         with self._io_lock:
             response = self._request_locked("STATUS", retry_safe=True)
             if "BLE_READY=1" not in response:
-                # BLE can drop while the Wi-Fi TCP session remains alive. The
+                # BLE can drop while the USB serial session remains open. The
                 # firmware releases every key on that edge, so invalidate the
                 # local dedupe cache and let the controller reassert movement
                 # after the keyboard reconnects.
@@ -450,9 +519,9 @@ class Esp32HidClient:
         with self._io_lock:
             if self._closed:
                 return
-            if self._socket is not None:
+            if self._transport_is_open(self._serial):
                 try:
-                    self._raw_request_on_locked(self._socket, "RELEASE_ALL")
+                    self._raw_request_on_locked(self._serial, "RELEASE_ALL")
                 except (OSError, RuntimeError, ConnectionError):
                     pass
             self._closed = True

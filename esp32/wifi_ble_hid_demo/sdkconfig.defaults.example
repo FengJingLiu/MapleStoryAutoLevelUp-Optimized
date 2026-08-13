@@ -13,7 +13,8 @@ CONFIG_BT_NIMBLE_SVC_HID_MAX_INSTANCES=1
 CONFIG_BT_NIMBLE_SVC_HID_MAX_RPTS=3
 CONFIG_FREERTOS_HZ=1000
 
-# Copy this file to sdkconfig.defaults and fill in the local 2.4 GHz network.
-# sdkconfig.defaults is gitignored because credentials are compiled into firmware.
-CONFIG_HID_WIFI_SSID=""
-CONFIG_HID_WIFI_PASSWORD=""
+# Keep application logs on UART0. USB Serial/JTAG is reserved for the command
+# protocol so responses never mix with ESP-IDF log lines.
+CONFIG_ESP_CONSOLE_UART_DEFAULT=y
+CONFIG_ESP_CONSOLE_SECONDARY_NONE=y
+# CONFIG_ESP_CONSOLE_SECONDARY_USB_SERIAL_JTAG is not set

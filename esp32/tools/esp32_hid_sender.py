@@ -1,16 +1,18 @@
 #!/usr/bin/env python3
-"""Send keyboard commands to the ESP32-S3 Wi-Fi + BLE HID demo."""
+"""Send keyboard commands to the ESP32-S3 USB serial + BLE HID bridge."""
 
 from __future__ import annotations
 
 import argparse
 import os
 import shlex
-import socket
 import sys
 import threading
 import time
 from typing import Iterable
+
+import serial
+from serial.tools import list_ports
 
 
 KEYS: dict[str, int] = {}
@@ -96,24 +98,38 @@ def usage_token(value: str) -> str:
 
 
 class HidClient:
-    """One request / one response TCP client with a background lease heartbeat."""
+    """One request / one response serial client with a lease heartbeat."""
 
     def __init__(
         self,
-        host: str,
-        port: int = 3333,
+        serial_port: str = "auto",
+        baudrate: int = 115200,
         timeout: float = 4.0,
         heartbeat: float = 1.0,
     ) -> None:
-        self._socket = socket.create_connection((host, port), timeout=timeout)
-        self._socket.settimeout(timeout)
+        self.serial_port = resolve_serial_port(serial_port)
+        self._serial = serial.Serial()
+        self._serial.port = self.serial_port
+        self._serial.baudrate = baudrate
+        self._serial.timeout = timeout
+        self._serial.write_timeout = timeout
+        self._serial.dtr = False
+        self._serial.rts = False
+        self._serial.open()
+        self._serial.reset_input_buffer()
+        self._serial.reset_output_buffer()
         self._io_lock = threading.Lock()
         self._stop = threading.Event()
         self._closed = False
-        self._receive_buffer = bytearray()
         self._heartbeat_error: BaseException | None = None
         self._heartbeat_interval = heartbeat
         self._heartbeat_thread: threading.Thread | None = None
+        status = self.request("STATUS")
+        if "SERIAL=1" not in status or "BLE_READY=1" not in status:
+            self.close()
+            raise ConnectionError(f"ESP32 BLE HID is not ready: {status}")
+        self.request("RELEASE_ALL")
+
         if heartbeat > 0:
             self._heartbeat_thread = threading.Thread(
                 target=self._heartbeat_loop,
@@ -123,20 +139,20 @@ class HidClient:
             self._heartbeat_thread.start()
 
     def _receive_line_locked(self) -> str:
-        while b"\n" not in self._receive_buffer:
-            data = self._socket.recv(512)
-            if not data:
-                raise ConnectionError("ESP32 closed the TCP connection")
-            self._receive_buffer.extend(data)
-            if len(self._receive_buffer) > 4096:
-                raise RuntimeError("response from ESP32 is too long")
-
-        raw, _, remainder = self._receive_buffer.partition(b"\n")
-        self._receive_buffer = bytearray(remainder)
-        return raw.rstrip(b"\r").decode("ascii", errors="replace")
+        data = self._serial.read_until(expected=b"\n", size=4097)
+        if not data:
+            raise TimeoutError("timed out waiting for ESP32 serial response")
+        if len(data) > 4096:
+            raise RuntimeError("response from ESP32 is too long")
+        if b"\n" not in data:
+            raise TimeoutError("timed out waiting for a complete ESP32 serial response")
+        return data.rstrip(b"\r\n").decode("ascii", errors="replace")
 
     def _raw_request_locked(self, command: str) -> str:
-        self._socket.sendall(command.encode("ascii") + b"\n")
+        payload = command.encode("ascii") + b"\n"
+        if self._serial.write(payload) != len(payload):
+            raise ConnectionError("ESP32 serial write was incomplete")
+        self._serial.flush()
         return self._receive_line_locked()
 
     def request(self, command: str) -> str:
@@ -184,11 +200,7 @@ class HidClient:
             pass
         finally:
             self._closed = True
-            try:
-                self._socket.shutdown(socket.SHUT_RDWR)
-            except OSError:
-                pass
-            self._socket.close()
+            self._serial.close()
 
     def __enter__(self) -> "HidClient":
         return self
@@ -265,22 +277,35 @@ def interactive(client: HidClient) -> None:
             print(f"error: {exc}", file=sys.stderr)
 
 
-def require_host(parser: argparse.ArgumentParser, host: str | None) -> str:
-    if not host:
-        parser.error("--host is required (or set ESP32_HID_HOST)")
-    return host
+def resolve_serial_port(configured_port: str | None) -> str:
+    candidate = str(configured_port or "auto").strip()
+    if candidate and candidate.lower() != "auto":
+        return candidate
+    matches = [
+        item
+        for item in list_ports.comports()
+        if item.vid == 0x303A and item.pid == 0x1001
+    ]
+    if len(matches) == 1:
+        return matches[0].device
+    if not matches:
+        raise ConnectionError("ESP32-S3 USB Serial/JTAG port was not found")
+    ports = ", ".join(item.device for item in matches)
+    raise ConnectionError(
+        f"multiple ESP32-S3 ports found ({ports}); pass --serial-port explicitly"
+    )
 
 
 def create_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Send keyboard commands over Wi-Fi to the ESP32-S3 BLE HID demo."
+        description="Send keyboard commands over USB serial to the ESP32-S3 BLE HID bridge."
     )
     parser.add_argument(
-        "--host",
-        default=os.environ.get("ESP32_HID_HOST"),
-        help="ESP32 IP address; can also be set with ESP32_HID_HOST",
+        "--serial-port",
+        default=os.environ.get("ESP32_HID_SERIAL_PORT", "auto"),
+        help="Serial port or auto; can also be set with ESP32_HID_SERIAL_PORT",
     )
-    parser.add_argument("--port", type=int, default=3333)
+    parser.add_argument("--baudrate", type=int, default=115200)
     parser.add_argument("--timeout", type=float, default=4.0)
     parser.add_argument(
         "--heartbeat",
@@ -316,16 +341,15 @@ def create_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def run_network_command(
+def run_serial_command(
     parser: argparse.ArgumentParser, args: argparse.Namespace
 ) -> None:
-    host = require_host(parser, args.host)
     if not 0 <= args.heartbeat:
         parser.error("--heartbeat must be zero or positive")
 
     with HidClient(
-        host=host,
-        port=args.port,
+        serial_port=args.serial_port,
+        baudrate=args.baudrate,
         timeout=args.timeout,
         heartbeat=args.heartbeat,
     ) as client:
@@ -374,7 +398,7 @@ def main(argv: Iterable[str] | None = None) -> int:
         return 0
 
     try:
-        run_network_command(parser, args)
+        run_serial_command(parser, args)
     except KeyboardInterrupt:
         print("\nInterrupted; RELEASE_ALL attempted.")
     except (OSError, RuntimeError, ValueError) as exc:

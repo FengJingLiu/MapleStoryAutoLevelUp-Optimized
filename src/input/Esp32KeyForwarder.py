@@ -16,7 +16,7 @@ class Esp32KeyForwarder:
 
     Keyboard hooks must return immediately.  Each press/release therefore
     queues a complete keyboard state for a worker thread instead of performing
-    TCP I/O inside pynput's callback.  Keeping every state transition also
+    serial I/O inside pynput's callback. Keeping every state transition also
     preserves quick taps (DOWN followed immediately by UP).
     """
 
@@ -42,8 +42,8 @@ class Esp32KeyForwarder:
         self._thread.start()
 
         logger.info(
-            "[RouteRecorder] ESP32 key forwarding ready at "
-            f"{self.client.host}:{self.client.port}; "
+            "[RouteRecorder] ESP32 key forwarding ready over USB serial at "
+            f"{self.client.endpoint}; "
             f"keys={sorted(self.allowed_keys)}"
         )
 
@@ -95,7 +95,7 @@ class Esp32KeyForwarder:
             self._send_state(state)
 
     def close(self) -> None:
-        """Stop forwarding, release all remote keys, and close the TCP client."""
+        """Stop forwarding, release all remote keys, and close the serial client."""
         if self._closed:
             return
         self._closed = True

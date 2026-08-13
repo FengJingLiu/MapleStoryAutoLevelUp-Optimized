@@ -1,113 +1,53 @@
-# ESP32-S3 Wi-Fi + BLE HID Demo
+# ESP32-S3 USB Serial + BLE HID Bridge
 
-这个目录是一条独立于游戏电脑输入设备的测试链路：
+This directory implements the remote keyboard path used by the bot:
 
 ```text
-控制端 Python 脚本 --TCP/Wi-Fi--> ESP32-S3 --BLE HID--> Windows 笔记本
+Computer A --USB Serial/JTAG--> ESP32-S3 --BLE HID--> game computer B
 ```
 
-当前 Demo 用于验证三件事：
+Wi-Fi is not started. ESP-IDF logs remain on UART0 while the native ESP32-S3
+USB Serial/JTAG port is dedicated to the line-oriented command protocol.
 
-1. ESP32-S3 能连接 2.4 GHz Wi-Fi。
-2. Windows 能把 ESP32-S3 配对为蓝牙键盘。
-3. 控制端能通过 TCP 发送按下、松开、点击和全部松开指令。
+## Build and flash
 
-## 目录
-
-- `wifi_ble_hid_demo/`：ESP-IDF v6.0.2 固件项目。
-- `tools/esp32_hid_sender.py`：Windows/Linux/macOS 均可运行的纯标准库测试客户端。
-
-## 1. 配置并烧录固件
-
-先安装 [ESP-IDF v6.0.2](https://github.com/espressif/esp-idf/releases/tag/v6.0.2)，进入 ESP-IDF PowerShell，然后执行：
+Use ESP-IDF v6.0.2:
 
 ```powershell
-cd D:\project\MapleStoryAutoLevelUp-Optimized\esp32\wifi_ble_hid_demo
+cd D:\project\MapleStoryAutoLevelUp-Optimized-serial\esp32\wifi_ble_hid_demo
 idf.py set-target esp32s3
-```
-
-本机实际使用的 `sdkconfig.defaults` 包含 Wi-Fi 凭据，因此已被 Git 忽略。新环境先从无密码模板复制：
-
-```powershell
-Copy-Item sdkconfig.defaults.example sdkconfig.defaults
-```
-
-然后在 `sdkconfig.defaults` 中填写：
-
-- `CONFIG_HID_WIFI_SSID`
-- `CONFIG_HID_WIFI_PASSWORD`
-
-不要提交实际的 `sdkconfig.defaults`；NimBLE、安全等级和 HID 所需的可复现配置保留在 `sdkconfig.defaults.example`。
-
-需要修改蓝牙设备名或 TCP 端口时，可以运行 `idf.py menuconfig`，进入 `Wi-Fi BLE HID Demo` 菜单。
-
-然后构建、烧录并打开串口监视器：
-
-```powershell
 idf.py build
-idf.py -p COM5 flash monitor
+idf.py -p COM6 flash
 ```
 
-把 `COM5` 换成开发板实际串口。串口日志出现 `got ip:` 后记下 IP 地址。
+Replace `COM6` if Windows assigns another port. Do not run `idf.py monitor` on
+the USB command port because the Python client needs exclusive access to it.
 
-## 2. 在 Windows 配对 BLE 键盘
+Pair `Maple-ESP32-Keyboard` with game computer B before sending commands. BLE
+bonding data remains in NVS when firmware is updated without erasing flash.
 
-打开“设置 -> 蓝牙和设备 -> 添加设备 -> 蓝牙”，选择：
+## Test commands
 
-```text
-Maple-ESP32-Keyboard
-```
-
-如果修改了 `Bluetooth HID device name`，选择修改后的名称。首次连接使用无需 PIN 的加密绑定；绑定信息保存在 NVS。
-
-## 3. 发送测试按键
-
-先测试 TCP 连接：
+Install project dependencies, including `pyserial`, then run:
 
 ```powershell
-py -3 ..\tools\esp32_hid_sender.py --host 192.168.1.123 ping
+py ..\tools\esp32_hid_sender.py --serial-port auto status
+py ..\tools\esp32_hid_sender.py --serial-port auto ping
+py ..\tools\esp32_hid_sender.py --serial-port auto tap A --ms 60
+py ..\tools\esp32_hid_sender.py --serial-port COM6 down LEFT --hold 2
 ```
 
-点击一次 A，按住左方向键 2 秒：
+Without a subcommand, the sender starts an interactive prompt.
 
-```powershell
-py -3 ..\tools\esp32_hid_sender.py --host 192.168.1.123 tap A --ms 80
-py -3 ..\tools\esp32_hid_sender.py --host 192.168.1.123 down LEFT --hold 2
-```
+## Protocol and safety
 
-也可以进入交互模式：
+Commands remain compatible with the previous transport:
 
-```powershell
-py -3 ..\tools\esp32_hid_sender.py --host 192.168.1.123
-```
+- `PING`, `STATUS`, `HELP`
+- `DOWN <usage>`, `UP <usage>`
+- `TAP <usage> <milliseconds>`
+- `STATE [usage ...]`, `RELEASE_ALL`
 
-交互模式示例：
-
-```text
-tap A 80
-down LEFT
-up LEFT
-status
-release
-quit
-```
-
-列出脚本已内置的键名：
-
-```powershell
-py -3 ..\tools\esp32_hid_sender.py keys
-```
-
-## 防卡键设计
-
-- TCP 客户端会每秒发送心跳。
-- ESP32 默认 3 秒未收到有效命令就释放全部按键并断开 TCP。
-- TCP 断开、Wi-Fi 掉线或 BLE 断开时，也会清空按键状态。
-- 客户端在 Ctrl+C 和正常退出时会尽力发送 `RELEASE_ALL`。
-
-## 注意
-
-- ESP32-S3 仅支持 2.4 GHz Wi-Fi，不能连接只开启 5 GHz 的 SSID。
-- 这是局域网功能验证 Demo，TCP 协议没有鉴权或加密；只应在可信网络使用。
-- BLE 与 Wi-Fi 共用 2.4 GHz 射频，ESP-IDF 会处理共存调度，但拥挤网络仍可能增加按键延迟。
-- 如果重新刷机后 Windows 拒绝配对，先在 Windows 删除旧设备，再重新添加。
+Every command and response is an ASCII line ending in `\n`. The firmware
+releases all held keys when no accepted command arrives for three seconds,
+when BLE disconnects, and when the client explicitly closes.

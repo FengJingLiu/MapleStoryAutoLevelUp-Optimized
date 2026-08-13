@@ -10,12 +10,13 @@ bot:
   map: "" # Please refer to config/config_data.yaml
 
 esp32_hid:
-  # All simulated keyboard output is sent over Wi-Fi to the ESP32-S3,
+  # All simulated keyboard output is sent over USB serial to the ESP32-S3,
   # which forwards it to the paired computer as a physical Bluetooth LE HID keyboard.
-  # ESP32_HID_HOST and ESP32_HID_PORT environment variables override these values.
+  # "auto" matches an ESP32-S3 USB Serial/JTAG device (VID 303A, PID 1001).
+  # ESP32_HID_SERIAL_PORT and ESP32_HID_SERIAL_BAUDRATE override these values.
   remote_target: True         # True when BLE is paired to a separate game PC.
-  host: "192.168.9.113"
-  port: 3333
+  serial_port: "auto"         # Or set a fixed Windows port, for example "COM6".
+  baudrate: 115200            # USB Serial/JTAG ignores line rate; kept for host compatibility.
   connect_timeout: 1.0
   request_timeout: 2.0       # Must be longer than the longest key tap.
   heartbeat_interval: 1.0    # Firmware releases all keys if its 3 s lease expires.

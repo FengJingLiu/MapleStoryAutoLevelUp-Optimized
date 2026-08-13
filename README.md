@@ -115,12 +115,12 @@ Note: this project DOES NOT support virtual environment(VM), it's only for recre
 
 ## ESP32-S3 Keyboard Input
 
-The `main` branch sends all automated keyboard output to the ESP32-S3 over a
-persistent TCP connection. The intended capture-card topology is:
+All automated keyboard output is sent to the ESP32-S3 over a persistent USB
+serial connection. The intended capture-card topology is:
 
 ```text
 Game PC B --HDMI--> capture card / PotPlayer on computer A --> bot detection
-Computer A --Wi-Fi--> ESP32-S3 --Bluetooth HID--> game PC B
+Computer A --USB serial--> ESP32-S3 --Bluetooth HID--> game PC B
 ```
 
 PotPlayer is a client-drawn window: its title skin, playback controls, and
@@ -152,18 +152,19 @@ extracted minimap to exactly 259x142 before route matching to absorb capture
 card, skin, and DPI rounding. The rest of the frame stays on the original
 1282x693 vision raster so monster and UI templates keep their expected scale.
 
-Pair `Maple-ESP32-Keyboard` with game PC B before starting the bot, then set the
-board address in `config/config_default.yaml`:
+Pair `Maple-ESP32-Keyboard` with game PC B before starting the bot. The default
+configuration automatically finds an ESP32-S3 USB Serial/JTAG port:
 
 ```yaml
 esp32_hid:
   remote_target: True
-  host: "192.168.9.113"
-  port: 3333
+  serial_port: "auto"  # Or a fixed port such as "COM6"
+  baudrate: 115200
 ```
 
-`ESP32_HID_HOST` and `ESP32_HID_PORT` can override the YAML values. Startup
-fails closed unless the board reports `BLE_READY=1`; `--disable_control` skips
+`ESP32_HID_SERIAL_PORT` and `ESP32_HID_SERIAL_BAUDRATE` can override the YAML
+values. Startup fails closed unless the board reports `BLE_READY=1`;
+`--disable_control` skips
 the ESP32 connection for detection-only debugging. With `remote_target: True`,
 computer A's foreground window is intentionally ignored because MapleStory is
 assumed to stay in front on B. Pausing, disconnecting, and exiting release every

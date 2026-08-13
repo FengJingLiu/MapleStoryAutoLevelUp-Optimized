@@ -31,7 +31,7 @@ _input_allowed = threading.Event()
 
 
 def _log_input_error(message):
-    """Limit repeated network error messages while the ESP32 reconnects."""
+    """Limit repeated transport error messages while the ESP32 reconnects."""
     global _last_input_error_time
     with _input_error_lock:
         now = time.monotonic()
@@ -216,8 +216,8 @@ class KeyBoardController():
             logger.info("[KeyBoardController] Keyboard output disabled")
         else:
             logger.info(
-                f"[KeyBoardController] ESP32 HID ready at "
-                f"{self.input_client.host}:{self.input_client.port}"
+                f"[KeyBoardController] ESP32 HID ready over USB serial at "
+                f"{self.input_client.endpoint}"
             )
 
     def toggle_enable(self):
@@ -344,7 +344,7 @@ class KeyBoardController():
         self.cmd_up_down_last = self.cmd_up_down
 
     def stop(self):
-        """Stop the controller, release the device, and free its TCP session."""
+        """Stop the controller, release the device, and free its serial session."""
         self.is_terminated = True
         _input_allowed.clear()
         if self.thread is not threading.current_thread():
@@ -417,7 +417,7 @@ class KeyBoardController():
 
                 # Movement is one atomic STATE report. The client suppresses an
                 # unchanged state, so the 30 FPS controller loop creates no
-                # repeated Wi-Fi traffic while a direction remains held.
+                # repeated serial traffic while a direction remains held.
                 self.update_movement_state()
 
                 ######################

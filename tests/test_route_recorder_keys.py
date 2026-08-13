@@ -62,8 +62,7 @@ class RouteRecorderKeyTests(unittest.TestCase):
 
     def test_esp32_forwarder_preserves_press_and_release_states(self):
         class FakeEsp32Client:
-            host = "192.168.9.113"
-            port = 3333
+            endpoint = "COM6@115200"
             connect_timeout = 0.01
             request_timeout = 0.01
 

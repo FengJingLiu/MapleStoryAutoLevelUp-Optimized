@@ -2,15 +2,12 @@ idf_component_register(
     SRCS
         "main.c"
         "ble_keyboard.c"
-        "wifi_control.c"
+        "serial_control.c"
     INCLUDE_DIRS "."
     REQUIRES
         bt
-        esp_event
+        esp_driver_usb_serial_jtag
         esp_hid
-        esp_netif
         esp_timer
-        esp_wifi
-        lwip
         nvs_flash
 )

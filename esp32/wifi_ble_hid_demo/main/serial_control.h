@@ -6,7 +6,7 @@
 extern "C" {
 #endif
 
-esp_err_t wifi_control_start(void);
+esp_err_t serial_control_start(void);
 
 #ifdef __cplusplus
 }

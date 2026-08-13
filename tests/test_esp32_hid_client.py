@@ -4,16 +4,17 @@ from collections import deque
 from src.input.Esp32HidClient import (
     Esp32HidClient,
     Esp32HidTapUncertainError,
+    resolve_serial_port,
     usage_from_text,
 )
 
 
 class FakeSocket:
-    """Small line-oriented ESP32 protocol double used by the client tests."""
+    """Small line-oriented serial protocol double used by the client tests."""
 
     def __init__(self, status_response=None, fail_on_send=None):
         self.status_response = status_response or (
-            "OK WIFI=1 BLE_CONNECTED=1 BLE_READY=1"
+            "OK SERIAL=1 BLE_CONNECTED=1 BLE_READY=1"
         )
         self.commands = []
         self.connected_to = None
@@ -25,6 +26,15 @@ class FakeSocket:
 
     def connect(self, address):
         self.connected_to = address
+
+    def reset_input_buffer(self):
+        self._responses.clear()
+
+    def reset_output_buffer(self):
+        pass
+
+    def flush(self):
+        pass
 
     def settimeout(self, timeout):
         self.timeouts.append(timeout)
@@ -39,6 +49,10 @@ class FakeSocket:
             self._fail_on_send.remove(command)
             raise ConnectionResetError(f"simulated disconnect during {command}")
         self._responses.append((self.response_for(command) + "\n").encode("ascii"))
+
+    def write(self, payload):
+        self.sendall(payload)
+        return len(payload)
 
     @staticmethod
     def assert_ascii_line(payload):
@@ -75,6 +89,15 @@ class FakeSocket:
         self._responses.appendleft(response[size:])
         return response[:size]
 
+    def read_until(self, expected=b"\n", size=None):
+        if not self._responses:
+            return b""
+        response = self._responses.popleft()
+        if size is not None and len(response) > size:
+            self._responses.appendleft(response[size:])
+            return response[:size]
+        return response
+
     def shutdown(self, how):
         self.shutdown_calls.append(how)
 
@@ -83,7 +106,7 @@ class FakeSocket:
 
 
 class FakeSocketFactory:
-    """Accept both create_connection-style and socket-constructor-style calls."""
+    """Return serial protocol doubles for successive reconnect attempts."""
 
     def __init__(self, fake_socket):
         self.sockets = (
@@ -98,8 +121,11 @@ class FakeSocketFactory:
         self.calls.append((args, kwargs))
         socket_index = min(len(self.calls) - 1, len(self.sockets) - 1)
         selected_socket = self.sockets[socket_index]
-        if args and isinstance(args[0], tuple):
-            selected_socket.connected_to = args[0]
+        selected_socket.connected_to = (
+            kwargs.get("port"),
+            kwargs.get("baudrate"),
+        )
+        selected_socket.settimeout(kwargs.get("timeout"))
         return selected_socket
 
 
@@ -109,7 +135,7 @@ class Esp32HidClientTests(unittest.TestCase):
         factory = FakeSocketFactory(fake_socket)
         client = Esp32HidClient(
             "esp32.test",
-            socket_factory=factory,
+            serial_factory=factory,
             heartbeat_interval=0,
             **kwargs,
         )
@@ -181,7 +207,7 @@ class Esp32HidClientTests(unittest.TestCase):
             with self.subTest(key=key):
                 self.assertEqual(usage_from_text(key), usage)
 
-    def test_connect_uses_default_port_then_checks_status_and_releases_keys(self):
+    def test_connect_opens_serial_then_checks_status_and_releases_keys(self):
         client, fake_socket, factory = self.make_client(
             connect_timeout=1.25,
             request_timeout=2.5,
@@ -189,7 +215,7 @@ class Esp32HidClientTests(unittest.TestCase):
         )
         self.addCleanup(client.close)
 
-        self.assertEqual(fake_socket.connected_to, ("esp32.test", 3333))
+        self.assertEqual(fake_socket.connected_to, ("esp32.test", 115200))
         self.assertTrue(factory.calls)
         self.assertEqual(fake_socket.commands, ["STATUS", "RELEASE_ALL"])
         self.assertIn(2.5, fake_socket.timeouts)
@@ -206,13 +232,13 @@ class Esp32HidClientTests(unittest.TestCase):
 
         self.assertEqual(fake_socket.commands, ["DOWN 0x50", "UP 0x50"])
 
-    def test_safe_down_reconnects_then_replays_after_a_socket_drop(self):
+    def test_safe_down_reconnects_then_replays_after_a_serial_drop(self):
         first_socket = FakeSocket(fail_on_send={"DOWN 0x50"})
         second_socket = FakeSocket()
         factory = FakeSocketFactory([first_socket, second_socket])
         client = Esp32HidClient(
             "esp32.test",
-            socket_factory=factory,
+            serial_factory=factory,
             heartbeat_interval=0,
             reconnect_interval=0,
         )
@@ -262,7 +288,7 @@ class Esp32HidClientTests(unittest.TestCase):
         factory = FakeSocketFactory([first_socket, second_socket])
         client = Esp32HidClient(
             "esp32.test",
-            socket_factory=factory,
+            serial_factory=factory,
             heartbeat_interval=0,
             reconnect_interval=0,
         )
@@ -320,18 +346,18 @@ class Esp32HidClientTests(unittest.TestCase):
         self.assertEqual(fake_socket.commands, ["STATUS"])
         self.assertIn("BLE_READY=1", str(status))
 
-    def test_ble_drop_invalidates_held_state_without_a_tcp_disconnect(self):
+    def test_ble_drop_invalidates_held_state_without_a_serial_disconnect(self):
         client, fake_socket, _ = self.make_client()
         self.addCleanup(client.close)
         fake_socket.commands.clear()
         client.key_down("left")
 
         fake_socket.status_response = (
-            "OK WIFI=1 BLE_CONNECTED=0 BLE_READY=0"
+            "OK SERIAL=1 BLE_CONNECTED=0 BLE_READY=0"
         )
         client.status()
         fake_socket.status_response = (
-            "OK WIFI=1 BLE_CONNECTED=1 BLE_READY=1"
+            "OK SERIAL=1 BLE_CONNECTED=1 BLE_READY=1"
         )
         client.set_state(["left"])
 
@@ -464,7 +490,7 @@ class Esp32HidClientTests(unittest.TestCase):
 
     def test_constructor_rejects_a_ble_link_that_is_not_ready(self):
         fake_socket = FakeSocket(
-            "OK WIFI=1 BLE_CONNECTED=1 BLE_READY=0"
+            "OK SERIAL=1 BLE_CONNECTED=1 BLE_READY=0"
         )
         factory = FakeSocketFactory(fake_socket)
 
@@ -473,13 +499,32 @@ class Esp32HidClientTests(unittest.TestCase):
         ):
             Esp32HidClient(
                 "esp32.test",
-                socket_factory=factory,
+                serial_factory=factory,
                 heartbeat_interval=0,
                 reconnect_interval=0.01,
             )
 
         self.assertEqual(fake_socket.commands[0], "STATUS")
         self.assertNotIn("DOWN", " ".join(fake_socket.commands))
+
+    def test_auto_serial_port_selects_esp32_s3_usb_serial_jtag(self):
+        class Port:
+            device = "COM6"
+            vid = 0x303A
+            pid = 0x1001
+
+        self.assertEqual(resolve_serial_port("auto", lambda: [Port()]), "COM6")
+
+    def test_auto_serial_port_rejects_ambiguous_boards(self):
+        class Port:
+            vid = 0x303A
+            pid = 0x1001
+
+            def __init__(self, device):
+                self.device = device
+
+        with self.assertRaisesRegex(ConnectionError, "multiple ESP32-S3"):
+            resolve_serial_port("auto", lambda: [Port("COM6"), Port("COM7")])
 
 
 if __name__ == "__main__":
