@@ -157,7 +157,7 @@ nametag:
     medal_search_tolerance: [28, 10]
 
 debug:
-  # Vision-only mode: load the selected map's monsters and never send input.
+  # Vision-only mode: run the configured detector and never send input.
   monster_diff_thres: 0.30 # Edge correlation: higher is stricter
   monster_diff_thres_by_monster:
     snail: 0.30
@@ -178,7 +178,19 @@ character:
 monster_detect:
   # 🐌 Monster Detection
   # Automatically detect monsters around your character.
+  # The 1024 YOLO backend replaces per-map sprite template matching.
+  backend: "yolo"             # Options: "yolo" or legacy "template"
+  model_path: "models/yolo/mob_1024_best.pt"
+  imgsz: 1024                 # Must match the new model's intended inference size
+  confidence: 0.50            # Minimum YOLO confidence
+  iou: 0.70                   # YOLO NMS IoU threshold
+  max_det: 100                # Maximum mob boxes per camera frame
+  device: "auto"             # CUDA device 0 when available, otherwise CPU
+  half: True                  # FP16 on CUDA; automatically disabled on CPU
+  warmup: True                # Initialize CUDA during config load, before control starts
+  class_name: "mob"          # Model metadata resolves this to class id 3
   # Detection mode determines the method used to find monsters.
+  # Settings below are retained only for backend: "template".
   # Modes ranked from most to least computational cost:
   #   - "color"         (most accurate but slowest)
   #   - "grayscale"     (slow)
@@ -198,7 +210,7 @@ monster_detect:
   merge_center_distance: 18   # Merge animation-template hits for the same nearby monster
   search_box_margin: 50        # ➕ Additional margin(in pixels) around the attack box for monster searching
   contour_blur: 5              # 🌫️ Gaussian blur kernel size used for contour smoothing (in "contour_only" mode).
-  with_enemy_hp_bar: True      # ❤️ Enable smarter detection using enemy HP bars.
+  with_enemy_hp_bar: False     # Legacy template fallback; unused by YOLO
   hp_bar_color: [71, 204, 64]  # 💚 Enemy HP bar color (in BGR format)
   max_mob_area_trigger: 1500   # 📏 How much does the mob need to overlap with attack range to be considered as a target
 

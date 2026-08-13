@@ -13,7 +13,7 @@ key:
   directional_attack: control
   jump: alt
 monster_detect:
-  mode: color
+  backend: yolo
 nametag:
   enable: true
   name: liu_muning

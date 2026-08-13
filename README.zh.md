@@ -117,6 +117,21 @@ game_window:
 pip install -r requirements.txt
 ```
 
+本分支預設以 `models/yolo/mob_1024_best.pt` 的 1024 YOLO 模型辨識怪物，
+只保留模型中的 `mob` 類別。Windows + NVIDIA 顯示卡建議先安裝 CUDA 版
+PyTorch，再安裝其餘依賴：
+
+```powershell
+uv pip install --python .venv\Scripts\python.exe torch==2.7.1+cu128 torchvision==0.22.1+cu128 --index-url https://download.pytorch.org/whl/cu128
+uv pip install --python .venv\Scripts\python.exe -r requirements.txt
+```
+
+可用以下指令確認是否已使用 GPU：
+
+```powershell
+.venv\Scripts\python.exe -c "import torch; print(torch.cuda.is_available(), torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'CPU')"
+```
+
 ### 建議使用 UI 執行
 執行以下指令
 ```bash

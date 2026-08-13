@@ -46,6 +46,7 @@ from src.engine.HealthMonitor import HealthMonitor
 from src.engine.Profiler import Profiler
 from src.engine.RuneSolver import RuneSolver
 from src.engine.FiniteStateMachine import FiniteStateMachine
+from src.vision.YoloMonsterDetector import YoloMonsterDetector
 from src.states.hunting import HuntingState
 from src.states.finding_rune import FindingRuneState
 from src.states.near_rune import NearRuneState
@@ -66,6 +67,7 @@ class MapleStoryAutoBot:
         self.cfg = None # Configuration
         self.idx_routes = 0 # Index of route map
         self.monsters_info = {} # monster information
+        self.yolo_monster_detector = None
         self.monsters = [] # monster detected in current frame
         self.fps = 0 # Frame per second
         self.red_dot_center_prev = None # previous other player location in minimap
@@ -240,8 +242,18 @@ class MapleStoryAutoBot:
         load_config
         '''
         mode = cfg["bot"]["mode"]
+        monster_cfg = cfg.get("monster_detect", {})
+        monster_backend = str(
+            monster_cfg.get("backend", "template")
+        ).lower()
         if mode not in {"normal", "aux", "patrol", "debug"}:
             logger.error(f"[load_config] Unsupported bot mode: {mode}")
+            return -1
+        if monster_backend not in {"template", "yolo"}:
+            logger.error(
+                "[load_config] Unsupported monster detection backend: "
+                f"{monster_backend}"
+            )
             return -1
 
         # One UI controller can be paused and loaded again with another map or
@@ -295,7 +307,9 @@ class MapleStoryAutoBot:
         }
 
         map_name = cfg['bot']['map']
-        if mode in {"normal", "debug"}:
+        if mode == "normal" or (
+            mode == "debug" and monster_backend == "template"
+        ):
             # Check if the map is supported in config_data.yaml
             if map_name not in self.data["map_mobs_mapping"]:
                 text = f"Invalid map name: {map_name}. "\
@@ -319,7 +333,7 @@ class MapleStoryAutoBot:
                 img = mask_route_colors(self.img_map, img, cfg["route"]["color_code_up_down"])
                 self.img_routes.append(img)
 
-        if mode in {"normal", "debug"}:
+        if mode in {"normal", "debug"} and monster_backend == "template":
             # Load monsters images from monster/<monster_name>.
             for monster_name in self.data["map_mobs_mapping"][map_name]:
                 imgs = []
@@ -339,6 +353,40 @@ class MapleStoryAutoBot:
             logger.info(
                 f"Loaded monsters for {map_name}: "
                 f"{list(self.monsters_info.keys())}"
+            )
+
+        if mode in {"normal", "debug", "patrol"} and \
+                monster_backend == "yolo":
+            try:
+                detector_signature = \
+                    YoloMonsterDetector.signature_from_config(monster_cfg)
+                if (
+                    self.yolo_monster_detector is None
+                    or self.yolo_monster_detector.config_signature
+                    != detector_signature
+                ):
+                    self.yolo_monster_detector = \
+                        YoloMonsterDetector.from_config(monster_cfg)
+                warmup_ms = None
+                if monster_cfg.get("warmup", True):
+                    warmup_ms = self.yolo_monster_detector.warmup(
+                        frame_size=WINDOW_WORKING_SIZE
+                    )
+            except (FileNotFoundError, KeyError, RuntimeError, ValueError) as exc:
+                logger.error(f"[load_config] Unable to load YOLO model: {exc}")
+                return -1
+            warmup_text = (
+                "" if warmup_ms is None
+                else f", warmup_ms={warmup_ms:.1f}"
+            )
+            logger.info(
+                "[load_config] YOLO monster detection ready: "
+                f"model={self.yolo_monster_detector.model_path}, "
+                f"imgsz={self.yolo_monster_detector.imgsz}, "
+                f"confidence={self.yolo_monster_detector.confidence}, "
+                f"device={self.yolo_monster_detector.device}, "
+                f"class={self.yolo_monster_detector.class_name}"
+                f"{warmup_text}"
             )
 
         # Load player's name tag
@@ -1322,12 +1370,25 @@ class MapleStoryAutoBot:
         nearest_monster = None
         min_distance = float('inf')
         attack_box = (x0, y0, x1, y1)
+        legacy_min_mob_area = None
+        if not self.is_yolo_monster_detection() and self.monsters_info:
+            legacy_min_mob_area = min(
+                img.shape[0] * img.shape[1]
+                for _, imgs in self.monsters_info.items()
+                for img, _ in imgs
+            )
         for monster in self.monsters:
-            inter_area = intersection_area(
-                attack_box, detection_to_box(monster))
-
-            min_mob_area = min(img.shape[0]*img.shape[1] for _, imgs in self.monsters_info.items() for img, _ in imgs)
-            inter_area_thres = min(min_mob_area, self.cfg['monster_detect']['max_mob_area_trigger'])
+            monster_box = detection_to_box(monster)
+            inter_area = intersection_area(attack_box, monster_box)
+            monster_area = max(0, monster_box[2] - monster_box[0]) * max(
+                0, monster_box[3] - monster_box[1]
+            )
+            inter_area_thres = min(
+                monster_area
+                if legacy_min_mob_area is None
+                else legacy_min_mob_area,
+                self.cfg['monster_detect']['max_mob_area_trigger'],
+            )
             if inter_area >= inter_area_thres:
                 # Compute distance to player center
                 monster_center = detection_center(monster)
@@ -1341,10 +1402,58 @@ class MapleStoryAutoBot:
 
         return nearest_monster
 
+    def is_yolo_monster_detection(self):
+        """Return whether the active config uses the YOLO mob backend."""
+        return (
+            str(
+                self.cfg.get("monster_detect", {}).get(
+                    "backend", "template"
+                )
+            ).lower()
+            == "yolo"
+        )
+
+    def get_yolo_monsters_in_range(
+        self, top_left, bottom_right, confidence=None
+    ):
+        """Run one full-camera YOLO pass and retain boxes touching the ROI."""
+        detector = getattr(self, "yolo_monster_detector", None)
+        if detector is None:
+            logger.error("YOLO monster detector is not loaded")
+            return []
+
+        frame_h, frame_w = self.img_frame.shape[:2]
+        x0, y0 = top_left
+        x1, y1 = bottom_right
+        x0 = min(max(0, int(x0)), frame_w)
+        x1 = min(max(0, int(x1)), frame_w)
+        y0 = min(max(0, int(y0)), frame_h)
+        y1 = min(max(0, int(y1)), frame_h)
+        if x1 <= x0 or y1 <= y0:
+            self.draw_monster_detections([], (x0, y0), (x1, y1))
+            return []
+
+        monsters = detector.detect(
+            # Keep the complete normalized frame. The model was trained with
+            # the bottom UI present, and cropping at ui_y_start can cut off
+            # monsters standing on the lowest platform. The ROI still limits
+            # which detections are returned to the attack/debug caller.
+            self.img_frame,
+            roi=(x0, y0, x1, y1),
+            confidence=confidence,
+        )
+        self.draw_monster_detections(monsters, (x0, y0), (x1, y1))
+        return monsters
+
     def get_monsters_in_range(self, top_left, bottom_right, diff_thres=None):
         '''
         get_monsters_in_range
         '''
+        if self.is_yolo_monster_detection():
+            # ``diff_thres`` belongs to the legacy SQDIFF matcher and must not
+            # silently alter the calibrated YOLO confidence threshold.
+            return self.get_yolo_monsters_in_range(top_left, bottom_right)
+
         x0, y0 = top_left
         x1, y1 = bottom_right
 
@@ -1600,6 +1709,11 @@ class MapleStoryAutoBot:
         Fire Land. Laplacian edge correlation instead ranks the distinctive
         sprite outlines above rocks and sky while remaining template-based.
         """
+        if self.is_yolo_monster_detection():
+            # ``score_thres`` is an edge-correlation threshold for the legacy
+            # matcher. YOLO uses the calibrated monster_detect.confidence.
+            return self.get_yolo_monsters_in_range(top_left, bottom_right)
+
         x0, y0 = top_left
         x1, y1 = bottom_right
         img_roi = self.img_frame[y0:y1, x0:x1]
@@ -1741,9 +1855,9 @@ class MapleStoryAutoBot:
             else:
                 color = (0, 255, 0)
 
-            label = str(round(monster["score"], 2))
+            visible_score = monster.get("confidence", monster["score"])
+            label = str(round(visible_score, 2))
             if self.is_debug_mode():
-                visible_score = monster.get("confidence", monster["score"])
                 color_score = monster.get("color_score")
                 if color_score is None:
                     label = f'{monster["name"]}: {visible_score:.2f}'
@@ -1752,6 +1866,8 @@ class MapleStoryAutoBot:
                         f'{monster["name"]}: E{visible_score:.2f} '
                         f'C{color_score:.2f}'
                     )
+            elif "confidence" in monster:
+                label = f'{monster["name"]}: {visible_score:.2f}'
 
             draw_rectangle(
                 self.img_frame_debug, monster["position"], monster["size"],
