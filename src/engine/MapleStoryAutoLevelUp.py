@@ -130,6 +130,12 @@ class MapleStoryAutoBot:
         self.img_nametag_medal_gray = None
         self.img_nametag_pet = None
         self.img_nametag_pet_gray = None
+        self.nametag_appearance_templates = []
+        self.loc_appearance_player = (0, 0)
+        self.has_valid_appearance_location = False
+        self.pending_appearance_location = None
+        self.pending_appearance_count = 0
+        self.last_appearance_match = None
         self.img_create_party_enable = None
         self.img_create_party_disable = None
         self.img_login_button = None
@@ -180,9 +186,10 @@ class MapleStoryAutoBot:
             return
 
         if self.img_frame_debug is not None and self.image_debug_signal is not None:
-            img_frame_debug_emit = self.img_frame_debug[
-                :self.cfg["ui_coords"]["ui_y_start"], :
-            ].copy()
+            # Visualization should show the complete normalized game frame.
+            # ui_y_start separates the camera and HUD for recognition; using
+            # it here hid the bottom HUD and clipped a bottom-floor nametag.
+            img_frame_debug_emit = self.img_frame_debug.copy()
             self.image_debug_signal.emit(img_frame_debug_emit)
 
         # Auxiliary mode has no route map. Keep the game-window visualization
@@ -267,6 +274,11 @@ class MapleStoryAutoBot:
         self.img_nametag_medal_gray = None
         self.img_nametag_pet = None
         self.img_nametag_pet_gray = None
+        self.nametag_appearance_templates = []
+        self.has_valid_appearance_location = False
+        self.pending_appearance_location = None
+        self.pending_appearance_count = 0
+        self.last_appearance_match = None
 
         if mode == "debug":
             logger.info(
@@ -392,8 +404,9 @@ class MapleStoryAutoBot:
         # Load player's name tag
         if cfg["nametag"]["enable"]:
             self.img_nametag = load_image(f"nametag/{cfg['nametag']['name']}.png")
-            self.img_nametag_gray = load_image(f"nametag/{cfg['nametag']['name']}.png",
-                                               cv2.IMREAD_GRAYSCALE)
+            self.img_nametag_gray = cv2.cvtColor(
+                self.img_nametag, cv2.COLOR_BGR2GRAY
+            )
             medal_cfg = cfg["nametag"].get("medal", {})
             if medal_cfg.get("enable", False):
                 medal_name = (
@@ -403,8 +416,8 @@ class MapleStoryAutoBot:
                 medal_path = f"nametag/{medal_name}.png"
                 if os.path.exists(medal_path):
                     self.img_nametag_medal = load_image(medal_path)
-                    self.img_nametag_medal_gray = load_image(
-                        medal_path, cv2.IMREAD_GRAYSCALE
+                    self.img_nametag_medal_gray = cv2.cvtColor(
+                        self.img_nametag_medal, cv2.COLOR_BGR2GRAY
                     )
                 else:
                     logger.warning(
@@ -420,13 +433,54 @@ class MapleStoryAutoBot:
                 pet_path = f"nametag/{pet_name}.png"
                 if os.path.exists(pet_path):
                     self.img_nametag_pet = load_image(pet_path)
-                    self.img_nametag_pet_gray = load_image(
-                        pet_path, cv2.IMREAD_GRAYSCALE
+                    self.img_nametag_pet_gray = cv2.cvtColor(
+                        self.img_nametag_pet, cv2.COLOR_BGR2GRAY
                     )
                 else:
                     logger.warning(
                         f"NameTag pet template not found: {pet_path}; "
                         "pet-assisted matching is disabled"
+                    )
+            appearance_cfg = cfg["nametag"].get("appearance", {})
+            if appearance_cfg.get("enable", False):
+                for template_cfg in appearance_cfg.get("templates", []):
+                    template_name = template_cfg.get("name", "").strip()
+                    if not template_name:
+                        suffix = template_cfg.get("suffix", "").strip()
+                        if suffix:
+                            template_name = (
+                                f"{cfg['nametag']['name']}_{suffix}"
+                            )
+                    if not template_name:
+                        continue
+                    appearance_path = f"nametag/{template_name}.png"
+                    if not os.path.exists(appearance_path):
+                        logger.warning(
+                            "NameTag appearance template not found: "
+                            f"{appearance_path}"
+                        )
+                        continue
+                    image = load_image(appearance_path)
+                    offset = template_cfg.get("player_offset", (0, 0))
+                    self.nametag_appearance_templates.append({
+                        "name": template_name,
+                        "pose": template_cfg.get("pose", "standing"),
+                        "image": image,
+                        "gray": cv2.cvtColor(image, cv2.COLOR_BGR2GRAY),
+                        "mask": get_mask(image, (0, 255, 0)),
+                        "player_offset": (
+                            int(offset[0]), int(offset[1])
+                        ),
+                    })
+                if self.nametag_appearance_templates:
+                    logger.info(
+                        "Loaded player appearance templates: "
+                        f"{[item['name'] for item in self.nametag_appearance_templates]}"
+                    )
+                else:
+                    logger.warning(
+                        "Player appearance detection is enabled but no "
+                        "templates could be loaded"
                     )
 
         # Load misc image
@@ -541,6 +595,10 @@ class MapleStoryAutoBot:
             self.has_valid_nametag_location = False
             self.nametag_miss_count = 0
             self.pending_nametag_location = None
+            self.has_valid_appearance_location = False
+            self.pending_appearance_location = None
+            self.pending_appearance_count = 0
+            self.last_appearance_match = None
             self.screen_player_location_valid = False
             self.thread_auto_bot = threading.Thread(target=self.loop)
             self.thread_auto_bot.start()
@@ -600,6 +658,218 @@ class MapleStoryAutoBot:
         self.video_writer = None
         logger.info("[stop_record] Stop recording")
 
+    def get_player_location_by_appearance(
+            self, expected_player=None, allow_global=True):
+        """Find the configured hood/head templates and infer player center.
+
+        Standing templates may recover a fully covered nametag globally. The
+        rope template contains only the tiger hood (the pet covers the lower
+        head), so it is intentionally restricted to an expected local area or
+        a previously established ladder state.
+        """
+        appearance_cfg = self.cfg.get("nametag", {}).get(
+            "appearance", {}
+        )
+        templates = getattr(self, "nametag_appearance_templates", [])
+        if appearance_cfg.get("enable", False) is False or not templates:
+            return None
+
+        camera_h = min(
+            int(self.cfg["ui_coords"]["ui_y_start"]),
+            self.img_frame_gray.shape[0],
+        )
+        img_camera = self.img_frame_gray[:camera_h, :]
+        camera_w = img_camera.shape[1]
+        search_radius = max(
+            10, int(appearance_cfg.get("local_search_radius", 90))
+        )
+        diff_threshold = float(
+            appearance_cfg.get("diff_thres", 0.16)
+        )
+        climb_threshold = float(
+            appearance_cfg.get("climb_diff_thres", 0.12)
+        )
+
+        candidates = []
+        for template in templates:
+            pose = template["pose"]
+            if pose == "climbing" and expected_player is None:
+                # A hood-only full-frame match is too ambiguous. It may still
+                # recover during a known ladder segment, but only near the
+                # last accepted screen coordinate.
+                if (
+                    not getattr(self, "is_on_ladder", False)
+                    or not getattr(self, "has_valid_nametag_location", False)
+                ):
+                    continue
+                last_id = getattr(self, "loc_nametag", None)
+                if last_id is None:
+                    continue
+                template_expected = (
+                    last_id[0] + self.img_nametag.shape[1] // 2,
+                    last_id[1]
+                    - self.cfg["nametag"]["offset"][1],
+                )
+            else:
+                template_expected = expected_player
+
+            template_gray = template["gray"]
+            template_mask = template["mask"]
+            template_h, template_w = template_gray.shape[:2]
+            offset_x, offset_y = template["player_offset"]
+
+            x0, y0 = 0, 0
+            search_image = img_camera
+            is_local = template_expected is not None
+            if is_local:
+                expected_x, expected_y = template_expected
+                expected_template_x = int(round(expected_x - offset_x))
+                expected_template_y = int(round(expected_y - offset_y))
+                x0 = max(0, expected_template_x - search_radius)
+                y0 = max(0, expected_template_y - search_radius)
+                x1 = min(
+                    camera_w,
+                    expected_template_x + template_w + search_radius,
+                )
+                y1 = min(
+                    camera_h,
+                    expected_template_y + template_h + search_radius,
+                )
+                search_image = img_camera[y0:y1, x0:x1]
+            elif not allow_global:
+                continue
+
+            if (
+                search_image.shape[0] < template_h
+                or search_image.shape[1] < template_w
+            ):
+                continue
+
+            local_loc, score, _ = find_pattern_sqdiff(
+                search_image,
+                template_gray,
+                last_result=None,
+                mask=template_mask,
+                global_threshold=0.0,
+            )
+            score = float(score)
+            threshold = (
+                climb_threshold if pose == "climbing" else diff_threshold
+            )
+            if score >= threshold:
+                continue
+
+            appearance_loc = (
+                x0 + local_loc[0],
+                y0 + local_loc[1],
+            )
+            player = (
+                appearance_loc[0] + offset_x,
+                appearance_loc[1] + offset_y,
+            )
+            if not (0 <= player[0] < camera_w and 0 <= player[1] < camera_h):
+                continue
+
+            # A local appearance check must agree geometrically with the
+            # nametag-derived point. A global standing recovery instead uses
+            # a stricter score plus the existing two-frame jump confirmation.
+            if is_local:
+                max_distance = int(appearance_cfg.get(
+                    "climb_validation_distance",
+                    appearance_cfg.get("validation_distance", 30),
+                )) if pose == "climbing" else int(
+                    appearance_cfg.get("validation_distance", 30)
+                )
+                distance = max(
+                    abs(player[0] - template_expected[0]),
+                    abs(player[1] - template_expected[1]),
+                )
+                if distance > max_distance:
+                    continue
+
+            candidates.append({
+                "player": player,
+                "loc": appearance_loc,
+                "score": score,
+                "name": template["name"],
+                "pose": pose,
+                "shape": template["image"].shape,
+                "is_local": is_local,
+            })
+
+        if not candidates:
+            self.has_valid_appearance_location = False
+            self.last_appearance_match = None
+            if expected_player is None:
+                self.pending_appearance_location = None
+                self.pending_appearance_count = 0
+            return None
+
+        candidates.sort(key=lambda item: item["score"])
+        best = candidates[0]
+        self.last_appearance_match = best
+
+        # A head template is a stronger anchor than background color but less
+        # unique than ID + medal. Require two consistent global frames before
+        # it can initialize or recover control; local checks are already bound
+        # to a known player coordinate and need no extra delay.
+        if not best["is_local"]:
+            confirm_frames = max(
+                1, int(appearance_cfg.get("global_confirm_frames", 2))
+            )
+            confirm_radius = max(
+                1, int(appearance_cfg.get("global_confirm_radius", 12))
+            )
+            previous_confirmed = getattr(
+                self, "has_valid_appearance_location", False
+            ) and max(
+                abs(best["player"][0] - self.loc_appearance_player[0]),
+                abs(best["player"][1] - self.loc_appearance_player[1]),
+            ) <= confirm_radius
+            if not previous_confirmed:
+                pending = getattr(
+                    self, "pending_appearance_location", None
+                )
+                if pending is not None and max(
+                    abs(best["player"][0] - pending[0]),
+                    abs(best["player"][1] - pending[1]),
+                ) <= confirm_radius:
+                    self.pending_appearance_count = (
+                        getattr(self, "pending_appearance_count", 0) + 1
+                    )
+                else:
+                    self.pending_appearance_location = best["player"]
+                    self.pending_appearance_count = 1
+                if self.pending_appearance_count < confirm_frames:
+                    draw_rectangle(
+                        self.img_frame_debug,
+                        best["loc"],
+                        best["shape"],
+                        (0, 165, 255),
+                        (
+                            f"HeroHead:pending "
+                            f"{self.pending_appearance_count}/{confirm_frames}"
+                        ),
+                        thickness=1,
+                        text_height=0.45,
+                    )
+                    return None
+
+        self.loc_appearance_player = best["player"]
+        self.has_valid_appearance_location = True
+        self.pending_appearance_location = None
+        self.pending_appearance_count = 0
+        draw_rectangle(
+            self.img_frame_debug,
+            best["loc"],
+            best["shape"],
+            (0, 165, 255),
+            f"HeroHead:{best['pose']} {best['score']:.2f}",
+            thickness=1,
+            text_height=0.45,
+        )
+        return best["player"]
+
     def get_player_location_by_nametag(self):
         '''
         Detect the player from their ID and, when configured, the medal below it.
@@ -619,11 +889,35 @@ class MapleStoryAutoBot:
         nametag_cfg = self.cfg["nametag"]
         mode = nametag_cfg["mode"]
 
+        def ensure_grayscale(image, color_image, resource_name):
+            """Return a single-channel template after a reload/state mismatch."""
+            if image is None:
+                image = color_image
+            if image is None:
+                raise RuntimeError(f"Missing {resource_name} template")
+            if image.ndim == 2:
+                return image
+            if image.ndim == 3 and image.shape[2] == 1:
+                return image[:, :, 0]
+            if image.ndim == 3 and image.shape[2] == 3:
+                return cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+            if image.ndim == 3 and image.shape[2] == 4:
+                return cv2.cvtColor(image, cv2.COLOR_BGRA2GRAY)
+            raise ValueError(
+                f"Unexpected {resource_name} template shape: {image.shape}"
+            )
+
+        img_nametag_gray = ensure_grayscale(
+            getattr(self, "img_nametag_gray", None),
+            getattr(self, "img_nametag", None),
+            "nametag",
+        )
+
         # Get nametag image and search image.
         if mode == "white_mask":
             # Apply Gaussian blur for smoother white detection
             img_camera = cv2.GaussianBlur(img_camera, (3, 3), 0)
-            img_nametag = cv2.GaussianBlur(self.img_nametag_gray, (3, 3), 0)
+            img_nametag = cv2.GaussianBlur(img_nametag_gray, (3, 3), 0)
             lower_white, upper_white = (150, 255)
             img_camera_search = cv2.inRange(
                 img_camera, lower_white, upper_white
@@ -631,10 +925,10 @@ class MapleStoryAutoBot:
             img_nametag  = cv2.inRange(img_nametag, lower_white, upper_white)
         elif mode == "grayscale":
             img_camera_search = img_camera
-            img_nametag = self.img_nametag_gray
+            img_nametag = img_nametag_gray
         elif mode == "histogram_eq":
             # Apply histogram equalization
-            img_nametag_eq = cv2.equalizeHist(self.img_nametag_gray)
+            img_nametag_eq = cv2.equalizeHist(img_nametag_gray)
             img_camera_eq = cv2.equalizeHist(img_camera)
 
             # Apply global (fixed) threshold
@@ -657,6 +951,9 @@ class MapleStoryAutoBot:
         img_medal = None
         medal_mask = None
         if use_medal:
+            img_medal_gray = ensure_grayscale(
+                img_medal_gray, img_medal_color, "nametag medal"
+            )
             if mode == "white_mask":
                 img_medal = cv2.GaussianBlur(img_medal_gray, (3, 3), 0)
                 img_medal = cv2.inRange(
@@ -683,6 +980,9 @@ class MapleStoryAutoBot:
         img_pet = None
         pet_mask = None
         if use_pet:
+            img_pet_gray = ensure_grayscale(
+                img_pet_gray, img_pet_color, "pet nametag"
+            )
             if mode == "white_mask":
                 img_pet = cv2.GaussianBlur(img_pet_gray, (3, 3), 0)
                 img_pet = cv2.inRange(
@@ -714,7 +1014,7 @@ class MapleStoryAutoBot:
         else:
             last_result = None
 
-        h, w = img_nametag.shape
+        h, w = img_nametag.shape[:2]
         # Get nametag's background mask
         mask = get_mask(self.img_nametag, (0, 255, 0))
 
@@ -826,6 +1126,8 @@ class MapleStoryAutoBot:
                 "h_match": h_match,
                 "medal_loc": None,
                 "medal_score": None,
+                "medal_partial": False,
+                "medal_match_height": None,
                 "is_valid": False,
             })
 
@@ -847,6 +1149,90 @@ class MapleStoryAutoBot:
                     nametag_cfg["diff_thres"],
                 )
             )
+            bottom_partial_threshold = float(
+                medal_cfg.get("bottom_partial_diff_thres", medal_threshold)
+            )
+            bottom_partial_id_threshold = float(
+                medal_cfg.get(
+                    "bottom_partial_id_diff_thres",
+                    assisted_id_threshold,
+                )
+            )
+            bottom_min_visible_ratio = min(
+                1.0,
+                max(
+                    0.1,
+                    float(
+                        medal_cfg.get("bottom_min_visible_ratio", 0.5)
+                    ),
+                ),
+            )
+            bottom_min_visible_rows = max(
+                3,
+                min(
+                    medal_h,
+                    int(np.ceil(medal_h * bottom_min_visible_ratio)),
+                ),
+            )
+
+            def match_medal_near(expected_x, expected_y, tolerance):
+                """Match a full medal, or its visible top at the camera bottom."""
+                local_tolerance_x = max(0, int(tolerance[0]))
+                local_tolerance_y = max(0, int(tolerance[1]))
+                expected_x = int(expected_x)
+                expected_y = int(expected_y)
+
+                # Only relax the template vertically when its expected bottom
+                # crosses the camera/UI boundary. Elsewhere a complete medal
+                # remains mandatory, so normal false-positive behavior is
+                # unchanged.
+                is_bottom_partial = expected_y + medal_h > camera_h
+                match_image = img_medal
+                match_mask = medal_mask
+                match_height = medal_h
+                if is_bottom_partial:
+                    visible_rows = camera_h - expected_y
+                    if visible_rows < bottom_min_visible_rows:
+                        return None, 1.0, True, 0
+                    match_height = bottom_min_visible_rows
+                    match_image = img_medal[:match_height, :]
+                    if medal_mask is not None:
+                        match_mask = medal_mask[:match_height, :]
+
+                x0 = max(0, expected_x - local_tolerance_x)
+                y0 = max(0, expected_y - local_tolerance_y)
+                x1 = min(
+                    camera_w,
+                    expected_x + medal_w + local_tolerance_x,
+                )
+                y1 = (
+                    camera_h
+                    if is_bottom_partial
+                    else min(
+                        camera_h,
+                        expected_y + medal_h + local_tolerance_y,
+                    )
+                )
+                medal_roi = img_camera_search[y0:y1, x0:x1]
+                if (
+                    medal_roi.shape[0] < match_height
+                    or medal_roi.shape[1] < medal_w
+                ):
+                    return None, 1.0, is_bottom_partial, 0
+
+                local_loc, score, _ = find_pattern_sqdiff(
+                    medal_roi,
+                    match_image,
+                    last_result=None,
+                    mask=match_mask,
+                    global_threshold=0.0,
+                )
+                return (
+                    (x0 + local_loc[0], y0 + local_loc[1]),
+                    float(score),
+                    is_bottom_partial,
+                    match_height,
+                )
 
             for match in matches:
                 id_x, id_y = match["loc_nametag"]
@@ -854,38 +1240,32 @@ class MapleStoryAutoBot:
                     id_x + w / 2 - medal_w / 2 + center_offset_x
                 ))
                 expected_y = id_y + h + vertical_gap
-                x0 = max(0, expected_x - tolerance_x)
-                y0 = max(0, expected_y - tolerance_y)
-                x1 = min(
-                    camera_w,
-                    expected_x + medal_w + tolerance_x,
+                (
+                    medal_loc,
+                    medal_score,
+                    medal_partial,
+                    medal_match_height,
+                ) = match_medal_near(
+                    expected_x,
+                    expected_y,
+                    (tolerance_x, tolerance_y),
                 )
-                y1 = min(
-                    camera_h,
-                    expected_y + medal_h + tolerance_y,
-                )
-                medal_roi = img_camera_search[y0:y1, x0:x1]
-                if (
-                    medal_roi.shape[0] < medal_h
-                    or medal_roi.shape[1] < medal_w
-                ):
-                    match["medal_score"] = 1.0
-                    continue
-                medal_loc, medal_score, _ = find_pattern_sqdiff(
-                    medal_roi,
-                    img_medal,
-                    last_result=None,
-                    mask=medal_mask,
-                    global_threshold=0.0,
-                )
-                match["medal_loc"] = (
-                    x0 + medal_loc[0],
-                    y0 + medal_loc[1],
-                )
+                match["medal_loc"] = medal_loc
                 match["medal_score"] = float(medal_score)
+                match["medal_partial"] = medal_partial
+                match["medal_match_height"] = medal_match_height
+                score_threshold = (
+                    bottom_partial_threshold
+                    if medal_partial else medal_threshold
+                )
+                id_score_threshold = (
+                    bottom_partial_id_threshold
+                    if medal_partial else assisted_id_threshold
+                )
                 match["is_valid"] = (
-                    match["id_score"] < assisted_id_threshold
-                    and medal_score < medal_threshold
+                    medal_loc is not None
+                    and match["id_score"] < id_score_threshold
+                    and medal_score < score_threshold
                 )
 
             # If every ID candidate is occluded, the configured pet name can
@@ -911,42 +1291,24 @@ class MapleStoryAutoBot:
                     pet_medal_tolerance = pet_cfg.get(
                         "medal_search_tolerance", (28, 10)
                     )
-                    pet_tolerance_x = max(
-                        0, int(pet_medal_tolerance[0])
+                    (
+                        pet_medal_loc,
+                        pet_medal_score,
+                        pet_medal_partial,
+                        pet_medal_match_height,
+                    ) = match_medal_near(
+                        expected_medal_x,
+                        expected_medal_y,
+                        pet_medal_tolerance,
                     )
-                    pet_tolerance_y = max(
-                        0, int(pet_medal_tolerance[1])
+                    pet_medal_score_threshold = (
+                        bottom_partial_threshold
+                        if pet_medal_partial else medal_threshold
                     )
-                    camera_h, camera_w = img_camera_search.shape[:2]
-                    x0 = max(0, expected_medal_x - pet_tolerance_x)
-                    y0 = max(0, expected_medal_y - pet_tolerance_y)
-                    x1 = min(
-                        camera_w,
-                        expected_medal_x + medal_w + pet_tolerance_x,
-                    )
-                    y1 = min(
-                        camera_h,
-                        expected_medal_y + medal_h + pet_tolerance_y,
-                    )
-                    medal_roi = img_camera_search[y0:y1, x0:x1]
                     if (
-                        medal_roi.shape[0] >= medal_h
-                        and medal_roi.shape[1] >= medal_w
+                        pet_medal_loc is not None
+                        and pet_medal_score < pet_medal_score_threshold
                     ):
-                        pet_medal_loc, pet_medal_score, _ = (
-                            find_pattern_sqdiff(
-                                medal_roi,
-                                img_medal,
-                                last_result=None,
-                                mask=medal_mask,
-                                global_threshold=0.0,
-                            )
-                        )
-                        pet_medal_loc = (
-                            x0 + pet_medal_loc[0],
-                            y0 + pet_medal_loc[1],
-                        )
-                        if pet_medal_score < medal_threshold:
                             center_offset_x = int(
                                 medal_cfg.get("center_offset_x", 0)
                             )
@@ -975,6 +1337,8 @@ class MapleStoryAutoBot:
                                 "h_match": pet_h,
                                 "medal_loc": pet_medal_loc,
                                 "medal_score": float(pet_medal_score),
+                                "medal_partial": pet_medal_partial,
+                                "medal_match_height": pet_medal_match_height,
                                 "pet_loc": pet_loc,
                                 "is_valid": True,
                             })
@@ -999,6 +1363,8 @@ class MapleStoryAutoBot:
         score = best_match["id_score"]
         medal_loc = best_match["medal_loc"]
         medal_score = best_match["medal_score"]
+        medal_partial = best_match.get("medal_partial", False)
+        medal_match_height = best_match.get("medal_match_height")
         pet_loc = best_match.get("pet_loc")
         is_cached = best_match["is_cached"]
 
@@ -1016,6 +1382,45 @@ class MapleStoryAutoBot:
             and 0 <= candidate_player[0] < camera_w
             and 0 <= candidate_player[1] < camera_h
         )
+
+        # Appearance is an additional identity anchor. A good local head
+        # match confirms the nametag pair, but a miss never vetoes a valid
+        # ID/medal because animation, damage effects, or the pet may still
+        # cover part of the hood.
+        if is_valid_match:
+            self.get_player_location_by_appearance(
+                expected_player=candidate_player,
+                allow_global=False,
+            )
+
+        # When every text anchor is covered, a strict standing head template
+        # can recover the screen coordinate. Convert that coordinate back to
+        # a synthetic ID location so the existing stale/jump safeguards stay
+        # in one place. The ambiguous hood-only climbing template never takes
+        # this unrestricted global path.
+        if not is_valid_match:
+            appearance_player = self.get_player_location_by_appearance(
+                expected_player=None,
+                allow_global=True,
+            )
+            if appearance_player is not None:
+                candidate_player = appearance_player
+                loc_nametag = (
+                    appearance_player[0] - w // 2,
+                    appearance_player[1] + nametag_cfg["offset"][1],
+                )
+                tag_type = "appearance"
+                appearance_match = getattr(
+                    self, "last_appearance_match", None
+                ) or {}
+                score = float(appearance_match.get("score", 0.0))
+                medal_loc = None
+                medal_score = None
+                medal_partial = False
+                medal_match_height = None
+                pet_loc = None
+                is_cached = False
+                is_valid_match = True
 
         # Camera scrolling after a ladder climb can move the true tag a long
         # way in one frame, but a single low-score texture hit can do the same.
@@ -1069,21 +1474,39 @@ class MapleStoryAutoBot:
             self.loc_nametag[1] - nametag_cfg["offset"][1]
         )
 
-        # Draw name tag detection box for debugging
-        draw_rectangle(self.img_frame_debug, self.loc_nametag,
-                       self.img_nametag.shape, (0, 255, 0), "")
+        # An appearance-only recovery stores a synthetic ID location so it can
+        # reuse the existing jump/stale safeguards. Do not draw that synthetic
+        # box as though text was actually matched.
+        if tag_type != "appearance":
+            draw_rectangle(
+                self.img_frame_debug,
+                self.loc_nametag,
+                self.img_nametag.shape,
+                (0, 255, 0),
+                "",
+            )
         debug_medal_loc = (
             medal_loc
             if medal_loc is not None
             else getattr(self, "loc_nametag_medal", None)
         )
-        if use_medal and debug_medal_loc is not None:
+        if (
+            tag_type != "appearance"
+            and use_medal
+            and debug_medal_loc is not None
+        ):
+            debug_medal_shape = self.img_nametag_medal.shape
+            if medal_partial and medal_match_height:
+                debug_medal_shape = (
+                    medal_match_height,
+                    self.img_nametag_medal.shape[1],
+                )
             draw_rectangle(
                 self.img_frame_debug,
                 debug_medal_loc,
-                self.img_nametag_medal.shape,
+                debug_medal_shape,
                 (255, 255, 0),
-                "Medal",
+                "Medal(partial)" if medal_partial else "Medal",
                 thickness=1,
                 text_height=0.5,
             )
@@ -1110,12 +1533,22 @@ class MapleStoryAutoBot:
         if use_medal:
             medal_text = (
                 f",medal={medal_score:.2f}"
+                f"{'/partial' if medal_partial else ''}"
                 if medal_score is not None else ",medal=missing"
             )
-        text = (
-            f"NameTag,id={score:.2f}{medal_text},"
-            f"{match_status},{tag_type}"
-        )
+        if tag_type == "appearance":
+            appearance_match = getattr(
+                self, "last_appearance_match", None
+            ) or {}
+            text = (
+                f"HeroHead,{appearance_match.get('pose', 'unknown')}="
+                f"{score:.2f},{match_status}"
+            )
+        else:
+            text = (
+                f"NameTag,id={score:.2f}{medal_text},"
+                f"{match_status},{tag_type}"
+            )
         draw_text(self.img_frame_debug, text,
                   (self.loc_nametag[0],
                    self.loc_nametag[1] + self.img_nametag.shape[0] + 30),
@@ -1442,8 +1875,107 @@ class MapleStoryAutoBot:
             roi=(x0, y0, x1, y1),
             confidence=confidence,
         )
+        monsters = self.filter_pet_yolo_detections(monsters)
         self.draw_monster_detections(monsters, (x0, y0), (x1, y1))
         return monsters
+
+    def filter_pet_yolo_detections(self, monsters):
+        """Remove a YOLO mob only when this pet's name is directly below it.
+
+        The YOLO checkpoint has no separate pet class, so a mushroom-shaped
+        pet can receive a strong ``mob`` score.  The configured pet-name image
+        is identity-specific and provides a much safer negative anchor than a
+        generic exclusion zone around the player.
+        """
+        if not monsters:
+            return monsters
+
+        nametag_cfg = self.cfg.get("nametag", {})
+        pet_cfg = nametag_cfg.get("pet", {})
+        pet_color = getattr(self, "img_nametag_pet", None)
+        pet_gray = getattr(self, "img_nametag_pet_gray", None)
+        if not (
+            nametag_cfg.get("enable", False)
+            and pet_cfg.get("enable", False)
+            and pet_cfg.get("filter_yolo_mob", True)
+            and pet_color is not None
+            and pet_gray is not None
+        ):
+            return monsters
+
+        if pet_gray.ndim == 3:
+            pet_gray = cv2.cvtColor(pet_gray, cv2.COLOR_BGR2GRAY)
+        pet_mask = get_mask(pet_color, (0, 255, 0))
+        pet_h, pet_w = pet_gray.shape[:2]
+        frame_gray = getattr(self, "img_frame_gray", None)
+        if frame_gray is None:
+            frame_gray = cv2.cvtColor(self.img_frame, cv2.COLOR_BGR2GRAY)
+        frame_h, frame_w = frame_gray.shape[:2]
+
+        tolerance = pet_cfg.get("yolo_name_search_tolerance", (14, 8))
+        tolerance_x = max(0, int(tolerance[0]))
+        tolerance_y = max(0, int(tolerance[1]))
+        vertical_gap = int(pet_cfg.get("yolo_name_vertical_gap", 3))
+        max_gap = max(0, int(pet_cfg.get("yolo_name_max_gap", 12)))
+        threshold = float(pet_cfg.get("yolo_name_diff_thres", 0.10))
+
+        kept = []
+        for monster in monsters:
+            x1, y1, x2, y2 = detection_to_box(monster)
+            expected_x = int(round((x1 + x2 - pet_w) / 2))
+            expected_y = y2 + vertical_gap
+            roi_x1 = max(0, expected_x - tolerance_x)
+            roi_y1 = max(0, expected_y - tolerance_y)
+            roi_x2 = min(frame_w, expected_x + pet_w + tolerance_x)
+            roi_y2 = min(frame_h, expected_y + pet_h + tolerance_y)
+            roi = frame_gray[roi_y1:roi_y2, roi_x1:roi_x2]
+            if roi.shape[0] < pet_h or roi.shape[1] < pet_w:
+                kept.append(monster)
+                continue
+
+            local_loc, score, _ = find_pattern_sqdiff(
+                roi,
+                pet_gray,
+                last_result=None,
+                mask=pet_mask,
+                global_threshold=0.0,
+            )
+            pet_loc = (
+                roi_x1 + local_loc[0],
+                roi_y1 + local_loc[1],
+            )
+            name_center_x = pet_loc[0] + pet_w / 2
+            box_center_x = (x1 + x2) / 2
+            actual_gap = pet_loc[1] - y2
+            is_pet = (
+                score < threshold
+                and abs(name_center_x - box_center_x) <= tolerance_x
+                and -tolerance_y <= actual_gap <= max_gap
+            )
+            if not is_pet:
+                kept.append(monster)
+                continue
+
+            draw_rectangle(
+                self.img_frame_debug,
+                monster["position"],
+                monster["size"],
+                (255, 0, 255),
+                f"Pet filtered: {score:.2f}",
+                thickness=1,
+                text_height=0.45,
+            )
+            draw_rectangle(
+                self.img_frame_debug,
+                pet_loc,
+                (pet_h, pet_w),
+                (255, 0, 255),
+                "Pet name",
+                thickness=1,
+                text_height=0.45,
+            )
+
+        return kept
 
     def get_monsters_in_range(self, top_left, bottom_right, diff_thres=None):
         '''
@@ -1453,6 +1985,21 @@ class MapleStoryAutoBot:
             # ``diff_thres`` belongs to the legacy SQDIFF matcher and must not
             # silently alter the calibrated YOLO confidence threshold.
             return self.get_yolo_monsters_in_range(top_left, bottom_right)
+
+        # Reuse the reliable debug edge-correlation + masked-color pipeline in
+        # normal mode. The caller still supplies the smaller combat ROI, so
+        # normal mode does not pay for a full-camera scan every frame.
+        if (
+            self.cfg.get("bot", {}).get("mode") == "normal"
+            and self.cfg.get("monster_detect", {}).get(
+                "mode", "debug_pipeline"
+            ) == "debug_pipeline"
+        ):
+            return self.get_debug_monsters_in_range(
+                top_left,
+                bottom_right,
+                score_thres=diff_thres,
+            )
 
         x0, y0 = top_left
         x1, y1 = bottom_right
@@ -1857,7 +2404,7 @@ class MapleStoryAutoBot:
 
             visible_score = monster.get("confidence", monster["score"])
             label = str(round(visible_score, 2))
-            if self.is_debug_mode():
+            if self.is_debug_mode() or "confidence" in monster:
                 color_score = monster.get("color_score")
                 if color_score is None:
                     label = f'{monster["name"]}: {visible_score:.2f}'
@@ -2155,8 +2702,7 @@ class MapleStoryAutoBot:
         '''
         update_img_frame_debug
         '''
-        cv2.imshow("Game Window Debug",
-            self.img_frame_debug[:self.cfg["ui_coords"]["ui_y_start"], :])
+        cv2.imshow("Game Window Debug", self.img_frame_debug)
         # Update FPS timer
         self.t_last_frame = time.time()
 
@@ -2482,8 +3028,52 @@ class MapleStoryAutoBot:
             return None
 
     def update_cmd_by_route(self):
-        # get color code from img_route
+        # Rebuild movement from this frame. If no route matches, never renew a
+        # stale movement key from the prior frame on the remote ESP32.
+        self.cmd_move_x = "none"
+        self.cmd_move_y = "none"
+        self.cmd_action = "none"
+
+        # Get color code from the active route.
         color_code, color_code_up_down = self.get_nearest_color_code()
+
+        # The next route may not pass through the player's current position
+        # when the recorded route set is incomplete. Search each later route
+        # once (with wraparound) and immediately execute the first local
+        # action that can be found.
+        if not color_code and not color_code_up_down and self.img_routes:
+            original_idx = self.idx_routes
+            route_count = len(self.img_routes)
+            for step in range(1, route_count):
+                candidate_idx = (original_idx + step) % route_count
+                self.idx_routes = candidate_idx
+                self.img_route = self.img_routes[candidate_idx]
+                if self.is_show_debug_window:
+                    self.img_route_debug = cv2.cvtColor(
+                        self.img_route, cv2.COLOR_RGB2BGR
+                    )
+
+                color_code, color_code_up_down = \
+                    self.get_nearest_color_code()
+                if color_code or color_code_up_down:
+                    logger.info(
+                        "[route] No action near player on "
+                        f"route{original_idx + 1}; recovered with "
+                        f"route{candidate_idx + 1}"
+                    )
+                    break
+            else:
+                # No route describes this location. Keep a deterministic
+                # route selected and all keys released; the normal stuck
+                # watchdog can then perform its recovery action safely.
+                self.idx_routes = original_idx
+                self.img_route = self.img_routes[original_idx]
+                if self.is_show_debug_window:
+                    self.img_route_debug = cv2.cvtColor(
+                        self.img_route, cv2.COLOR_RGB2BGR
+                    )
+                return
+
         # Use color_code and color_code_up_down to complement each other
         # To prevent character stuck at the end of ladder, we use two color color pixels
         # and let them complement with each other, to ensure smoothy ladder climbing
@@ -2563,7 +3153,17 @@ class MapleStoryAutoBot:
             # Determine attack direction
             attack_direction = self.get_attack_direction(monster_left, monster_right)
             # Attack Command
-            if time.time() - self.t_last_attack > cooldown and attack_direction is not None:
+            keyboard_controller = getattr(self, "kb", None)
+            attack_recovering = bool(
+                keyboard_controller is not None
+                and getattr(
+                    keyboard_controller,
+                    "is_attack_recovering",
+                    lambda: False,
+                )()
+            )
+            if time.time() - self.t_last_attack > cooldown and \
+                    attack_direction is not None and not attack_recovering:
                 self.cmd_action = "attack"
                 self.t_last_attack = time.time()
                 # Set up attack direction
@@ -2971,9 +3571,10 @@ def main(args):
         # Show debug image on window
         if mapleStoryAutoBot.is_frame_done:
             if mapleStoryAutoBot.img_frame_debug is not None:
-                cv2.imshow("Game Window Debug",
-                    mapleStoryAutoBot.img_frame_debug[:
-                        mapleStoryAutoBot.cfg["ui_coords"]["ui_y_start"], :])
+                cv2.imshow(
+                    "Game Window Debug",
+                    mapleStoryAutoBot.img_frame_debug,
+                )
 
             if mapleStoryAutoBot.img_route_debug is not None:
                 cv2.imshow("Route Map Debug", mapleStoryAutoBot.img_route_debug)

@@ -48,7 +48,8 @@ class DebugDrawingTests(unittest.TestCase):
 
         bot.image_debug_signal.emit.assert_called_once()
         emitted_frame = bot.image_debug_signal.emit.call_args.args[0]
-        self.assertEqual(emitted_frame.shape, (6, 20, 3))
+        self.assertEqual(emitted_frame.shape, (10, 20, 3))
+        self.assertTrue(np.all(emitted_frame[6:] == 123))
         self.assertFalse(np.shares_memory(emitted_frame, bot.img_frame_debug))
         bot.route_map_viz_signal.emit.assert_not_called()
 
@@ -200,6 +201,92 @@ class MinimapDetectionTests(unittest.TestCase):
 
 
 class AutoBotLifecycleTests(unittest.TestCase):
+    @staticmethod
+    def _route_recovery_bot(route_count=4, active_index=0):
+        bot = MapleStoryAutoBot.__new__(MapleStoryAutoBot)
+        bot.img_routes = [
+            np.full((4, 4, 3), index, dtype=np.uint8)
+            for index in range(route_count)
+        ]
+        bot.idx_routes = active_index
+        bot.img_route = bot.img_routes[active_index]
+        bot.img_route_debug = None
+        bot.is_show_debug_window = False
+        bot.is_on_ladder = False
+        bot.cmd_move_x = "left"
+        bot.cmd_move_y = "up"
+        bot.cmd_action = "jump"
+        bot.cfg = {
+            "teleport": {
+                "is_use_teleport_to_walk": False,
+                "cooldown": 1,
+            },
+            "key": {"teleport": ""},
+        }
+        bot.t_last_teleport = time.time()
+        bot.is_near_edge = Mock(return_value=False)
+        return bot
+
+    def test_missing_route_action_scans_forward_and_executes_same_frame(self):
+        bot = self._route_recovery_bot(route_count=4, active_index=0)
+
+        def find_action_for_active_route():
+            if bot.idx_routes == 2:
+                return ({
+                    "command": "right none jump",
+                    "distance": 0,
+                }, None)
+            return (None, None)
+
+        bot.get_nearest_color_code = Mock(
+            side_effect=find_action_for_active_route
+        )
+
+        bot.update_cmd_by_route()
+
+        self.assertEqual(bot.idx_routes, 2)
+        self.assertIs(bot.img_route, bot.img_routes[2])
+        self.assertEqual(
+            (bot.cmd_move_x, bot.cmd_move_y, bot.cmd_action),
+            ("right", "none", "jump"),
+        )
+        self.assertEqual(bot.get_nearest_color_code.call_count, 3)
+
+    def test_route_recovery_wraps_from_last_route_to_first(self):
+        bot = self._route_recovery_bot(route_count=3, active_index=2)
+
+        def find_action_for_active_route():
+            if bot.idx_routes == 0:
+                return ({
+                    "command": "left none none",
+                    "distance": 0,
+                }, None)
+            return (None, None)
+
+        bot.get_nearest_color_code = Mock(
+            side_effect=find_action_for_active_route
+        )
+
+        bot.update_cmd_by_route()
+
+        self.assertEqual(bot.idx_routes, 0)
+        self.assertEqual(bot.cmd_move_x, "left")
+        self.assertEqual(bot.get_nearest_color_code.call_count, 2)
+
+    def test_no_route_action_restores_route_and_releases_stale_command(self):
+        bot = self._route_recovery_bot(route_count=3, active_index=1)
+        bot.get_nearest_color_code = Mock(return_value=(None, None))
+
+        bot.update_cmd_by_route()
+
+        self.assertEqual(bot.idx_routes, 1)
+        self.assertIs(bot.img_route, bot.img_routes[1])
+        self.assertEqual(
+            (bot.cmd_move_x, bot.cmd_move_y, bot.cmd_action),
+            ("none", "none", "none"),
+        )
+        self.assertEqual(bot.get_nearest_color_code.call_count, 3)
+
     def _make_real_nametag_anchor_bot(self, frame):
         project_root = Path(__file__).resolve().parents[1]
         bot = MapleStoryAutoBot.__new__(MapleStoryAutoBot)
@@ -223,6 +310,9 @@ class AutoBotLifecycleTests(unittest.TestCase):
                     "center_offset_x": 3,
                     "vertical_gap": 0,
                     "search_tolerance": (18, 6),
+                    "bottom_min_visible_ratio": 0.5,
+                    "bottom_partial_diff_thres": 0.16,
+                    "bottom_partial_id_diff_thres": 0.18,
                 },
                 "pet": {
                     "enable": True,
@@ -259,6 +349,62 @@ class AutoBotLifecycleTests(unittest.TestCase):
         bot.pending_nametag_location = None
         return bot
 
+    def _make_appearance_bot(self, fixture_name, *, confirm_frames=1):
+        project_root = Path(__file__).resolve().parents[1]
+        frame = cv2.imread(str(
+            project_root / "tests" / "fixtures" / fixture_name
+        ))
+        self.assertIsNotNone(frame)
+        bot = MapleStoryAutoBot.__new__(MapleStoryAutoBot)
+        templates = (
+            ("liu_muning_appearance_climb", "climbing", (20, 38)),
+            ("liu_muning_appearance_stand_left", "standing", (18, 41)),
+            ("liu_muning_appearance_stand_right", "standing", (25, 39)),
+        )
+        bot.cfg = {
+            "nametag": {
+                "offset": (0, 30),
+                "appearance": {
+                    "enable": True,
+                    "diff_thres": 0.16,
+                    "climb_diff_thres": 0.12,
+                    "local_search_radius": 90,
+                    "validation_distance": 30,
+                    "climb_validation_distance": 80,
+                    "global_confirm_frames": confirm_frames,
+                    "global_confirm_radius": 12,
+                },
+            },
+            "ui_coords": {"ui_y_start": frame.shape[0]},
+        }
+        bot.img_frame_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        bot.img_frame_debug = frame.copy()
+        bot.img_nametag = cv2.imread(str(
+            project_root / "nametag" / "liu_muning.png"
+        ))
+        bot.nametag_appearance_templates = []
+        for name, pose, player_offset in templates:
+            image = cv2.imread(str(project_root / "nametag" / f"{name}.png"))
+            self.assertIsNotNone(image)
+            bot.nametag_appearance_templates.append({
+                "name": name,
+                "pose": pose,
+                "image": image,
+                "gray": cv2.cvtColor(image, cv2.COLOR_BGR2GRAY),
+                "mask": np.where(
+                    np.all(image == (0, 255, 0), axis=2), 0, 255
+                ).astype(np.uint8),
+                "player_offset": player_offset,
+            })
+        bot.is_on_ladder = False
+        bot.has_valid_nametag_location = False
+        bot.loc_nametag = (0, 0)
+        bot.pending_appearance_location = None
+        bot.pending_appearance_count = 0
+        bot.has_valid_appearance_location = False
+        bot.last_appearance_match = None
+        return bot
+
     def test_id_and_medal_detect_real_capture(self):
         project_root = Path(__file__).resolve().parents[1]
         frame = cv2.imread(str(
@@ -269,6 +415,28 @@ class AutoBotLifecycleTests(unittest.TestCase):
         ))
         self.assertIsNotNone(frame)
         bot = self._make_real_nametag_anchor_bot(frame)
+
+        location = bot.get_player_location_by_nametag()
+
+        self.assertEqual(location, (120, 41))
+        self.assertEqual(bot.loc_nametag, (98, 71))
+
+    def test_color_templates_are_normalized_before_nametag_matching(self):
+        project_root = Path(__file__).resolve().parents[1]
+        frame = cv2.imread(str(
+            project_root
+            / "tests"
+            / "fixtures"
+            / "nametag_anchors.png"
+        ))
+        self.assertIsNotNone(frame)
+        bot = self._make_real_nametag_anchor_bot(frame)
+
+        # Reproduce the UI failure where resources carrying the *_gray name
+        # were unexpectedly still BGR images after a config reload.
+        bot.img_nametag_gray = bot.img_nametag.copy()
+        bot.img_nametag_medal_gray = bot.img_nametag_medal.copy()
+        bot.img_nametag_pet_gray = bot.img_nametag_pet.copy()
 
         location = bot.get_player_location_by_nametag()
 
@@ -309,6 +477,148 @@ class AutoBotLifecycleTests(unittest.TestCase):
 
         self.assertEqual(location, (120, 41))
         self.assertEqual(bot.loc_nametag, (98, 71))
+
+    def test_bottom_clipped_medal_still_validates_id(self):
+        project_root = Path(__file__).resolve().parents[1]
+        frame = cv2.imread(str(
+            project_root
+            / "tests"
+            / "fixtures"
+            / "nametag_anchors.png"
+        ))
+        self.assertIsNotNone(frame)
+        # The ID ends at y=91 and the 14-row medal starts there. Keep exactly
+        # its upper 7 rows, reproducing the game/UI boundary on the last floor.
+        clipped = frame[:98].copy()
+        bot = self._make_real_nametag_anchor_bot(clipped)
+
+        location = bot.get_player_location_by_nametag()
+
+        self.assertEqual(location, (120, 41))
+        self.assertEqual(bot.loc_nametag, (98, 71))
+
+    def test_bottom_medal_with_less_than_half_visible_is_rejected(self):
+        project_root = Path(__file__).resolve().parents[1]
+        frame = cv2.imread(str(
+            project_root
+            / "tests"
+            / "fixtures"
+            / "nametag_anchors.png"
+        ))
+        self.assertIsNotNone(frame)
+        # Six of fourteen rows is below the configured 50% minimum.
+        clipped = frame[:97].copy()
+        bot = self._make_real_nametag_anchor_bot(clipped)
+
+        self.assertIsNone(bot.get_player_location_by_nametag())
+
+    def test_bottom_partial_medal_does_not_accept_background(self):
+        project_root = Path(__file__).resolve().parents[1]
+        frame = cv2.imread(str(
+            project_root
+            / "tests"
+            / "fixtures"
+            / "nametag_anchors.png"
+        ))
+        self.assertIsNotNone(frame)
+        no_medal = frame.copy()
+        no_medal[91:98, 57:183] = no_medal[108:115, 57:183]
+        clipped = no_medal[:98].copy()
+        bot = self._make_real_nametag_anchor_bot(clipped)
+
+        self.assertIsNone(bot.get_player_location_by_nametag())
+
+    def test_pet_and_bottom_clipped_medal_recover_covered_id(self):
+        project_root = Path(__file__).resolve().parents[1]
+        frame = cv2.imread(str(
+            project_root
+            / "tests"
+            / "fixtures"
+            / "nametag_anchors.png"
+        ))
+        self.assertIsNotNone(frame)
+        covered = frame.copy()
+        covered[69:91, 95:147] = covered[40:62, 95:147]
+        clipped = covered[:98].copy()
+        bot = self._make_real_nametag_anchor_bot(clipped)
+
+        location = bot.get_player_location_by_nametag()
+
+        self.assertEqual(location, (120, 41))
+        self.assertEqual(bot.loc_nametag, (98, 71))
+
+    def test_standing_head_left_recovers_player_location(self):
+        bot = self._make_appearance_bot("appearance_stand_left.png")
+
+        location = bot.get_player_location_by_appearance()
+
+        self.assertEqual(location, (28, 51))
+        self.assertEqual(bot.last_appearance_match["pose"], "standing")
+
+    def test_standing_head_right_recovers_player_location(self):
+        bot = self._make_appearance_bot("appearance_stand_right.png")
+
+        location = bot.get_player_location_by_appearance()
+
+        self.assertEqual(location, (70, 52))
+        self.assertEqual(bot.last_appearance_match["pose"], "standing")
+
+    def test_global_appearance_recovery_requires_consistent_frames(self):
+        bot = self._make_appearance_bot(
+            "appearance_stand_right.png", confirm_frames=2
+        )
+
+        self.assertIsNone(bot.get_player_location_by_appearance())
+        self.assertEqual(bot.pending_appearance_count, 1)
+        self.assertEqual(bot.get_player_location_by_appearance(), (70, 52))
+        self.assertEqual(bot.get_player_location_by_appearance(), (70, 52))
+
+    def test_climbing_hood_is_not_used_for_unrestricted_global_search(self):
+        bot = self._make_appearance_bot("appearance_climb.png")
+
+        self.assertIsNone(bot.get_player_location_by_appearance())
+
+    def test_climbing_hood_matches_near_expected_player(self):
+        bot = self._make_appearance_bot("appearance_climb.png")
+
+        location = bot.get_player_location_by_appearance(
+            expected_player=(55, 47),
+            allow_global=False,
+        )
+
+        self.assertEqual(location, (55, 47))
+        self.assertEqual(bot.last_appearance_match["pose"], "climbing")
+
+    def test_nametag_entry_recovers_from_head_when_all_text_is_hidden(self):
+        project_root = Path(__file__).resolve().parents[1]
+        frame = cv2.imread(str(
+            project_root
+            / "tests"
+            / "fixtures"
+            / "appearance_stand_right.png"
+        ))
+        self.assertIsNotNone(frame)
+        frame[75:, :] = 0
+        bot = self._make_real_nametag_anchor_bot(frame)
+        appearance_bot = self._make_appearance_bot(
+            "appearance_stand_right.png", confirm_frames=2
+        )
+        bot.cfg["nametag"]["appearance"] = appearance_bot.cfg[
+            "nametag"
+        ]["appearance"]
+        bot.nametag_appearance_templates = (
+            appearance_bot.nametag_appearance_templates
+        )
+        bot.pending_appearance_location = None
+        bot.pending_appearance_count = 0
+        bot.has_valid_appearance_location = False
+        bot.last_appearance_match = None
+        bot.loc_appearance_player = (0, 0)
+        bot.is_on_ladder = False
+
+        self.assertIsNone(bot.get_player_location_by_nametag())
+        self.assertEqual(bot.get_player_location_by_nametag(), (70, 52))
+        self.assertEqual(bot.last_appearance_match["pose"], "standing")
 
     def test_nametag_first_miss_does_not_return_fake_player_location(self):
         bot = MapleStoryAutoBot.__new__(MapleStoryAutoBot)
@@ -648,6 +958,38 @@ class AutoBotLifecycleTests(unittest.TestCase):
                 and abs(detected_y - expected_y) <= 2
                 for expected_x, expected_y in ((10, 10), (80, 50))
             )
+        )
+
+    def test_normal_debug_pipeline_reuses_debug_matcher_in_combat_roi(self):
+        bot = MapleStoryAutoBot.__new__(MapleStoryAutoBot)
+        bot.cfg = {
+            "bot": {"mode": "normal"},
+            "monster_detect": {"mode": "debug_pipeline"},
+        }
+        expected = [{"name": "slime"}]
+        bot.get_debug_monsters_in_range = Mock(return_value=expected)
+
+        detections = bot.get_monsters_in_range(
+            (100, 200), (500, 350), diff_thres=0.31
+        )
+
+        self.assertIs(detections, expected)
+        bot.get_debug_monsters_in_range.assert_called_once_with(
+            (100, 200), (500, 350), score_thres=0.31
+        )
+
+    def test_normal_debug_pipeline_uses_debug_threshold_by_default(self):
+        bot = MapleStoryAutoBot.__new__(MapleStoryAutoBot)
+        bot.cfg = {
+            "bot": {"mode": "normal"},
+            "monster_detect": {"mode": "debug_pipeline"},
+        }
+        bot.get_debug_monsters_in_range = Mock(return_value=[])
+
+        bot.get_monsters_in_range((10, 20), (80, 60))
+
+        bot.get_debug_monsters_in_range.assert_called_once_with(
+            (10, 20), (80, 60), score_thres=None
         )
 
     def test_normal_matching_bounds_candidates_before_nms(self):

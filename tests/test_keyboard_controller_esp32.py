@@ -1,5 +1,5 @@
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, call, patch
 
 from src.input import KeyBoardController as controller_module
 from src.input.Esp32HidClient import Esp32HidTapUncertainError
@@ -9,11 +9,14 @@ class KeyboardControllerEsp32RoutingTests(unittest.TestCase):
     def setUp(self):
         self.previous_client = controller_module._input_client
         self.previous_allowed = controller_module._input_allowed.is_set()
+        self.previous_recovery_until = controller_module._input_recovery_until
         controller_module._input_client = Mock()
         controller_module._input_allowed.clear()
+        controller_module.clear_input_recovery()
 
     def tearDown(self):
         controller_module._input_client = self.previous_client
+        controller_module._input_recovery_until = self.previous_recovery_until
         if self.previous_allowed:
             controller_module._input_allowed.set()
         else:
@@ -71,6 +74,7 @@ class KeyboardControllerEsp32RoutingTests(unittest.TestCase):
         )
         controller.cmd_left_right = "left"
         controller.cmd_up_down = "up"
+        controller.cmd_action = "none"
         controller.cmd_left_right_last = "none"
         controller.cmd_up_down_last = "none"
 
@@ -79,6 +83,332 @@ class KeyboardControllerEsp32RoutingTests(unittest.TestCase):
         controller_module._input_client.set_state.assert_called_once_with(
             ["left", "up"]
         )
+        self.assertEqual(controller.cached_facing, "left")
+
+    @staticmethod
+    def make_directional_controller(facing=None):
+        controller = controller_module.KeyBoardController.__new__(
+            controller_module.KeyBoardController
+        )
+        controller.command_lock = controller_module.threading.RLock()
+        controller.cached_facing = facing
+        controller.cmd_left_right = "none"
+        controller.cmd_up_down = "none"
+        controller.cmd_action = "attack"
+        controller.cmd_left_right_last = ""
+        controller.cmd_up_down_last = ""
+        controller.character_turn_delay = 0.08
+        controller.attack_recovery_delay = 0.90
+        controller.attack_key = "control"
+        controller.t_last_skill = 0.0
+        return controller
+
+    def test_directional_attack_turns_then_attacks_as_one_transaction(self):
+        controller_module._input_allowed.set()
+        controller = self.make_directional_controller(facing="right")
+
+        calls_seen_at_turn_delay = []
+
+        def record_turn_delay(duration):
+            calls_seen_at_turn_delay.extend(
+                controller_module._input_client.method_calls
+            )
+            self.assertEqual(duration, 0.08)
+
+        with patch.object(
+            controller_module.time,
+            "sleep",
+            side_effect=record_turn_delay,
+        ) as sleep:
+            self.assertTrue(controller.perform_directional_attack("left"))
+
+        self.assertEqual(
+            controller_module._input_client.method_calls,
+            [
+                call.set_state(["left"]),
+                call.set_state([]),
+                call.tap("control", 50),
+            ],
+        )
+        sleep.assert_called_once_with(0.08)
+        self.assertEqual(
+            calls_seen_at_turn_delay,
+            [call.set_state(["left"])],
+        )
+        self.assertEqual(controller.cached_facing, "left")
+        self.assertGreater(controller_module.input_recovery_remaining(), 0.80)
+
+    def test_same_facing_attack_does_not_send_direction_key(self):
+        controller_module._input_allowed.set()
+        controller = self.make_directional_controller(facing="left")
+
+        with patch.object(controller_module.time, "sleep") as sleep:
+            self.assertTrue(controller.perform_directional_attack("left"))
+
+        self.assertEqual(
+            controller_module._input_client.method_calls,
+            [call.set_state([]), call.tap("control", 50)],
+        )
+        sleep.assert_not_called()
+
+    def test_other_input_cannot_enter_directional_attack_transaction(self):
+        controller_module._input_allowed.set()
+        controller = self.make_directional_controller(facing="right")
+        turn_started = controller_module.threading.Event()
+        finish_turn = controller_module.threading.Event()
+        other_started = controller_module.threading.Event()
+        results = {}
+
+        def hold_turn(_duration):
+            turn_started.set()
+            self.assertTrue(finish_turn.wait(timeout=1.0))
+
+        def attack():
+            results["attack"] = controller.perform_directional_attack("left")
+
+        def other_input():
+            other_started.set()
+            results["other"] = controller_module.press_key("space")
+
+        with patch.object(controller_module.time, "sleep", side_effect=hold_turn):
+            attack_thread = controller_module.threading.Thread(target=attack)
+            attack_thread.start()
+            self.assertTrue(turn_started.wait(timeout=1.0))
+
+            other_thread = controller_module.threading.Thread(target=other_input)
+            other_thread.start()
+            self.assertTrue(other_started.wait(timeout=1.0))
+            self.assertTrue(other_thread.is_alive())
+
+            finish_turn.set()
+            attack_thread.join(timeout=1.0)
+            other_thread.join(timeout=1.0)
+
+        self.assertFalse(attack_thread.is_alive())
+        self.assertFalse(other_thread.is_alive())
+        self.assertTrue(results["attack"])
+        self.assertFalse(results["other"])
+        self.assertEqual(
+            controller_module._input_client.method_calls,
+            [
+                call.set_state(["left"]),
+                call.set_state([]),
+                call.tap("control", 50),
+            ],
+        )
+
+    def test_pause_during_same_facing_stop_prevents_late_attack(self):
+        controller_module._input_allowed.set()
+        controller = self.make_directional_controller(facing="left")
+
+        def pause_during_stop(_keys):
+            controller_module._input_allowed.clear()
+            return True
+
+        controller_module._input_client.set_state.side_effect = pause_during_stop
+
+        self.assertFalse(controller.perform_directional_attack("left"))
+
+        controller_module._input_client.set_state.assert_called_once_with([])
+        controller_module._input_client.tap.assert_not_called()
+        self.assertIsNone(controller.cached_facing)
+        self.assertEqual(controller_module.input_recovery_remaining(), 0.0)
+
+    def test_transport_failure_invalidates_facing_cache(self):
+        controller_module._input_allowed.set()
+        controller = self.make_directional_controller(facing="left")
+        controller_module._input_client.set_state.side_effect = RuntimeError(
+            "serial disconnected"
+        )
+
+        self.assertFalse(controller.perform_directional_attack("left"))
+
+        self.assertIsNone(controller.cached_facing)
+        controller_module._input_client.tap.assert_not_called()
+        self.assertEqual(controller_module.input_recovery_remaining(), 0.0)
+
+    def test_attack_recovery_blocks_every_regular_hid_command(self):
+        controller_module._input_allowed.set()
+        controller_module._set_input_recovery(0.90)
+
+        self.assertFalse(controller_module.key_down("left"))
+        self.assertFalse(controller_module.key_up("left"))
+        self.assertFalse(controller_module.set_key_state(["right"]))
+        self.assertFalse(controller_module.press_key("space"))
+        self.assertEqual(controller_module._input_client.method_calls, [])
+
+    def test_safety_release_bypasses_but_preserves_attack_recovery(self):
+        controller_module._input_allowed.set()
+        controller_module._set_input_recovery(0.90)
+
+        self.assertTrue(controller_module.release_all_keys())
+
+        controller_module._input_client.release_all.assert_called_once_with()
+        self.assertGreater(controller_module.input_recovery_remaining(), 0.80)
+        self.assertFalse(controller_module.press_key("space"))
+
+    def test_stale_client_close_does_not_clear_new_session_recovery(self):
+        controller_module._input_allowed.set()
+        controller_module._set_input_recovery(0.90)
+        active_client = controller_module._input_client
+        stale_client = Mock()
+
+        controller_module.close_esp32_input(stale_client)
+
+        self.assertIs(controller_module._input_client, active_client)
+        self.assertTrue(controller_module._input_allowed.is_set())
+        self.assertGreater(controller_module.input_recovery_remaining(), 0.80)
+        stale_client.close.assert_not_called()
+
+    def test_uncertain_directional_attack_still_starts_full_recovery(self):
+        controller_module._input_allowed.set()
+        controller = self.make_directional_controller(facing="left")
+        controller_module._input_client.tap.side_effect = (
+            Esp32HidTapUncertainError("response lost")
+        )
+
+        self.assertTrue(controller.perform_directional_attack("left"))
+
+        self.assertGreater(controller_module.input_recovery_remaining(), 0.80)
+        self.assertFalse(controller_module.press_key("space"))
+
+    @staticmethod
+    def make_stationary_jump_controller():
+        controller = controller_module.KeyBoardController.__new__(
+            controller_module.KeyBoardController
+        )
+        controller.command_lock = controller_module.threading.RLock()
+        controller.cached_facing = "right"
+        controller.cmd_left_right_last = "right"
+        controller.cmd_up_down_last = "none"
+        controller.jump_up_settle_delay = 0.15
+        controller.cfg = {"key": {"jump": "space"}}
+        return controller
+
+    def test_stationary_jump_stops_and_settles_before_tap(self):
+        controller_module._input_allowed.set()
+        controller = self.make_stationary_jump_controller()
+        calls_seen_while_settling = []
+
+        def record_settle_delay(duration):
+            self.assertEqual(duration, 0.15)
+            calls_seen_while_settling.extend(
+                controller_module._input_client.method_calls
+            )
+
+        with patch.object(
+            controller_module.time,
+            "sleep",
+            side_effect=record_settle_delay,
+        ) as sleep:
+            self.assertTrue(controller.perform_stationary_jump())
+
+        sleep.assert_called_once_with(0.15)
+        self.assertEqual(
+            calls_seen_while_settling,
+            [call.set_state([])],
+        )
+        self.assertEqual(
+            controller_module._input_client.method_calls,
+            [call.set_state([]), call.tap("space", 50)],
+        )
+        # Releasing movement does not change the in-game facing direction.
+        self.assertEqual(controller.cached_facing, "right")
+
+    def test_pause_while_stationary_jump_settles_prevents_late_tap(self):
+        controller_module._input_allowed.set()
+        controller = self.make_stationary_jump_controller()
+
+        def pause_during_settle(_duration):
+            controller_module._input_allowed.clear()
+
+        with patch.object(
+            controller_module.time,
+            "sleep",
+            side_effect=pause_during_settle,
+        ):
+            self.assertFalse(controller.perform_stationary_jump())
+
+        controller_module._input_client.set_state.assert_called_once_with([])
+        controller_module._input_client.tap.assert_not_called()
+        self.assertIsNone(controller.cached_facing)
+
+    def test_other_input_cannot_enter_stationary_jump_settle(self):
+        controller_module._input_allowed.set()
+        controller = self.make_stationary_jump_controller()
+        settle_started = controller_module.threading.Event()
+        finish_settle = controller_module.threading.Event()
+        other_started = controller_module.threading.Event()
+        results = {}
+
+        def hold_settle(_duration):
+            settle_started.set()
+            self.assertTrue(finish_settle.wait(timeout=1.0))
+
+        def jump():
+            results["jump"] = controller.perform_stationary_jump()
+
+        def other_input():
+            other_started.set()
+            results["other"] = controller_module.press_key("q")
+
+        with patch.object(
+            controller_module.time,
+            "sleep",
+            side_effect=hold_settle,
+        ):
+            jump_thread = controller_module.threading.Thread(target=jump)
+            jump_thread.start()
+            self.assertTrue(settle_started.wait(timeout=1.0))
+
+            other_thread = controller_module.threading.Thread(
+                target=other_input
+            )
+            other_thread.start()
+            self.assertTrue(other_started.wait(timeout=1.0))
+            self.assertTrue(other_thread.is_alive())
+
+            finish_settle.set()
+            jump_thread.join(timeout=1.0)
+            other_thread.join(timeout=1.0)
+
+        self.assertFalse(jump_thread.is_alive())
+        self.assertFalse(other_thread.is_alive())
+        self.assertTrue(results["jump"])
+        self.assertTrue(results["other"])
+        self.assertEqual(
+            controller_module._input_client.method_calls,
+            [
+                call.set_state([]),
+                call.tap("space", 50),
+                call.tap("q", 50),
+            ],
+        )
+
+    def test_stationary_jump_stop_failure_does_not_wait_or_tap(self):
+        controller_module._input_allowed.set()
+        controller = self.make_stationary_jump_controller()
+        controller_module._input_client.set_state.side_effect = RuntimeError(
+            "serial disconnected"
+        )
+
+        with patch.object(controller_module.time, "sleep") as sleep:
+            self.assertFalse(controller.perform_stationary_jump())
+
+        sleep.assert_not_called()
+        controller_module._input_client.tap.assert_not_called()
+        self.assertIsNone(controller.cached_facing)
+
+    def test_only_directionless_up_jump_uses_settle_transaction(self):
+        predicate = controller_module.KeyBoardController \
+            .is_stationary_jump_command
+
+        self.assertTrue(predicate("none", "none", "jump"))
+        self.assertTrue(predicate("stop", "stop", "jump"))
+        self.assertFalse(predicate("left", "none", "jump"))
+        self.assertFalse(predicate("right", "none", "jump"))
+        self.assertFalse(predicate("none", "down", "jump"))
+        self.assertFalse(predicate("none", "none", "teleport"))
 
     def test_repeated_source_action_is_edge_triggered(self):
         controller = controller_module.KeyBoardController.__new__(

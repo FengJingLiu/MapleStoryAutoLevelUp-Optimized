@@ -4,6 +4,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
+import cv2
 import numpy as np
 
 from src.engine.MapleStoryAutoLevelUp import MapleStoryAutoBot
@@ -134,6 +135,85 @@ class YoloMonsterDetectorTests(unittest.TestCase):
 
 
 class YoloMonsterEngineIntegrationTests(unittest.TestCase):
+    @staticmethod
+    def _make_pet_filter_bot(frame, pet_template):
+        bot = MapleStoryAutoBot.__new__(MapleStoryAutoBot)
+        bot.cfg = {
+            "nametag": {
+                "enable": True,
+                "pet": {
+                    "enable": True,
+                    "filter_yolo_mob": True,
+                    "yolo_name_diff_thres": 0.10,
+                    "yolo_name_vertical_gap": 3,
+                    "yolo_name_search_tolerance": [14, 8],
+                    "yolo_name_max_gap": 12,
+                },
+            },
+            "bot": {"mode": "normal"},
+        }
+        bot.img_frame = frame
+        bot.img_frame_gray = frame[:, :, 0]
+        bot.img_frame_debug = frame.copy()
+        bot.img_nametag_pet = cv2.cvtColor(
+            pet_template, cv2.COLOR_GRAY2BGR
+        )
+        bot.img_nametag_pet_gray = pet_template
+        return bot
+
+    def test_pet_name_directly_below_yolo_box_filters_that_mob(self):
+        frame = np.zeros((120, 180, 3), dtype=np.uint8)
+        pet_name = np.full((10, 42), 180, dtype=np.uint8)
+        pet_name[2:8, 5:37] = 240
+        # Detection center x=90; centered pet name starts at x=69.
+        frame[73:83, 69:111] = pet_name[:, :, None]
+        bot = self._make_pet_filter_bot(frame, pet_name)
+        pet_detection = {
+            "name": "mob",
+            "position": (70, 30),
+            "size": (40, 40),
+            "confidence": 0.8,
+            "score": 0.2,
+        }
+
+        filtered = bot.filter_pet_yolo_detections([pet_detection])
+
+        self.assertEqual(filtered, [])
+
+    def test_same_pet_name_elsewhere_does_not_filter_real_mob(self):
+        frame = np.zeros((120, 180, 3), dtype=np.uint8)
+        pet_name = np.full((10, 42), 180, dtype=np.uint8)
+        pet_name[2:8, 5:37] = 240
+        frame[90:100, 10:52] = pet_name[:, :, None]
+        bot = self._make_pet_filter_bot(frame, pet_name)
+        real_mob = {
+            "name": "mob",
+            "position": (70, 30),
+            "size": (40, 40),
+            "confidence": 0.8,
+            "score": 0.2,
+        }
+
+        filtered = bot.filter_pet_yolo_detections([real_mob])
+
+        self.assertEqual(filtered, [real_mob])
+
+    def test_pet_filter_is_inactive_without_a_loaded_pet_name(self):
+        frame = np.zeros((120, 180, 3), dtype=np.uint8)
+        bot = self._make_pet_filter_bot(
+            frame, np.full((10, 42), 180, dtype=np.uint8)
+        )
+        bot.img_nametag_pet = None
+        mob = {
+            "name": "mob",
+            "position": (70, 30),
+            "size": (40, 40),
+            "confidence": 0.8,
+            "score": 0.2,
+        }
+
+        self.assertEqual(bot.filter_pet_yolo_detections([mob]), [mob])
+
     def test_normal_detection_uses_full_camera_and_attack_roi(self):
         bot = MapleStoryAutoBot.__new__(MapleStoryAutoBot)
         bot.cfg = {

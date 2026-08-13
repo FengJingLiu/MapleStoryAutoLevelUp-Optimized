@@ -59,7 +59,8 @@ directional_attack:
   range_x: 350               # ↔️ Horizontal attack range (in pixels)
   range_y: 70                # ↕️ Vertical attack range (in pixels)
   cooldown: 0.9              # ⏱️ Time between attacks (in seconds)
-  character_turn_delay: 0.02 # 🔄 Delay after turning before attacking (in seconds)
+  character_turn_delay: 0.08 # 🔄 Hold a new facing direction before attacking
+  attack_recovery_delay: 0.90 # 🏹 Block every other input after attack TAP completes
 
 aoe_skill:
   # 💥 AoE Skill
@@ -146,6 +147,9 @@ nametag:
     center_offset_x: 3          # Medal center relative to ID center
     vertical_gap: 0             # Medal top relative to the bottom of the ID
     search_tolerance: [18, 6]   # Allowed medal displacement [x, y]
+    bottom_min_visible_ratio: 0.5 # At the camera bottom, require the medal's top half
+    bottom_partial_diff_thres: 0.16 # SQDIFF threshold for that visible top half
+    bottom_partial_id_diff_thres: 0.18 # Require a stronger ID with a clipped medal
 
   # Optional third anchor for frames where the ID is completely covered.
   # The pet name only opens a local medal search; pet coordinates are never
@@ -156,9 +160,42 @@ nametag:
     diff_thres: 0.16            # Pet-name SQDIFF threshold
     medal_offset: [37, 17]      # Medal top-left relative to pet-name top-left
     medal_search_tolerance: [28, 10]
+    # When YOLO labels the pet as a mob, verify the configured pet name in the
+    # narrow area immediately below that box and remove only that detection.
+    # This avoids a broad player-area mask that could hide a real nearby mob.
+    filter_yolo_mob: True
+    yolo_name_diff_thres: 0.10   # Stricter than identity recovery matching
+    yolo_name_vertical_gap: 3   # Expected pixels between pet box and pet name
+    yolo_name_search_tolerance: [14, 8] # Local [x, y] tolerance around the box
+    yolo_name_max_gap: 12        # Maximum actual gap from box bottom to name
+
+  # Optional fourth anchor: the character's tiger hood/head. Standing poses
+  # can recover when all text is covered; the hood-only climbing pose is used
+  # only near an already known ladder position because it is less distinctive.
+  appearance:
+    enable: auto                 # Auto-load only templates for nametag.name
+    diff_thres: 0.16            # Standing-head SQDIFF threshold
+    climb_diff_thres: 0.12      # Stricter hood-only threshold
+    local_search_radius: 90     # Search radius around an ID/previous position
+    validation_distance: 30     # Maximum head-vs-ID player-coordinate error
+    climb_validation_distance: 80 # Allow camera scrolling while on a rope
+    global_confirm_frames: 2    # Consecutive frames before head-only recovery
+    global_confirm_radius: 12   # Allowed movement between confirmation frames
+    templates:
+      - suffix: appearance_climb
+        pose: climbing
+        player_offset: [20, 38]
+      - suffix: appearance_stand_left
+        pose: standing
+        player_offset: [18, 41]
+      - suffix: appearance_stand_right
+        pose: standing
+        player_offset: [25, 39]
 
 debug:
   # Vision-only mode: run the configured detector and never send input.
+  # The settings below configure the legacy edge + color matcher, which is also
+  # shared by normal debug_pipeline mode when the template backend is selected.
   monster_diff_thres: 0.30 # Edge correlation: higher is stricter
   monster_diff_thres_by_monster:
     snail: 0.30
@@ -193,12 +230,13 @@ monster_detect:
   # Detection mode determines the method used to find monsters.
   # Settings below are retained only for backend: "template".
   # Modes ranked from most to least computational cost:
+  #   - "debug_pipeline" (recommended; same edge + color matcher as debug)
   #   - "color"         (most accurate but slowest)
   #   - "grayscale"     (slow)
   #   - "contour_only"  (fast, contour-based, a good balance)
   #   - "template_free" (lightest and fastest, but likely to have many wrong detection)
   # 💡 Feel free to test different modes to find what works best for your setup.
-  mode: "contour_only"         # 🧠 Options: "color" "grayscale" "contour_only" "template_free"
+  mode: "debug_pipeline"      # Options: "debug_pipeline" "color" "grayscale" "contour_only" "template_free"
   diff_thres: 0.8              # 📏 SQDIFF threshold, [0.0 ~ 1.0] Lower = stricter match
   # Per-class SQDIFF overrides shared by normal mode and debug color
   # verification. Small Wisdom Forest sprites need stricter color matches.
@@ -247,6 +285,7 @@ route:
   # The character follows a pre-defined route image (route*.png) using color-coded commands.
   search_range: 10            # 🔍 Radius (in pixels) to search for the nearest route color around the player
   jump_down_cooldown: 3.0     # ⏱️ Cooldown (in seconds) for 'jump down' action to prevent continuous descent
+  jump_up_settle_delay: 0.6  # 🛑 Release movement and settle before a straight-up jump
 
   # 🎨 Color-coded(RGB) actions for route navigation
   # "<left-right command, up-down command, action>"

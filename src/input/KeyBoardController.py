@@ -28,6 +28,34 @@ _input_client_lock = threading.RLock()
 _input_error_lock = threading.Lock()
 _last_input_error_time = 0.0
 _input_allowed = threading.Event()
+_input_transaction_lock = threading.RLock()
+_input_recovery_lock = threading.Lock()
+_input_recovery_until = 0.0
+
+
+def input_recovery_remaining():
+    """Return the remaining global HID lockout after an attack."""
+    with _input_recovery_lock:
+        return max(0.0, _input_recovery_until - time.monotonic())
+
+
+def _set_input_recovery(duration, started_at=None):
+    """Block every non-safety HID command until the attack recovery ends."""
+    global _input_recovery_until
+    duration = max(0.0, float(duration))
+    started_at = time.monotonic() if started_at is None else float(started_at)
+    with _input_recovery_lock:
+        _input_recovery_until = max(
+            _input_recovery_until,
+            started_at + duration,
+        )
+
+
+def clear_input_recovery():
+    """Clear the attack lockout when replacing or closing the controller."""
+    global _input_recovery_until
+    with _input_recovery_lock:
+        _input_recovery_until = 0.0
 
 
 def _log_input_error(message):
@@ -48,86 +76,118 @@ def _get_input_client():
 def configure_esp32_input(cfg):
     """Replace the process-wide keyboard output with one ESP32 connection."""
     global _input_client
+    # Signal an in-flight turn transaction to abort at its next permission
+    # check, then wait for it to leave the shared HID transaction.
     _input_allowed.clear()
-    with _input_client_lock:
-        previous, _input_client = _input_client, None
-    if previous is not None:
-        previous.close()
+    with _input_transaction_lock:
+        clear_input_recovery()
+        with _input_client_lock:
+            previous, _input_client = _input_client, None
+        if previous is not None:
+            previous.close()
 
-    client = Esp32HidClient.from_config(cfg)
-    with _input_client_lock:
-        _input_client = client
-    return client
+        client = Esp32HidClient.from_config(cfg)
+        with _input_client_lock:
+            _input_client = client
+        return client
 
 
 def close_esp32_input(client=None):
     """Close the active client if it is the one owned by this controller."""
     global _input_client
-    _input_allowed.clear()
-    with _input_client_lock:
-        if client is not None and _input_client is not client:
-            return
-        closing, _input_client = _input_client, None
-    if closing is not None:
-        closing.close()
+    with _input_transaction_lock:
+        with _input_client_lock:
+            # A stale controller may finish after a replacement is already
+            # active. It must not disable the new session or clear its gate.
+            if client is not None and _input_client is not client:
+                return
+            closing, _input_client = _input_client, None
+        _input_allowed.clear()
+        clear_input_recovery()
+        if closing is not None:
+            closing.close()
 
 
-def _call_input(method, *args):
+def _invoke_input(method, *args):
+    """Call the ESP32 and distinguish a valid no-op from a send failure."""
     client = _get_input_client()
     if client is None:
         _log_input_error("[ESP32 HID] Keyboard client is not connected")
-        return False
+        return False, False
     try:
-        return getattr(client, method)(*args)
+        return True, getattr(client, method)(*args)
     except Esp32HidTapUncertainError as exc:
         # The TAP may have executed and only its response was lost. Treat it as
         # consumed so cooldown/action code never replays an uncertain input.
         _log_input_error(
             f"[ESP32 HID] {method} result is uncertain; not retrying: {exc}"
         )
-        return True
+        return True, True
     except (OSError, RuntimeError, ValueError, ConnectionError) as exc:
         _log_input_error(f"[ESP32 HID] {method} failed: {exc}")
-        return False
+        return False, False
+
+
+def _call_input(method, *args):
+    success, result = _invoke_input(method, *args)
+    return result if success else False
+
+
+def _regular_input_allowed():
+    return _input_allowed.is_set() and input_recovery_remaining() <= 0.0
 
 def key_down(key):
     '''
     Press key down
     '''
-    if not key or not _input_allowed.is_set():
-        return False
-    return _call_input("key_down", key)
+    with _input_transaction_lock:
+        if not key or not _regular_input_allowed():
+            return False
+        return _call_input("key_down", key)
 
 def key_up(key):
     '''
     Release key
     '''
-    if not key or not _input_allowed.is_set():
-        return False
-    return _call_input("key_up", key)
+    with _input_transaction_lock:
+        if not key or not _regular_input_allowed():
+            return False
+        return _call_input("key_up", key)
 
 def press_key(key, duration=0.05):
     '''
     Simulates a key press for a specified duration
     '''
-    if isinstance(key, str) and key.strip() and _input_allowed.is_set():
-        duration_ms = max(1, int(round(float(duration) * 1000)))
-        return _call_input("tap", key.strip(), duration_ms)
-    return False
+    with _input_transaction_lock:
+        if (
+            isinstance(key, str)
+            and key.strip()
+            and _regular_input_allowed()
+        ):
+            duration_ms = max(1, int(round(float(duration) * 1000)))
+            return _call_input("tap", key.strip(), duration_ms)
+        return False
 
 
 def release_all_keys():
     """Release every key in one atomic firmware command."""
-    if _get_input_client() is None:
-        return False
-    return _call_input("release_all")
+    # RELEASE_ALL bypasses the recovery deadline, but is serialized with a
+    # turn/attack transaction. Clearing _input_allowed first (pause/capture
+    # loss) makes a transaction abort after its short turn delay.
+    with _input_transaction_lock:
+        if _get_input_client() is None:
+            return False
+        return _call_input("release_all")
 
 
 def set_key_state(keys):
     """Atomically replace the persistent key state on the ESP32."""
-    if not _input_allowed.is_set():
-        return False
-    return _call_input("set_state", keys)
+    with _input_transaction_lock:
+        if not _regular_input_allowed():
+            return False
+        success, _ = _invoke_input("set_state", keys)
+        # An unchanged state is a successful no-op, not a transport failure.
+        return success
 
 
 def validate_config_keys(cfg):
@@ -157,6 +217,8 @@ class KeyBoardController():
         self.cmd_up_down_last = ""
         self.cmd_left_right_last = ""
         self._last_source_action = "none"
+        self.command_lock = threading.RLock()
+        self.cached_facing = None
         self.window_title = cfg["game_window"]["title"]
         self.fps = 0 # Frame per seconds
         # Timer
@@ -176,6 +238,17 @@ class KeyBoardController():
         # Parameters
         self.debounce_interval = self.cfg["system"]["key_debounce_interval"]
         self.fps_limit = self.cfg["system"]["fps_limit_keyboard_controller"]
+        directional_cfg = self.cfg.get("directional_attack", {})
+        self.character_turn_delay = max(
+            0.0, float(directional_cfg.get("character_turn_delay", 0.08))
+        )
+        self.attack_recovery_delay = max(
+            0.0, float(directional_cfg.get("attack_recovery_delay", 0.90))
+        )
+        self.jump_up_settle_delay = max(
+            0.0,
+            float(cfg.get("route", {}).get("jump_up_settle_delay", 0.15)),
+        )
 
         # use 'ctrl', 'alt' for mac, because it's hard to get around
         # macOS's security settings
@@ -271,15 +344,45 @@ class KeyBoardController():
         Set keyboard command
         '''
         cmd_left_right, cmd_up_down, cmd_action = new_command.split()
-        self.cmd_left_right = cmd_left_right
-        self.cmd_up_down = cmd_up_down
-        # Actions are edge-triggered. Movement persists as state, but a route
-        # pixel that remains visible must not generate 15-30 TAPs per second.
-        if cmd_action != self._last_source_action:
-            self.cmd_action = cmd_action
-        elif cmd_action == "none":
-            self.cmd_action = "none"
-        self._last_source_action = cmd_action
+        lock = self._ensure_command_lock()
+        with lock:
+            # Direction, vertical movement, and action form one immutable
+            # snapshot for the worker. Never pair a new attack with the prior
+            # frame's direction while an ESP32 request is in flight.
+            self.cmd_left_right = cmd_left_right
+            self.cmd_up_down = cmd_up_down
+            # Actions are edge-triggered. Movement persists as state, but a
+            # route pixel that remains visible must not generate 30 TAPs/s.
+            if cmd_action != self._last_source_action:
+                self.cmd_action = cmd_action
+            elif cmd_action == "none":
+                self.cmd_action = "none"
+            self._last_source_action = cmd_action
+
+    def _ensure_command_lock(self):
+        """Keep lightweight __new__-based tests backward compatible."""
+        lock = getattr(self, "command_lock", None)
+        if lock is None:
+            lock = threading.RLock()
+            self.command_lock = lock
+        return lock
+
+    def _command_snapshot(self):
+        with self._ensure_command_lock():
+            return (
+                self.cmd_left_right,
+                self.cmd_up_down,
+                self.cmd_action,
+            )
+
+    def _consume_action(self, action):
+        with self._ensure_command_lock():
+            if self.cmd_action == action:
+                self.cmd_action = "none"
+
+    def is_attack_recovering(self):
+        """Return whether the global post-attack input gate is active."""
+        return input_recovery_remaining() > 0.0
 
     def is_game_window_active(self):
         '''
@@ -319,29 +422,162 @@ class KeyBoardController():
         Release all key
         '''
         release_all_keys()
+        self._invalidate_facing_cache()
 
-    def update_movement_state(self):
+    def _invalidate_facing_cache(self):
+        """Forget direction after a safety event or uncertain transport state."""
+        with self._ensure_command_lock():
+            # The game keeps its facing after an ordinary direction release,
+            # but a safety release/pause permits external input, so the cached
+            # facing can no longer be trusted.
+            self.cached_facing = None
+            self.cmd_left_right_last = ""
+            self.cmd_up_down_last = ""
+
+    def update_movement_state(self, cmd_left_right=None, cmd_up_down=None):
         """Send both movement axes as one deduplicated HID report."""
+        if cmd_left_right is None or cmd_up_down is None:
+            # Read the two movement axes atomically without requiring action
+            # state; callers that only drive movement may not initialize it.
+            with self._ensure_command_lock():
+                if cmd_left_right is None:
+                    cmd_left_right = self.cmd_left_right
+                if cmd_up_down is None:
+                    cmd_up_down = self.cmd_up_down
+
         keys = []
-        if self.cmd_left_right in {"left", "right"}:
-            keys.append(self.cmd_left_right)
-        elif self.cmd_left_right not in {"stop", "none"}:
+        if cmd_left_right in {"left", "right"}:
+            keys.append(cmd_left_right)
+        elif cmd_left_right not in {"stop", "none"}:
             logger.error(
                 "[KeyBoardController] Unsupported left-right command: "
-                f"{self.cmd_left_right}"
+                f"{cmd_left_right}"
             )
 
-        if self.cmd_up_down in {"up", "down"}:
-            keys.append(self.cmd_up_down)
-        elif self.cmd_up_down not in {"stop", "none"}:
+        if cmd_up_down in {"up", "down"}:
+            keys.append(cmd_up_down)
+        elif cmd_up_down not in {"stop", "none"}:
             logger.error(
                 "[KeyBoardController] Unsupported up-down command: "
-                f"{self.cmd_up_down}"
+                f"{cmd_up_down}"
             )
 
-        set_key_state(keys)
-        self.cmd_left_right_last = self.cmd_left_right
-        self.cmd_up_down_last = self.cmd_up_down
+        if not set_key_state(keys):
+            return False
+        with self._ensure_command_lock():
+            self.cmd_left_right_last = cmd_left_right
+            self.cmd_up_down_last = cmd_up_down
+            if cmd_left_right in {"left", "right"}:
+                self.cached_facing = cmd_left_right
+        return True
+
+    def perform_directional_attack(self, direction):
+        """Turn, release movement, and attack as one indivisible HID action."""
+        if direction not in {"left", "right"}:
+            return False
+
+        with _input_transaction_lock:
+            if not _regular_input_allowed():
+                return False
+
+            with self._ensure_command_lock():
+                needs_turn = self.cached_facing != direction
+
+            if needs_turn:
+                success, _ = _invoke_input("set_state", [direction])
+                if not success:
+                    self._invalidate_facing_cache()
+                    return False
+                with self._ensure_command_lock():
+                    self.cached_facing = direction
+                    self.cmd_left_right_last = direction
+                    self.cmd_up_down_last = "none"
+
+                if self.character_turn_delay > 0:
+                    time.sleep(self.character_turn_delay)
+                # Pause/capture loss can occur while the direction report is
+                # waiting for its serial acknowledgement or turn delay.
+                if not _input_allowed.is_set():
+                    self._invalidate_facing_cache()
+                    return False
+
+            # Stop movement before firing and throughout the recovery. Releasing
+            # a direction does not change the cached in-game facing.
+            success, _ = _invoke_input("set_state", [])
+            if not success:
+                self._invalidate_facing_cache()
+                return False
+            with self._ensure_command_lock():
+                self.cmd_left_right_last = "none"
+                self.cmd_up_down_last = "none"
+
+            # The state request above can block on serial I/O. Recheck after
+            # it returns so an F1 pause or capture-loss event cannot be
+            # followed by a late attack TAP, including the same-facing path.
+            if not _regular_input_allowed():
+                self._invalidate_facing_cache()
+                return False
+
+            duration_ms = 50
+            success, _ = _invoke_input(
+                "tap", self.attack_key, duration_ms
+            )
+            if not success:
+                self._invalidate_facing_cache()
+                return False
+
+            # Begin recovery after the TAP call returns. Besides guaranteeing
+            # the full configured animation margin after the key release, this
+            # is conservative when an ACK is delayed or the TAP result is
+            # uncertain: no command can leak through immediately after timeout.
+            _set_input_recovery(
+                self.attack_recovery_delay,
+            )
+            self.t_last_skill = time.time()
+            return True
+
+    @staticmethod
+    def is_stationary_jump_command(cmd_left_right, cmd_up_down, cmd_action):
+        """Return whether a route command requests a straight-up jump."""
+        return (
+            cmd_action == "jump"
+            and cmd_left_right in {"none", "stop"}
+            and cmd_up_down in {"none", "stop"}
+        )
+
+    def perform_stationary_jump(self):
+        """Release movement, wait for inertia to settle, then jump atomically."""
+        with _input_transaction_lock:
+            if not _regular_input_allowed():
+                return False
+
+            # An empty state releases horizontal and vertical movement. A
+            # false client result is an acknowledged deduplicated no-op, so
+            # _invoke_input's success flag is what matters here.
+            success, _ = _invoke_input("set_state", [])
+            if not success:
+                self._invalidate_facing_cache()
+                return False
+            with self._ensure_command_lock():
+                self.cmd_left_right_last = "none"
+                self.cmd_up_down_last = "none"
+
+            if self.jump_up_settle_delay > 0:
+                time.sleep(self.jump_up_settle_delay)
+
+            # F1 pause or capture loss may occur while waiting to stop. Never
+            # send a delayed jump after input has been suspended.
+            if not _regular_input_allowed():
+                self._invalidate_facing_cache()
+                return False
+
+            success, _ = _invoke_input(
+                "tap", self.cfg["key"]["jump"], 50
+            )
+            if not success:
+                self._invalidate_facing_cache()
+                return False
+            return True
 
     def stop(self):
         """Stop the controller, release the device, and free its serial session."""
@@ -397,63 +633,103 @@ class KeyBoardController():
                 was_input_active = True
                 _input_allowed.set()
 
-                # Buff skill
-                for i, buff_skill_key in enumerate(self.cfg["buff_skill"]["keys"]):
-                    if not buff_skill_key:
-                        continue
-                    cooldown = self.cfg["buff_skill"]["cooldown"][i]
-                    if time.time() - self.t_last_buff_cast[i] >= cooldown and \
-                        time.time() - self.t_last_skill > self.cfg["buff_skill"]["action_cooldown"]:
-                        if press_key(buff_skill_key):
-                            logger.info(f"[Buff] Press buff skill key: '{buff_skill_key}' (cooldown: {cooldown}s)")
-                            # Only consume cooldown after ESP32 acknowledged it.
-                            self.t_last_buff_cast[i] = time.time()
-                            self.t_last_skill = time.time()
-                        break
+                # No HID reports may be sent during the attack animation. Drop
+                # no commands here: the main loop keeps replacing the command
+                # snapshot, and the newest one is applied when recovery ends.
+                if input_recovery_remaining() > 0.0:
+                    self.limit_fps()
+                    continue
 
-                # Force Heal
+                cmd_left_right, cmd_up_down, cmd_action = \
+                    self._command_snapshot()
+
+                # Forced healing takes precedence as soon as the attack
+                # recovery ends. It is still blocked by the recovery gate
+                # above, so no potion HID report can interrupt an animation.
                 if self.is_need_force_heal:
-                    self.cmd_action = "add_hp"
+                    cmd_action = "add_hp"
+                    with self._ensure_command_lock():
+                        self.cmd_action = cmd_action
+
+                # Direction and attack must remain paired. This branch runs
+                # before buffs, movement, or healing and owns the HID output
+                # transaction until TAP has been sent.
+                if (
+                    cmd_action == "attack"
+                    and self.cfg["bot"]["attack"] == "directional"
+                ):
+                    if self.perform_directional_attack(cmd_left_right):
+                        self._consume_action(cmd_action)
+                    self.limit_fps()
+                    continue
+
+                # Magenta route points request a vertical jump with no
+                # directional input. Let horizontal inertia decay before the
+                # jump TAP; directional and down-jump commands keep their
+                # original immediate behavior.
+                if self.is_stationary_jump_command(
+                    cmd_left_right, cmd_up_down, cmd_action
+                ):
+                    if self.perform_stationary_jump():
+                        self._consume_action(cmd_action)
+                    self.limit_fps()
+                    continue
+
+                # Buff skill. Do not delay a pending forced heal.
+                if not self.is_need_force_heal:
+                    for i, buff_skill_key in enumerate(
+                            self.cfg["buff_skill"]["keys"]):
+                        if not buff_skill_key:
+                            continue
+                        cooldown = self.cfg["buff_skill"]["cooldown"][i]
+                        if time.time() - self.t_last_buff_cast[i] >= cooldown and \
+                            time.time() - self.t_last_skill > self.cfg["buff_skill"]["action_cooldown"]:
+                            if press_key(buff_skill_key):
+                                logger.info(f"[Buff] Press buff skill key: '{buff_skill_key}' (cooldown: {cooldown}s)")
+                                # Only consume cooldown after ESP32 acknowledged it.
+                                self.t_last_buff_cast[i] = time.time()
+                                self.t_last_skill = time.time()
+                            break
 
                 # Movement is one atomic STATE report. The client suppresses an
                 # unchanged state, so the 30 FPS controller loop creates no
                 # repeated serial traffic while a direction remains held.
-                self.update_movement_state()
+                self.update_movement_state(cmd_left_right, cmd_up_down)
 
                 ######################
                 ### Action Command ###
                 ######################
-                if self.cmd_action == "jump":
+                if cmd_action == "jump":
                     if press_key(self.cfg["key"]["jump"]):
-                        self.cmd_action = "none"
-                elif self.cmd_action == "teleport":
+                        self._consume_action(cmd_action)
+                elif cmd_action == "teleport":
                     if press_key(self.cfg["key"]["teleport"]):
-                        self.cmd_action = "none"
-                elif self.cmd_action == "attack":
+                        self._consume_action(cmd_action)
+                elif cmd_action == "attack":
                     if press_key(self.attack_key):
                         self.t_last_skill = time.time()
-                        self.cmd_action = "none"
-                elif self.cmd_action == "add_hp":
+                        self._consume_action(cmd_action)
+                elif cmd_action == "add_hp":
                     add_hp_key = self.cfg["key"].get("add_hp", "")
                     has_add_hp_key = (
                         isinstance(add_hp_key, str) and bool(add_hp_key.strip())
                     )
                     if not has_add_hp_key or press_key(add_hp_key):
-                        self.cmd_action = "none"  # Reset only after acknowledgement
-                elif self.cmd_action == "add_mp":
+                        self._consume_action(cmd_action)
+                elif cmd_action == "add_mp":
                     add_mp_key = self.cfg["key"].get("add_mp", "")
                     has_add_mp_key = (
                         isinstance(add_mp_key, str) and bool(add_mp_key.strip())
                     )
                     if not has_add_mp_key or press_key(add_mp_key):
-                        self.cmd_action = "none"  # Reset only after acknowledgement
-                elif self.cmd_action == "goal":
+                        self._consume_action(cmd_action)
+                elif cmd_action == "goal":
                     pass
-                elif self.cmd_action == "none":
+                elif cmd_action == "none":
                     pass
                 else:
                     logger.error("[KeyBoardController] Unsupported action command: "
-                                 f"{self.cmd_action}")
+                                 f"{cmd_action}")
 
                 self.limit_fps()
         finally:
