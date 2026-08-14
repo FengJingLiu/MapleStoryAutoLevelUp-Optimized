@@ -9,6 +9,7 @@ import cv2
 import numpy as np
 
 from src.engine.MapleStoryAutoLevelUp import MapleStoryAutoBot
+from src.engine.RuneSolver import RuneSolver
 from src.input.CaptureFramePreprocessor import (
     get_capture_resize_size,
     preprocess_capture_frame,
@@ -53,8 +54,215 @@ class DebugDrawingTests(unittest.TestCase):
         self.assertFalse(np.shares_memory(emitted_frame, bot.img_frame_debug))
         bot.route_map_viz_signal.emit.assert_not_called()
 
+    def test_native_fullscreen_viz_is_bounded_before_qt_signal(self):
+        bot = MapleStoryAutoBot.__new__(MapleStoryAutoBot)
+        bot.cfg = {
+            "system": {
+                "fps_limit_ui_viz": 0,
+                "ui_viz_max_size": (720, 1280),
+            }
+        }
+        bot.is_show_debug_window = True
+        bot.is_ui = True
+        bot.img_frame_debug = np.zeros((2013, 3579, 3), dtype=np.uint8)
+        bot.img_route_debug = None
+        bot.image_debug_signal = Mock()
+        bot.route_map_viz_signal = Mock()
+
+        bot._emit_debug_images()
+
+        emitted_frame = bot.image_debug_signal.emit.call_args.args[0]
+        self.assertEqual(emitted_frame.shape, (720, 1280, 3))
+        self.assertTrue(emitted_frame.flags.c_contiguous)
+        self.assertFalse(np.shares_memory(emitted_frame, bot.img_frame_debug))
+
+    def test_ui_viz_signal_is_rate_limited(self):
+        bot = MapleStoryAutoBot.__new__(MapleStoryAutoBot)
+        bot.cfg = {
+            "system": {
+                "fps_limit_ui_viz": 5,
+                "ui_viz_max_size": (720, 1280),
+            }
+        }
+        bot.is_show_debug_window = True
+        bot.is_ui = True
+        bot.img_frame_debug = np.zeros((10, 20, 3), dtype=np.uint8)
+        bot.img_route_debug = None
+        bot.image_debug_signal = Mock()
+        bot.route_map_viz_signal = Mock()
+        bot._last_ui_viz_emit_time = 0.0
+
+        with patch(
+            "src.engine.MapleStoryAutoLevelUp.time.monotonic",
+            side_effect=(10.0, 10.05, 10.21),
+        ):
+            bot._emit_debug_images()
+            bot._emit_debug_images()
+            bot._emit_debug_images()
+
+        self.assertEqual(bot.image_debug_signal.emit.call_count, 2)
+
+    def test_native_debug_style_matches_legacy_after_preview_resize(self):
+        def draw_metrics(frame_shape):
+            bot = MapleStoryAutoBot.__new__(MapleStoryAutoBot)
+            bot.cfg = {
+                "game_window": {
+                    "coordinate_reference_size": (700, 1296),
+                },
+                "system": {"ui_viz_max_size": (720, 1280)},
+            }
+            bot._base_cfg = bot.cfg
+            bot.img_frame_debug = np.zeros(
+                (*frame_shape, 3), dtype=np.uint8
+            )
+            with patch(
+                "src.engine.MapleStoryAutoLevelUp.cv2.putText"
+            ) as put_text:
+                bot._draw_debug_text(
+                    "hint",
+                    (10, 460),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.7,
+                    (0, 0, 255),
+                    2,
+                    cv2.LINE_AA,
+                    reference_position=True,
+                )
+            call_args = put_text.call_args.args
+            height, width = frame_shape
+            preview_scale = min(1.0, 1280 / width, 720 / height)
+            next_y = bot.scale_debug_reference_point((10, 483))[1]
+            return {
+                "visual_scale": bot.get_frame_visual_scale(),
+                "x": call_args[2][0] * preview_scale,
+                "y": call_args[2][1] * preview_scale,
+                "font": call_args[4] * preview_scale,
+                "thickness": call_args[6] * preview_scale,
+                "interval": (
+                    next_y - call_args[2][1]
+                ) * preview_scale,
+            }
+
+        legacy = draw_metrics((700, 1296))
+        native = draw_metrics((2013, 3579))
+
+        self.assertAlmostEqual(legacy["visual_scale"], 1.0)
+        self.assertAlmostEqual(
+            native["visual_scale"],
+            min(2013 / 700, 3579 / 1296),
+        )
+        for key, delta in (
+            ("x", 1.0),
+            ("y", 1.0),
+            ("font", 0.02),
+            ("thickness", 0.25),
+            ("interval", 1.0),
+        ):
+            self.assertAlmostEqual(legacy[key], native[key], delta=delta)
+
+    def test_native_status_hints_scale_font_anchor_and_line_spacing(self):
+        bot = MapleStoryAutoBot.__new__(MapleStoryAutoBot)
+        bot.cfg = {
+            "game_window": {
+                "coordinate_reference_size": (700, 1296),
+            },
+            "bot": {"mode": "debug", "attack": "directional"},
+        }
+        bot._base_cfg = bot.cfg
+        bot.img_frame_debug = np.zeros((2013, 3579, 3), dtype=np.uint8)
+        bot.frame = SimpleNamespace(shape=(2013, 3579, 3))
+        bot.t_last_frame = 1.0
+        bot.kb = SimpleNamespace(t_last_screenshot=0.0, is_enable=True)
+        bot.fsm = SimpleNamespace(state=SimpleNamespace(name="debug"))
+        bot.screen_player_location_valid = False
+        bot.loc_minimap = (10, 10)
+        bot.img_minimap_screen = np.zeros((92, 203, 3), dtype=np.uint8)
+
+        with (
+            patch("src.engine.MapleStoryAutoLevelUp.time.time", return_value=2.0),
+            patch("src.engine.MapleStoryAutoLevelUp.cv2.putText") as put_text,
+        ):
+            bot.update_info_on_img_frame_debug()
+
+        hint_calls = [
+            item for item in put_text.call_args_list
+            if item.args[1].startswith(("FPS:", "State:", "Resolution:", "Press "))
+        ]
+        self.assertEqual(len(hint_calls), 6)
+        visual_scale = min(2013 / 700, 3579 / 1296)
+        self.assertAlmostEqual(hint_calls[0].args[4], 0.7 * visual_scale)
+        self.assertEqual(hint_calls[0].args[6], 6)
+        self.assertEqual(hint_calls[0].args[2][0], 28)
+        baselines = [item.args[2][1] for item in hint_calls]
+        self.assertEqual(
+            [b - a for a, b in zip(baselines, baselines[1:])],
+            [64] * 5,
+        )
+
+    def test_scaled_rectangle_preserves_fill_and_scales_label_gap(self):
+        image = np.zeros((100, 200, 3), dtype=np.uint8)
+        with (
+            patch("src.utils.common.cv2.rectangle") as rectangle,
+            patch("src.utils.common.cv2.putText") as put_text,
+        ):
+            draw_rectangle(
+                image,
+                (40, 50),
+                (20, 30),
+                (0, 0, 255),
+                "box",
+                thickness=-1,
+                text_height=0.7,
+                visual_scale=3,
+            )
+
+        self.assertEqual(rectangle.call_args.args[-1], -1)
+        self.assertEqual(put_text.call_args.args[2], (40, 20))
+        self.assertAlmostEqual(put_text.call_args.args[4], 2.1)
+        self.assertEqual(put_text.call_args.args[6], 3)
+
+    def test_rune_debug_scales_strokes_but_not_hough_radius(self):
+        solver = RuneSolver.__new__(RuneSolver)
+        solver.cfg = {
+            "game_window": {
+                "coordinate_reference_size": (700, 1296),
+            }
+        }
+        image = np.zeros((2013, 3579, 3), dtype=np.uint8)
+        with patch("src.engine.RuneSolver.draw_circle") as circle:
+            solver._draw_debug_circle(
+                image, (100, 100), 32, (0, 255, 0), 2
+            )
+            solver._draw_debug_circle(
+                image,
+                (100, 100),
+                5,
+                (0, 255, 255),
+                -1,
+                scale_radius=True,
+            )
+
+        hough_args = circle.call_args_list[0].args
+        marker_args = circle.call_args_list[1].args
+        self.assertEqual(hough_args[2], 32)
+        self.assertEqual(hough_args[4], 6)
+        self.assertEqual(marker_args[2], 14)
+        self.assertEqual(marker_args[4], -1)
+
 
 class MinimapDetectionTests(unittest.TestCase):
+    def test_wide_shallow_minimap_survives_potplayer_normalization(self):
+        frame = np.zeros((700, 1296, 3), dtype=np.uint8)
+        # Henesys East Field becomes a roughly 101x47 outer border after the
+        # 2768x1557 PotPlayer viewport is normalized to the working raster.
+        frame[47, 7:108] = 235
+        frame[93, 7:108] = 235
+        frame[47:94, 7] = 235
+        frame[47:94, 107] = 235
+        frame[48:93, 8:107] = 40
+
+        self.assertEqual(get_minimap_loc_size(frame), (8, 48, 99, 45))
+
     def test_near_white_capture_card_border_is_detected(self):
         frame = np.zeros((700, 1296, 3), dtype=np.uint8)
         # Simulate an antialiased border that no longer contains pure white.
@@ -326,20 +534,23 @@ class AutoBotLifecycleTests(unittest.TestCase):
         bot.img_frame_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         bot.img_frame_debug = None
 
-        def read_template(name):
-            image = cv2.imread(str(project_root / "nametag" / name))
-            self.assertIsNotNone(image)
-            return image
-
-        bot.img_nametag = read_template("liu_muning.png")
+        # Keep these regression tests independent from the user's live hero
+        # resources.  The production templates can be recaptured at a new
+        # PotPlayer resolution, while this fixture intentionally remains at
+        # the legacy geometry represented by nametag_anchors.png.
+        pristine = cv2.imread(str(
+            project_root / "tests" / "fixtures" / "nametag_anchors.png"
+        ))
+        self.assertIsNotNone(pristine)
+        bot.img_nametag = pristine[71:91, 98:143].copy()
         bot.img_nametag_gray = cv2.cvtColor(
             bot.img_nametag, cv2.COLOR_BGR2GRAY
         )
-        bot.img_nametag_medal = read_template("liu_muning_medal.png")
+        bot.img_nametag_medal = pristine[91:105, 75:171].copy()
         bot.img_nametag_medal_gray = cv2.cvtColor(
             bot.img_nametag_medal, cv2.COLOR_BGR2GRAY
         )
-        bot.img_nametag_pet = read_template("liu_muning_pet.png")
+        bot.img_nametag_pet = pristine[74:88, 38:91].copy()
         bot.img_nametag_pet_gray = cv2.cvtColor(
             bot.img_nametag_pet, cv2.COLOR_BGR2GRAY
         )
@@ -357,9 +568,12 @@ class AutoBotLifecycleTests(unittest.TestCase):
         self.assertIsNotNone(frame)
         bot = MapleStoryAutoBot.__new__(MapleStoryAutoBot)
         templates = (
-            ("liu_muning_appearance_climb", "climbing", (20, 38)),
-            ("liu_muning_appearance_stand_left", "standing", (18, 41)),
-            ("liu_muning_appearance_stand_right", "standing", (25, 39)),
+            ("liu_muning_appearance_climb", "appearance_climb.png",
+             "climbing", (20, 38), (35, 9, 44, 30)),
+            ("liu_muning_appearance_stand_left", "appearance_stand_left.png",
+             "standing", (18, 41), (10, 10, 45, 44)),
+            ("liu_muning_appearance_stand_right", "appearance_stand_right.png",
+             "standing", (25, 39), (45, 13, 46, 44)),
         )
         bot.cfg = {
             "nametag": {
@@ -383,9 +597,13 @@ class AutoBotLifecycleTests(unittest.TestCase):
             project_root / "nametag" / "liu_muning.png"
         ))
         bot.nametag_appearance_templates = []
-        for name, pose, player_offset in templates:
-            image = cv2.imread(str(project_root / "nametag" / f"{name}.png"))
-            self.assertIsNotNone(image)
+        for name, fixture, pose, player_offset, crop in templates:
+            fixture_image = cv2.imread(str(
+                project_root / "tests" / "fixtures" / fixture
+            ))
+            self.assertIsNotNone(fixture_image)
+            x, y, width, height = crop
+            image = fixture_image[y:y+height, x:x+width].copy()
             bot.nametag_appearance_templates.append({
                 "name": name,
                 "pose": pose,

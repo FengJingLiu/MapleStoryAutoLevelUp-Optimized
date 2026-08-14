@@ -1,7 +1,10 @@
 bot:
-  map: wisdom_forest
+  map: henesys_east_field
+  mode: debug
 game_window:
+  auto_resize: false
   capture_profile: potplayer
+  preserve_native_resolution: true
   title: "TV/CAM/\u8BBE\u5907 - PotPlayer"
 health_monitor:
   add_hp_percent: 0
@@ -18,3 +21,6 @@ nametag:
   name: liu_muning
   pet:
     enable: true
+  template_reference_size:
+  - 2013
+  - 3579

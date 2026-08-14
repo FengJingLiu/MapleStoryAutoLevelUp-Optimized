@@ -187,7 +187,7 @@ def screenshot(img, suffix="screenshot"):
     logger.info(f"[screenshot] save to {filename}")
 
 def draw_rectangle(img, top_left, size, color, text,
-                   thickness=2, text_height=0.7):
+                   thickness=2, text_height=0.7, *, visual_scale=1.0):
     '''
     Draws a rectangle with an text label.
 
@@ -201,11 +201,25 @@ def draw_rectangle(img, top_left, size, color, text,
     if img is None:
         return
 
+    try:
+        visual_scale = max(0.1, float(visual_scale))
+    except (TypeError, ValueError):
+        visual_scale = 1.0
+    line_thickness = (
+        -1
+        if thickness < 0
+        else max(1, int(round(thickness * visual_scale)))
+    )
+    label_scale = text_height * visual_scale
+    label_offset = max(1, int(round(10 * visual_scale)))
+
     bottom_right = (top_left[0] + size[1],
                     top_left[1] + size[0])
-    cv2.rectangle(img, top_left, bottom_right, color, thickness)
-    cv2.putText(img, text, (top_left[0], top_left[1] - 10),
-                cv2.FONT_HERSHEY_SIMPLEX, text_height, color, thickness)
+    cv2.rectangle(img, top_left, bottom_right, color, line_thickness)
+    text_thickness = max(1, int(round(abs(thickness) * visual_scale)))
+    cv2.putText(img, text, (top_left[0], top_left[1] - label_offset),
+                cv2.FONT_HERSHEY_SIMPLEX, label_scale, color,
+                text_thickness)
 
 def draw_circle(img, *args, **kwargs):
     """Draw a circle when a debug image is available."""
@@ -374,20 +388,33 @@ def get_minimap_loc_size(img_frame):
     near_white_min = np.array([210, 210, 210], dtype=np.uint8)
     white_max = np.array([255, 255, 255], dtype=np.uint8)
     mask_white = cv2.inRange(search_frame, near_white_min, white_max)
-    contours, _ = cv2.findContours(
+    contours, hierarchy = cv2.findContours(
         mask_white,
-        cv2.RETR_EXTERNAL,
+        cv2.RETR_TREE,
         cv2.CHAIN_APPROX_SIMPLE,
     )
 
+    def contour_depth(index):
+        """Return nesting depth so an expanded panel's map wins its frame."""
+        if hierarchy is None:
+            return 0
+
+        depth = 0
+        parent = int(hierarchy[0][index][3])
+        while parent >= 0:
+            depth += 1
+            parent = int(hierarchy[0][parent][3])
+        return depth
+
     candidates = []
-    for contour in contours:
+    for contour_index, contour in enumerate(contours):
         x0, y0, rw, rh = cv2.boundingRect(contour)
 
         # The compact minimap used by the bot is in the top-left quadrant.
-        # HDMI capture can reduce its normalized height below the old 100px
-        # minimum, so use a conservative lower bound instead.
-        if rw < 80 or rh < 50:
+        # HDMI capture can reduce a wide, shallow minimap below 50px after the
+        # PotPlayer frame is normalized to 1296x700. Four-edge validation below
+        # still rejects ordinary text and open UI lines.
+        if rw < 80 or rh < 40:
             continue
         if x0 > frame_w * 0.4 or y0 > frame_h * 0.4:
             continue
@@ -463,7 +490,17 @@ def get_minimap_loc_size(img_frame):
         if np.mean(inner == 0) < 0.15:
             continue
 
-        score = (min(edge_coverages), np.mean(edge_coverages), rw * rh)
+        # An expanded minimap has a complete outer panel border around another
+        # complete border that encloses the actual map raster.  RETR_EXTERNAL
+        # only exposed the panel and made player-dot detection inspect its
+        # title/icons. Prefer a valid nested rectangle; edge quality and area
+        # retain the previous ordering between candidates at the same depth.
+        score = (
+            contour_depth(contour_index),
+            min(edge_coverages),
+            np.mean(edge_coverages),
+            rw * rh,
+        )
         candidates.append((score, (
             x0 + left_depth,
             y0 + top_depth,

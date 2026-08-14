@@ -398,6 +398,7 @@ minimap:
   reference_size_by_map:
     fire_land_1: [142, 259]
     wisdom_forest: [149, 180]
+    henesys_east_field: [92, 203]
   debug_window_upscale: 4         # 🔍 Zoom factor for the route debug image (for visualization only)
   debug_window_max_screen_ratio: 0.85  # Keep the complete growing route preview on screen
   offset: [0, 0]                  # 📐 Don't set this unless playing on global server
@@ -456,6 +457,10 @@ game_window:
   title: "MapleStory Worlds"   # 🎮 Target window title (substring match by default)
   exact_match: False           # 🎯 True = require the full title to match exactly, False = substring match
   size: [693, 1282]            # 📐 Expected client size [height, width] in pixels, (Excluded title bar size)
+  # Frame-space configuration below was authored against this legacy raster.
+  # Native PotPlayer capture scales those coordinates from this reference.
+  coordinate_reference_size: [700, 1296]
+  preserve_native_resolution: False # Keep cropped PotPlayer video at its native pixels when True
   ratio_tolerance: 0.08        # 📐 Game window 16:9 tolerance
   title_bar_height: 59         # 📐 Title Bar Height (Note it's before window resize)
   auto_resize: True            # 🔧 Force-resize the target window on capture start.
@@ -481,6 +486,8 @@ system:
   # ⚙️ System Settings
   # Controls performance and behavior of core system threads.
   fps_limit_main: 10                # 🚥 Main loop FPS – controls how fast the main thread runs
+  fps_limit_ui_viz: 5               # UI preview only; detection remains at native resolution
+  ui_viz_max_size: [720, 1280]      # [height, width] sent to Qt to avoid flooding its event queue
   fps_limit_keyboard_controller: 30 # 🚥 Keyboard controller thread FPS
   fps_limit_window_capturor: 15     # 🚥 Window capture thread FPS
   fps_limit_route_recorder: 10      # 🚥 Route recorder FPS

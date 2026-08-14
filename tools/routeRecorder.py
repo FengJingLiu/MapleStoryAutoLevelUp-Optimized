@@ -6,6 +6,7 @@ import time
 import argparse
 import sys
 import os
+from copy import deepcopy
 
 # CV import
 import numpy as np
@@ -23,6 +24,13 @@ from src.input.KeyBoardListener import KeyBoardListener, normalize_key_name
 from src.input.Esp32KeyForwarder import Esp32KeyForwarder
 from src.input.GameWindowCapturor import GameWindowCapturor
 from src.input.CaptureFramePreprocessor import preprocess_capture_frame
+from src.utils.frame_geometry import (
+    LEGACY_FRAME_SIZE,
+    scale_runtime_pixel_config,
+)
+from src.utils.minimap_geometry import (
+    save_minimap_geometry,
+)
 
 
 def route_action_from_pressed_keys(key_pressing, key_cfg):
@@ -272,7 +280,34 @@ def get_debug_monitor_work_size():
         )
         left, top, right, bottom = win32api.GetMonitorInfo(monitor)["Work"]
         return right - left, bottom - top
-    return None
+    try:
+        monitor = win32api.MonitorFromPoint(
+            (0, 0),
+            win32con.MONITOR_DEFAULTTONEAREST,
+        )
+        left, top, right, bottom = win32api.GetMonitorInfo(monitor)["Work"]
+        return right - left, bottom - top
+    except Exception:
+        return None
+
+
+def get_debug_preview_max_size(cfg, monitor_size=None):
+    """Return the configured debug-preview limit for one monitor.
+
+    This helper deliberately affects only images passed to ``cv2.imshow``.
+    The route and minimap canvases retain their native coordinate systems.
+    ``None`` is valid in headless/non-Windows environments and means no
+    monitor-derived limit is available.
+    """
+    if monitor_size is None:
+        monitor_size = get_debug_monitor_work_size()
+    if monitor_size is None:
+        return None
+
+    minimap_cfg = cfg.get("minimap", {}) if isinstance(cfg, dict) else {}
+    screen_ratio = minimap_cfg.get("debug_window_max_screen_ratio", 0.85)
+    screen_ratio = min(max(float(screen_ratio), 0.1), 1.0)
+    return tuple(max(1, int(size * screen_ratio)) for size in monitor_size)
 
 
 def prepare_route_output_directory(map_dir, confirm=input):
@@ -321,8 +356,9 @@ class RouteRecorder():
         '''
         # Print text at bottom left corner
         self.fps = round(1.0 / (time.time() - self.t_last_frame))
-        preferred_text_y_start = 550
-        text_y_interval = 23
+        visual_scale = self.get_frame_visual_scale()
+        preferred_text_y_start = int(round(550 * visual_scale))
+        text_y_interval = max(1, int(round(23 * visual_scale)))
         dt_screenshot = time.time() - self.kb.t_func_key[1]
         dt_save_route = time.time() - self.kb.t_func_key[2]
         dt_save_map = time.time() - self.kb.t_func_key[3]
@@ -338,8 +374,8 @@ class RouteRecorder():
         # Keep the complete text block inside that crop instead of drawing the
         # final shortcut lines into the hidden game-UI area below it.
         font_face = cv2.FONT_HERSHEY_SIMPLEX
-        font_scale = 0.7
-        font_thickness = 2
+        font_scale = 0.7 * visual_scale
+        font_thickness = max(1, int(round(2 * visual_scale)))
         text_size, text_baseline = cv2.getTextSize(
             "Ag", font_face, font_scale, font_thickness
         )
@@ -347,10 +383,11 @@ class RouteRecorder():
             "ui_coords", {}
         ).get("ui_y_start", self.img_frame_debug.shape[0])
         visible_height = min(self.img_frame_debug.shape[0], int(ui_y_start))
-        first_baseline_min = text_size[1] + 4
+        edge_margin = max(1, int(round(4 * visual_scale)))
+        first_baseline_min = text_size[1] + edge_margin
         last_baseline_max = max(
             first_baseline_min,
-            visible_height - text_baseline - 4,
+            visible_height - text_baseline - edge_margin,
         )
         text_y_start = min(
             preferred_text_y_start,
@@ -361,7 +398,8 @@ class RouteRecorder():
         for idx, text in enumerate(text_list):
             cv2.putText(
                 self.img_frame_debug, text,
-                (10, text_y_start + text_y_interval*idx),
+                (max(1, int(round(10 * visual_scale))),
+                 text_y_start + text_y_interval*idx),
                 font_face, font_scale, (0, 0, 255),
                 font_thickness, cv2.LINE_AA
             )
@@ -395,15 +433,21 @@ class RouteRecorder():
         mini_map_crop = self.img_route_debug[y0:y1, x0:x1]
         if mini_map_crop.size == 0:
             return
-        mini_map_crop = cv2.resize(mini_map_crop,
-                                (int(mini_map_crop.shape[1] * 3),
-                                 int(mini_map_crop.shape[0] * 3)),
-                                interpolation=cv2.INTER_NEAREST)
+        frame_h, frame_w = self.img_frame_debug.shape[:2]
+        mini_map_crop, _ = fit_debug_preview(
+            mini_map_crop,
+            preferred_scale=3 * visual_scale,
+            max_size=(
+                max(1, int(round(frame_w * 0.35))),
+                max(1, int(round(visible_height * 0.45))),
+            ),
+        )
         # Paste into top-right corner of self.img_frame_debug
         h_crop, w_crop = mini_map_crop.shape[:2]
-        h_frame, w_frame = self.img_frame_debug.shape[:2]
-        x_paste = w_frame - w_crop - 10  # 10px margin from right
-        y_paste = 70
+        paste_margin = max(1, int(round(10 * visual_scale)))
+        x_paste = max(0, frame_w - w_crop - paste_margin)
+        preferred_y = max(0, int(round(70 * visual_scale)))
+        y_paste = min(preferred_y, max(0, visible_height - h_crop - paste_margin))
         self.img_frame_debug[y_paste:y_paste + h_crop, x_paste:x_paste + w_crop] = mini_map_crop
 
         # Draw border around minimap
@@ -412,17 +456,70 @@ class RouteRecorder():
             (x_paste, y_paste),
             (x_paste + w_crop, y_paste + h_crop),
             color=(255, 255, 255),   # White border
-            thickness=2
+            thickness=max(1, int(round(2 * visual_scale)))
         )
+
+    def get_frame_visual_scale(self):
+        """Return a visualization scale relative to the legacy game frame."""
+        frame_h, frame_w = self.img_frame_debug.shape[:2]
+        base_cfg = getattr(self, "_cfg_reference", None)
+        if not isinstance(base_cfg, dict):
+            base_cfg = getattr(self, "cfg", {})
+        reference = base_cfg.get("game_window", {}).get(
+            "coordinate_reference_size",
+            LEGACY_FRAME_SIZE,
+        )
+        try:
+            ref_h, ref_w = map(float, reference[:2])
+            if ref_h <= 0 or ref_w <= 0:
+                raise ValueError
+        except (TypeError, ValueError, IndexError):
+            ref_h, ref_w = LEGACY_FRAME_SIZE
+        return max(0.1, min(frame_h / ref_h, frame_w / ref_w))
 
     def update_img_frame_debug(self):
         '''
         update_img_frame_debug
         '''
-        cv2.imshow("Game Window Debug",
-                   self.img_frame_debug[:self.cfg["ui_coords"]["ui_y_start"], :])
+        ui_y_start = self.cfg.get("ui_coords", {}).get(
+            "ui_y_start",
+            self.img_frame_debug.shape[0],
+        )
+        visible_height = min(
+            self.img_frame_debug.shape[0],
+            max(1, int(ui_y_start)),
+        )
+        debug_crop = self.img_frame_debug[:visible_height, :]
+        debug_preview, _ = fit_debug_preview(
+            debug_crop,
+            preferred_scale=1.0,
+            max_size=get_debug_preview_max_size(self.cfg),
+        )
+        cv2.imshow("Game Window Debug", debug_preview)
         # Update FPS timer
         self.t_last_frame = time.time()
+
+    def update_runtime_config(self, output_size):
+        """Derive fresh frame-space settings from the unscaled base config."""
+        output_size = tuple(map(int, output_size[:2]))
+        if output_size == getattr(self, "_runtime_output_size", None):
+            return
+
+        base_cfg = getattr(self, "_cfg_reference", None)
+        if not isinstance(base_cfg, dict):
+            base_cfg = deepcopy(self.cfg)
+            self._cfg_reference = base_cfg
+        self.cfg = scale_runtime_pixel_config(base_cfg, output_size)
+        self._runtime_output_size = output_size
+
+        reference = base_cfg.get("game_window", {}).get(
+            "coordinate_reference_size",
+            LEGACY_FRAME_SIZE,
+        )
+        logger.info(
+            "[capture] runtime pixel config "
+            f"reference={tuple(reference[:2])} output={output_size}"
+        )
 
     def get_player_location_on_global_map(self):
         '''
@@ -467,9 +564,10 @@ class RouteRecorder():
             return
 
         try:
+            base_cfg = getattr(self, "_cfg_reference", self.cfg)
             img_frame, geometry = preprocess_capture_frame(
                 self.frame,
-                self.cfg,
+                base_cfg,
                 window_title=getattr(self.capture, "window_title", ""),
             )
         except (KeyError, TypeError, ValueError) as exc:
@@ -480,12 +578,14 @@ class RouteRecorder():
             self.img_capture_content = self.frame[y0:y1, x0:x1]
         else:
             self.img_capture_content = None
+        self.update_runtime_config(geometry["output_size"])
         geometry_key = (
             geometry["profile"],
             geometry["source_size"],
             geometry["video_roi"],
             geometry["content_size"],
             geometry["working_size"],
+            geometry["normalized"],
         )
         if geometry_key != getattr(self, "_last_capture_geometry", None):
             logger.info(
@@ -497,6 +597,30 @@ class RouteRecorder():
             )
             self._last_capture_geometry = geometry_key
         return img_frame
+
+    def update_minimap_from_current_frame(self):
+        """Detect and crop the minimap from the current native game frame."""
+        minimap_result = get_minimap_loc_size(self.img_frame)
+        if minimap_result is None:
+            logger.warning("Minimap not found; waiting for the next frame")
+            return False
+
+        x, y, w, h = minimap_result
+        # Discard one remaining pixel on each edge so the white border cannot
+        # leak into route-map matching.
+        x += 1
+        y += 1
+        w -= 2
+        h -= 2
+        if w <= 0 or h <= 0:
+            logger.warning("Detected minimap has no usable interior")
+            return False
+
+        self.loc_minimap = (x, y)
+        self.minimap_screen_size = (h, w)
+        self.img_minimap_screen = self.img_frame[y:y+h, x:x+w]
+        self.img_minimap_source = self.img_minimap_screen
+        return True
 
     def __init__(self, args):
         '''
@@ -519,6 +643,7 @@ class RouteRecorder():
         self.input_forwarder = None
         self.kb = None
         self.capture = None
+        self.map_dir = None
         # Images
         self.frame = None # raw image
         self.img_frame = None # game window frame
@@ -547,6 +672,12 @@ class RouteRecorder():
             if parent_name:
                 calibration_map = parent_name
         self.cfg["bot"]["map"] = calibration_map
+        # Always derive frame-space settings from this untouched snapshot.
+        # Re-deriving from ``self.cfg`` after a fullscreen/legacy transition
+        # would compound x/y scaling. Route and minimap coordinates are not
+        # among the settings scaled by ``scale_runtime_pixel_config``.
+        self._cfg_reference = deepcopy(self.cfg)
+        self._runtime_output_size = None
 
         # Parse color_code
         self.color_code = {
@@ -562,8 +693,8 @@ class RouteRecorder():
         self.fps_limit = self.cfg["system"]["fps_limit_route_recorder"]
 
         # Re-recording a route must preserve the previously stitched map.
-        map_dir = os.path.join("minimaps", args.new_map)
-        if not prepare_route_output_directory(map_dir):
+        self.map_dir = os.path.join("minimaps", args.new_map)
+        if not prepare_route_output_directory(self.map_dir):
             sys.exit(0)
 
         # An explicit --map takes precedence. Otherwise automatically continue
@@ -716,38 +847,11 @@ class RouteRecorder():
         # Image for debug use
         self.img_frame_debug = self.img_frame.copy()
 
-        # Get minimap from game window
-        if self.is_first_frame:
-            minimap_result = get_minimap_loc_size(self.img_frame)
-            if minimap_result is None:
-                logger.warning("Minimap not found; waiting for the next frame")
-                return -1
-            x, y, w, h = minimap_result
-            # Discard 1 pixel boundary of the minimap
-            x += 1
-            y += 1
-            w -= 2
-            h -= 2
-            self.loc_minimap = (x, y)
-            self.minimap_screen_size = (h, w)
-            self.img_minimap_screen = self.img_frame[y:y+h, x:x+w]
-        else:
-            x, y = self.loc_minimap
-            h, w = self.minimap_screen_size
-            self.img_minimap_screen = self.img_frame[y:y+h, x:x+w]
-
-        self.img_minimap_source = self.img_minimap_screen
-        native_frame = getattr(self, "img_capture_content", None)
-        if native_frame is not None:
-            native_result = get_minimap_loc_size(native_frame)
-            if native_result is not None:
-                nx, ny, nw, nh = native_result
-                nx += 1
-                ny += 1
-                nw -= 2
-                nh -= 2
-                if nw > 0 and nh > 0:
-                    self.img_minimap_source = native_frame[ny:ny+nh, nx:nx+nw]
+        # UI scale, expanded/collapsed state, and fullscreen transitions may
+        # move or resize the minimap. Re-detect it on every native frame rather
+        # than reusing the first frame's screen coordinates.
+        if not self.update_minimap_from_current_frame():
+            return -1
         self.img_minimap = resize_minimap_to_reference(
             self.img_minimap_source,
             self.cfg,
@@ -949,9 +1053,18 @@ class RouteRecorder():
         # Save img_map to map.png
         if self.kb.is_pressed_func_key[3]: # 'F4' is pressed
             out_path = f"minimaps/{self.args.new_map}/map.png"
-            cv2.imwrite(out_path, self.img_map)
+            if cv2.imwrite(out_path, self.img_map):
+                x, y = self.loc_minimap
+                h, w = self.minimap_screen_size
+                save_minimap_geometry(
+                    self.map_dir,
+                    self.img_frame.shape[:2],
+                    (x, y, w, h),
+                )
+                logger.info(f"Save map image to {out_path}")
+            else:
+                logger.error(f"Unable to save map image to {out_path}")
             self.kb.is_pressed_func_key[3] = False
-            logger.info(f"Save map image to {out_path}")
 
         #####################
         ### Debug Windows ###

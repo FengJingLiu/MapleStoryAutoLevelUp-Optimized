@@ -12,6 +12,7 @@ import logging
 import os
 import datetime
 import threading
+from copy import deepcopy
 
 # Library import
 import numpy as np
@@ -34,6 +35,11 @@ from src.utils.detection import (
     detection_to_box,
     intersection_area,
     suppress_nearby_same_class,
+)
+from src.utils.frame_geometry import scale_runtime_pixel_config
+from src.utils.minimap_geometry import (
+    load_minimap_geometry,
+    scale_minimap_rect,
 )
 from src.input.CaptureFramePreprocessor import preprocess_capture_frame
 from src.input.KeyBoardController import KeyBoardController, press_key
@@ -72,6 +78,8 @@ class MapleStoryAutoBot:
         self.fps = 0 # Frame per second
         self.red_dot_center_prev = None # previous other player location in minimap
         self.video_writer = None # For video recording feature
+        self._video_record_path = None
+        self._video_record_size = None
         self.color_code = {} # For color code instruction
         self.color_code_up_down = {} # Color code only contain 'up' and 'down'
         self.thread_auto_bot = None # thread for running autobot
@@ -81,6 +89,7 @@ class MapleStoryAutoBot:
         # Signals (for UI)
         self.image_debug_signal = None
         self.route_map_viz_signal = None
+        self._last_ui_viz_emit_time = 0.0
         # Flags
         self.is_first_frame = True # first frame flag
         self.is_terminated = False # Close all object and thread if True
@@ -114,6 +123,7 @@ class MapleStoryAutoBot:
         self.img_minimap_screen = self.img_minimap # unscaled minimap in screen coordinates
         self.img_minimap_source = self.img_minimap # native capture-card minimap
         self.img_capture_content = None
+        self.minimap_geometry = None
         # Timers
         self.t_last_frame = time.time() # Last frame timer, for fps calculation
         self.t_watch_dog = time.time() # Last movement timer
@@ -131,6 +141,10 @@ class MapleStoryAutoBot:
         self.img_nametag_pet = None
         self.img_nametag_pet_gray = None
         self.nametag_appearance_templates = []
+        self._img_nametag_source = None
+        self._img_nametag_medal_source = None
+        self._img_nametag_pet_source = None
+        self._last_nametag_template_geometry = None
         self.loc_appearance_player = (0, 0)
         self.has_valid_appearance_location = False
         self.pending_appearance_location = None
@@ -153,6 +167,8 @@ class MapleStoryAutoBot:
         self._input_suspended_for_capture = False
         self._last_capture_geometry = None
         self._last_capture_error = None
+        self._base_cfg = None
+        self._last_runtime_output_size = None
 
         # Finite State Machine
         self.fsm = FiniteStateMachine()
@@ -185,17 +201,175 @@ class MapleStoryAutoBot:
         if not self.is_show_debug_window or not self.is_ui:
             return
 
-        if self.img_frame_debug is not None and self.image_debug_signal is not None:
+        has_frame = (
+            self.img_frame_debug is not None
+            and self.image_debug_signal is not None
+        )
+        has_route = (
+            self.img_route_debug is not None
+            and self.route_map_viz_signal is not None
+        )
+        if not has_frame and not has_route:
+            return
+
+        # A native fullscreen capture is about 22 MB at 3579x2013. Sending a
+        # fresh full-size copy through Qt ten times per second floods the GUI
+        # event queue and makes tab changes appear to hang. Recognition and
+        # screenshots continue to use the native image; only the UI preview is
+        # rate-limited and reduced here.
+        system_cfg = self.cfg.get("system", {}) if self.cfg else {}
+        try:
+            preview_fps = float(system_cfg.get("fps_limit_ui_viz", 5))
+        except (TypeError, ValueError):
+            preview_fps = 5.0
+        now = time.monotonic()
+        last_emit = getattr(self, "_last_ui_viz_emit_time", 0.0)
+        if preview_fps > 0 and last_emit > 0 and \
+                now - last_emit < 1.0 / preview_fps:
+            return
+        self._last_ui_viz_emit_time = now
+
+        if has_frame:
             # Visualization should show the complete normalized game frame.
             # ui_y_start separates the camera and HUD for recognition; using
             # it here hid the bottom HUD and clipped a bottom-floor nametag.
-            img_frame_debug_emit = self.img_frame_debug.copy()
+            img_frame_debug_emit = self._prepare_ui_preview(
+                self.img_frame_debug
+            )
             self.image_debug_signal.emit(img_frame_debug_emit)
 
         # Auxiliary mode has no route map. Keep the game-window visualization
         # alive instead of copying a missing route canvas.
-        if self.img_route_debug is not None and self.route_map_viz_signal is not None:
-            self.route_map_viz_signal.emit(self.img_route_debug.copy())
+        if has_route:
+            self.route_map_viz_signal.emit(
+                self._prepare_ui_preview(self.img_route_debug)
+            )
+
+    def _prepare_ui_preview(self, image):
+        """Return an owned, bounded-size BGR preview for the Qt UI only."""
+        system_cfg = self.cfg.get("system", {}) if self.cfg else {}
+        max_size = system_cfg.get("ui_viz_max_size", (720, 1280))
+        try:
+            max_height, max_width = (int(max_size[0]), int(max_size[1]))
+        except (TypeError, ValueError, IndexError):
+            max_height, max_width = (720, 1280)
+        if max_height <= 0 or max_width <= 0:
+            max_height, max_width = (720, 1280)
+
+        height, width = image.shape[:2]
+        scale = min(1.0, max_width / width, max_height / height)
+        if scale < 1.0:
+            preview = cv2.resize(
+                image,
+                (
+                    max(1, int(round(width * scale))),
+                    max(1, int(round(height * scale))),
+                ),
+                interpolation=cv2.INTER_AREA,
+            )
+            return np.ascontiguousarray(preview)
+        return np.ascontiguousarray(image.copy())
+
+    def _debug_reference_size(self):
+        """Return the legacy frame geometry used to author debug overlays."""
+        base_cfg = getattr(self, "_base_cfg", None)
+        if not isinstance(base_cfg, dict):
+            base_cfg = self.cfg if isinstance(self.cfg, dict) else {}
+        reference = base_cfg.get("game_window", {}).get(
+            "coordinate_reference_size", (700, 1296)
+        )
+        try:
+            ref_h, ref_w = map(float, reference[:2])
+            if ref_h <= 0 or ref_w <= 0:
+                raise ValueError
+        except (TypeError, ValueError, IndexError):
+            ref_h, ref_w = (700.0, 1296.0)
+        return ref_h, ref_w
+
+    def get_frame_visual_scale(self):
+        """Scale debug styling so a fitted preview matches the legacy UI."""
+        image = getattr(self, "img_frame_debug", None)
+        if image is None:
+            return 1.0
+        frame_h, frame_w = image.shape[:2]
+        ref_h, ref_w = self._debug_reference_size()
+        return max(0.1, min(frame_h / ref_h, frame_w / ref_w))
+
+    def scale_debug_reference_point(self, point):
+        """Map a hard-coded legacy debug anchor to the current native frame."""
+        visual_scale = self.get_frame_visual_scale()
+        return (
+            int(round(float(point[0]) * visual_scale)),
+            int(round(float(point[1]) * visual_scale)),
+        )
+
+    def _draw_debug_rectangle(
+        self,
+        top_left,
+        size,
+        color,
+        text,
+        thickness=2,
+        text_height=0.7,
+    ):
+        """Draw a native-frame box with preview-stable label styling."""
+        draw_rectangle(
+            self.img_frame_debug,
+            top_left,
+            size,
+            color,
+            text,
+            thickness=thickness,
+            text_height=text_height,
+            visual_scale=self.get_frame_visual_scale(),
+        )
+
+    def _draw_debug_text(
+        self,
+        text,
+        origin,
+        font_face,
+        font_scale,
+        color,
+        thickness=1,
+        line_type=cv2.LINE_8,
+        *,
+        reference_position=False,
+    ):
+        """Draw native-frame text at a dynamic or legacy reference anchor."""
+        if getattr(self, "img_frame_debug", None) is None:
+            return
+        if reference_position:
+            origin = self.scale_debug_reference_point(origin)
+        visual_scale = self.get_frame_visual_scale()
+        cv2.putText(
+            self.img_frame_debug,
+            text,
+            tuple(map(int, origin)),
+            font_face,
+            float(font_scale) * visual_scale,
+            color,
+            max(1, int(round(float(thickness) * visual_scale))),
+            line_type,
+        )
+
+    def _draw_debug_circle(self, center, radius, color, thickness=1):
+        """Draw a player marker that remains visible in the fitted preview."""
+        if getattr(self, "img_frame_debug", None) is None:
+            return
+        visual_scale = self.get_frame_visual_scale()
+        scaled_thickness = (
+            -1
+            if thickness < 0
+            else max(1, int(round(thickness * visual_scale)))
+        )
+        cv2.circle(
+            self.img_frame_debug,
+            tuple(map(int, center)),
+            max(1, int(round(radius * visual_scale))),
+            color,
+            scaled_thickness,
+        )
 
     def remote_keyboard_target(self):
         """Return whether HID input goes to game computer B, not this PC."""
@@ -248,6 +422,10 @@ class MapleStoryAutoBot:
         '''
         load_config
         '''
+        # Loading/config normalization historically mutates several nested
+        # values.  Keep the caller's merged config untouched so this object can
+        # always derive a fresh runtime config without accumulating scale.
+        cfg = deepcopy(cfg)
         mode = cfg["bot"]["mode"]
         monster_cfg = cfg.get("monster_detect", {})
         monster_backend = str(
@@ -270,11 +448,18 @@ class MapleStoryAutoBot:
         self.img_route_debug = None
         self.img_routes = []
         self.monsters_info = {}
+        self.minimap_geometry = None
+        self.img_nametag = None
+        self.img_nametag_gray = None
         self.img_nametag_medal = None
         self.img_nametag_medal_gray = None
         self.img_nametag_pet = None
         self.img_nametag_pet_gray = None
         self.nametag_appearance_templates = []
+        self._img_nametag_source = None
+        self._img_nametag_medal_source = None
+        self._img_nametag_pet_source = None
+        self._last_nametag_template_geometry = None
         self.has_valid_appearance_location = False
         self.pending_appearance_location = None
         self.pending_appearance_count = 0
@@ -319,6 +504,13 @@ class MapleStoryAutoBot:
         }
 
         map_name = cfg['bot']['map']
+        map_dir = os.path.join("minimaps", map_name)
+        self.minimap_geometry = load_minimap_geometry(map_dir)
+        if self.minimap_geometry is None:
+            logger.warning(
+                f"No minimap_geometry.txt for {map_name}; using legacy "
+                "real-time minimap scanning until this map is re-recorded"
+            )
         if mode == "normal" or (
             mode == "debug" and monster_backend == "template"
         ):
@@ -404,6 +596,7 @@ class MapleStoryAutoBot:
         # Load player's name tag
         if cfg["nametag"]["enable"]:
             self.img_nametag = load_image(f"nametag/{cfg['nametag']['name']}.png")
+            self._img_nametag_source = self.img_nametag.copy()
             self.img_nametag_gray = cv2.cvtColor(
                 self.img_nametag, cv2.COLOR_BGR2GRAY
             )
@@ -416,6 +609,8 @@ class MapleStoryAutoBot:
                 medal_path = f"nametag/{medal_name}.png"
                 if os.path.exists(medal_path):
                     self.img_nametag_medal = load_image(medal_path)
+                    self._img_nametag_medal_source = \
+                        self.img_nametag_medal.copy()
                     self.img_nametag_medal_gray = cv2.cvtColor(
                         self.img_nametag_medal, cv2.COLOR_BGR2GRAY
                     )
@@ -433,6 +628,7 @@ class MapleStoryAutoBot:
                 pet_path = f"nametag/{pet_name}.png"
                 if os.path.exists(pet_path):
                     self.img_nametag_pet = load_image(pet_path)
+                    self._img_nametag_pet_source = self.img_nametag_pet.copy()
                     self.img_nametag_pet_gray = cv2.cvtColor(
                         self.img_nametag_pet, cv2.COLOR_BGR2GRAY
                     )
@@ -443,7 +639,8 @@ class MapleStoryAutoBot:
                     )
             appearance_cfg = cfg["nametag"].get("appearance", {})
             if appearance_cfg.get("enable", False):
-                for template_cfg in appearance_cfg.get("templates", []):
+                for template_index, template_cfg in enumerate(
+                        appearance_cfg.get("templates", [])):
                     template_name = template_cfg.get("name", "").strip()
                     if not template_name:
                         suffix = template_cfg.get("suffix", "").strip()
@@ -466,6 +663,8 @@ class MapleStoryAutoBot:
                         "name": template_name,
                         "pose": template_cfg.get("pose", "standing"),
                         "image": image,
+                        "source_image": image.copy(),
+                        "config_index": template_index,
                         "gray": cv2.cvtColor(image, cv2.COLOR_BGR2GRAY),
                         "mask": get_mask(image, (0, 255, 0)),
                         "player_offset": (
@@ -516,10 +715,168 @@ class MapleStoryAutoBot:
         # Print mode on log
         logger.info(f"[load_config] Config AutoBot as {cfg['bot']['mode']} mode")
 
-        # Update cfg
-        self.cfg = cfg
+        # Preserve one normalized-but-unscaled reference config. Runtime
+        # screen-space values are always regenerated from this copy when the
+        # capture output size changes.
+        self._base_cfg = deepcopy(cfg)
+        self.cfg = deepcopy(cfg)
+        self._last_runtime_output_size = None
+        self._last_nametag_template_geometry = None
+        self._last_ui_viz_emit_time = 0.0
 
         return 0 # load successfully
+
+    @staticmethod
+    def _resize_green_screen_template(image, output_size):
+        """Resize one keyed template while retaining an exact green mask."""
+        output_h, output_w = map(int, output_size)
+        if output_h <= 0 or output_w <= 0:
+            raise ValueError(f"Invalid template output size: {output_size}")
+        if image.shape[:2] == (output_h, output_w):
+            return image.copy()
+
+        source_mask = get_mask(image, (0, 255, 0))
+        downscaling = output_h < image.shape[0] or output_w < image.shape[1]
+        interpolation = cv2.INTER_AREA if downscaling else cv2.INTER_CUBIC
+        resized = cv2.resize(
+            image,
+            (output_w, output_h),
+            interpolation=interpolation,
+        )
+        resized_mask = cv2.resize(
+            source_mask,
+            (output_w, output_h),
+            interpolation=cv2.INTER_NEAREST,
+        )
+        resized[resized_mask == 0] = (0, 255, 0)
+        return resized
+
+    def _refresh_nametag_templates(self, output_size):
+        """Scale source hero templates from their recorded frame geometry."""
+        nametag_cfg = self.cfg.get("nametag", {})
+        reference_size = nametag_cfg.get("template_reference_size")
+        if not nametag_cfg.get("enable", False) or reference_size is None:
+            return
+        if not isinstance(reference_size, (list, tuple)) or \
+                len(reference_size) != 2:
+            raise ValueError(
+                "nametag.template_reference_size must be [height, width]"
+            )
+
+        reference_h, reference_w = map(int, reference_size)
+        output_h, output_w = map(int, output_size)
+        if min(reference_h, reference_w, output_h, output_w) <= 0:
+            raise ValueError(
+                "nametag.template_reference_size and output size must be positive"
+            )
+        geometry_key = (
+            reference_h, reference_w, output_h, output_w,
+        )
+        if geometry_key == getattr(
+                self, "_last_nametag_template_geometry", None):
+            return
+
+        scale_x = output_w / reference_w
+        scale_y = output_h / reference_h
+
+        def resize_source(source_name, target_name, gray_name):
+            source = getattr(self, source_name, None)
+            current = getattr(self, target_name, None)
+            if source is None and current is not None:
+                source = current.copy()
+                setattr(self, source_name, source)
+            if source is None:
+                setattr(self, target_name, None)
+                setattr(self, gray_name, None)
+                return
+            target_size = (
+                max(1, int(round(source.shape[0] * scale_y))),
+                max(1, int(round(source.shape[1] * scale_x))),
+            )
+            resized = self._resize_green_screen_template(source, target_size)
+            setattr(self, target_name, resized)
+            setattr(
+                self, gray_name, cv2.cvtColor(resized, cv2.COLOR_BGR2GRAY)
+            )
+
+        resize_source(
+            "_img_nametag_source", "img_nametag", "img_nametag_gray"
+        )
+        resize_source(
+            "_img_nametag_medal_source",
+            "img_nametag_medal",
+            "img_nametag_medal_gray",
+        )
+        resize_source(
+            "_img_nametag_pet_source",
+            "img_nametag_pet",
+            "img_nametag_pet_gray",
+        )
+
+        runtime_templates = nametag_cfg.get("appearance", {}).get(
+            "templates", []
+        )
+        for index, template in enumerate(getattr(
+                self, "nametag_appearance_templates", [])):
+            source = template.get("source_image")
+            if source is None:
+                source = template.get("image")
+                if source is None:
+                    continue
+                source = source.copy()
+                template["source_image"] = source
+            target_size = (
+                max(1, int(round(source.shape[0] * scale_y))),
+                max(1, int(round(source.shape[1] * scale_x))),
+            )
+            image = self._resize_green_screen_template(source, target_size)
+            template["image"] = image
+            template["gray"] = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+            template["mask"] = get_mask(image, (0, 255, 0))
+
+            config_index = int(template.get("config_index", index))
+            if 0 <= config_index < len(runtime_templates):
+                offset = runtime_templates[config_index].get(
+                    "player_offset", template.get("player_offset", (0, 0))
+                )
+                template["player_offset"] = (
+                    int(offset[0]), int(offset[1])
+                )
+
+        self._last_nametag_template_geometry = geometry_key
+        logger.info(
+            "[capture] Scaled hero templates from "
+            f"{(reference_h, reference_w)} to {(output_h, output_w)}"
+        )
+
+    def _refresh_runtime_frame_config(self, output_size):
+        """Regenerate native screen-space config from one unscaled baseline."""
+        output_size = tuple(map(int, output_size[:2]))
+        if output_size == getattr(self, "_last_runtime_output_size", None):
+            return
+
+        base_cfg = getattr(self, "_base_cfg", None)
+        if base_cfg is None:
+            # Preserve compatibility with lightweight ``__new__`` test bots.
+            base_cfg = deepcopy(self.cfg)
+            self._base_cfg = base_cfg
+        self.cfg = scale_runtime_pixel_config(base_cfg, output_size)
+        self._last_runtime_output_size = output_size
+
+        # These components are constructed before the first frame arrives.
+        # Swap their shared config reference atomically after deriving native
+        # screen coordinates.
+        for component_name in (
+                "capture", "kb", "health_monitor", "rune_solver"):
+            component = getattr(self, component_name, None)
+            if component is not None and hasattr(component, "cfg"):
+                component.cfg = self.cfg
+
+        self._refresh_nametag_templates(output_size)
+        logger.info(
+            "[capture] Runtime pixel config ready for "
+            f"output_size={output_size}"
+        )
 
     def start(self):
         '''
@@ -645,17 +1002,42 @@ class MapleStoryAutoBot:
         timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
         path = os.path.join("video", f"{timestamp}.mp4")
 
-        # Get video writer
-        fourcc = cv2.VideoWriter_fourcc(*'mp4v')  # mp4 codec
-        self.video_writer = cv2.VideoWriter(path, fourcc, 10, WINDOW_WORKING_SIZE)
+        self._video_record_path = path
+        self._video_record_size = None
+        self.video_writer = None
+        frame = getattr(self, "img_frame_debug", None)
+        if frame is None:
+            frame = getattr(self, "img_frame", None)
+        if frame is not None:
+            self._open_video_writer_for_frame(frame)
 
         logger.info(f"[start_record] Record video to {path}")
+
+    def _open_video_writer_for_frame(self, frame):
+        """Open the pending recorder with the actual current frame size."""
+        path = getattr(self, "_video_record_path", None)
+        if path is None or frame is None:
+            return
+        frame_h, frame_w = frame.shape[:2]
+        frame_size = (frame_w, frame_h)
+        if getattr(self, "video_writer", None) is not None and \
+                getattr(self, "_video_record_size", None) == frame_size:
+            return
+        if getattr(self, "video_writer", None) is not None:
+            self.video_writer.release()
+        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+        self.video_writer = cv2.VideoWriter(path, fourcc, 10, frame_size)
+        self._video_record_size = frame_size
 
     def stop_record(self):
         '''
         Stop Record
         '''
+        if getattr(self, "video_writer", None) is not None:
+            self.video_writer.release()
         self.video_writer = None
+        self._video_record_path = None
+        self._video_record_size = None
         logger.info("[stop_record] Stop recording")
 
     def get_player_location_by_appearance(
@@ -841,8 +1223,7 @@ class MapleStoryAutoBot:
                     self.pending_appearance_location = best["player"]
                     self.pending_appearance_count = 1
                 if self.pending_appearance_count < confirm_frames:
-                    draw_rectangle(
-                        self.img_frame_debug,
+                    self._draw_debug_rectangle(
                         best["loc"],
                         best["shape"],
                         (0, 165, 255),
@@ -859,8 +1240,7 @@ class MapleStoryAutoBot:
         self.has_valid_appearance_location = True
         self.pending_appearance_location = None
         self.pending_appearance_count = 0
-        draw_rectangle(
-            self.img_frame_debug,
+        self._draw_debug_rectangle(
             best["loc"],
             best["shape"],
             (0, 165, 255),
@@ -1478,8 +1858,7 @@ class MapleStoryAutoBot:
         # reuse the existing jump/stale safeguards. Do not draw that synthetic
         # box as though text was actually matched.
         if tag_type != "appearance":
-            draw_rectangle(
-                self.img_frame_debug,
+            self._draw_debug_rectangle(
                 self.loc_nametag,
                 self.img_nametag.shape,
                 (0, 255, 0),
@@ -1501,8 +1880,7 @@ class MapleStoryAutoBot:
                     medal_match_height,
                     self.img_nametag_medal.shape[1],
                 )
-            draw_rectangle(
-                self.img_frame_debug,
+            self._draw_debug_rectangle(
                 debug_medal_loc,
                 debug_medal_shape,
                 (255, 255, 0),
@@ -1511,8 +1889,7 @@ class MapleStoryAutoBot:
                 text_height=0.5,
             )
         if use_pet and pet_loc is not None:
-            draw_rectangle(
-                self.img_frame_debug,
+            self._draw_debug_rectangle(
                 pet_loc,
                 self.img_nametag_pet.shape,
                 (255, 0, 255),
@@ -1549,10 +1926,18 @@ class MapleStoryAutoBot:
                 f"NameTag,id={score:.2f}{medal_text},"
                 f"{match_status},{tag_type}"
             )
-        draw_text(self.img_frame_debug, text,
-                  (self.loc_nametag[0],
-                   self.loc_nametag[1] + self.img_nametag.shape[0] + 30),
-                  cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+        self._draw_debug_text(
+            text,
+            (
+                self.loc_nametag[0],
+                self.loc_nametag[1] + self.img_nametag.shape[0]
+                + int(round(30 * self.get_frame_visual_scale())),
+            ),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.7,
+            (0, 255, 0),
+            2,
+        )
 
         # A stale box is useful in the visualization but must never drive
         # route or attack logic. Only a match accepted on this frame is current.
@@ -1610,8 +1995,14 @@ class MapleStoryAutoBot:
                       y + self.cfg["party_red_bar"]["offset"][1])
 
         # visualize for debug
-        draw_rectangle(self.img_frame_debug, loc_party_red_bar,
-                    (h, w), (0, 255, 0), "party red bar", thickness=1, text_height=0.4)
+        self._draw_debug_rectangle(
+            loc_party_red_bar,
+            (h, w),
+            (0, 255, 0),
+            "party red bar",
+            thickness=1,
+            text_height=0.4,
+        )
 
         return loc_player, loc_party_red_bar
 
@@ -1724,25 +2115,28 @@ class MapleStoryAutoBot:
                 1                       # thickness
             )
             # Print color code on debug image
-            draw_text(
-                self.img_frame_debug, f"Route Action: {nearest['command']}",
+            self._draw_debug_text(
+                f"Route Action: {nearest['command']}",
                 (650, 30),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255),
-                2, cv2.LINE_AA
+                2, cv2.LINE_AA,
+                reference_position=True,
             )
-            draw_text(
-                self.img_frame_debug, f"Route Index: {self.idx_routes}",
+            self._draw_debug_text(
+                f"Route Index: {self.idx_routes}",
                 (650, 90),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255),
-                2, cv2.LINE_AA
+                2, cv2.LINE_AA,
+                reference_position=True,
             )
 
         if nearest_up_down is not None:
-            draw_text(
-                self.img_frame_debug, f"Route Action: {nearest_up_down['command']}",
+            self._draw_debug_text(
+                f"Route Action: {nearest_up_down['command']}",
                 (650, 60),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255),
-                2, cv2.LINE_AA
+                2, cv2.LINE_AA,
+                reference_position=True,
             )
             draw_line(
                 self.img_route_debug,
@@ -1956,8 +2350,7 @@ class MapleStoryAutoBot:
                 kept.append(monster)
                 continue
 
-            draw_rectangle(
-                self.img_frame_debug,
+            self._draw_debug_rectangle(
                 monster["position"],
                 monster["size"],
                 (255, 0, 255),
@@ -1965,8 +2358,7 @@ class MapleStoryAutoBot:
                 thickness=1,
                 text_height=0.45,
             )
-            draw_rectangle(
-                self.img_frame_debug,
+            self._draw_debug_rectangle(
                 pet_loc,
                 (pet_h, pet_w),
                 (255, 0, 255),
@@ -2112,8 +2504,8 @@ class MapleStoryAutoBot:
                     # cv2.imshow("Black Mask", closed_mask)
 
                     # draw player character bounding box
-                    draw_rectangle(
-                        self.img_frame_debug, (char_x_min+x0, char_y_min+y0),
+                    self._draw_debug_rectangle(
+                        (char_x_min+x0, char_y_min+y0),
                         (self.cfg["character"]["height"], self.cfg["character"]["width"]),
                         (255, 0, 0), "Character Box"
                     )
@@ -2390,8 +2782,8 @@ class MapleStoryAutoBot:
         """Draw a monster search region and already-computed detections."""
         x0, y0 = top_left
         x1, y1 = bottom_right
-        draw_rectangle(
-            self.img_frame_debug, (x0, y0), (y1-y0, x1-x0),
+        self._draw_debug_rectangle(
+            (x0, y0), (y1-y0, x1-x0),
             (255, 0, 0), "Mob Detection Box"
         )
 
@@ -2416,8 +2808,8 @@ class MapleStoryAutoBot:
             elif "confidence" in monster:
                 label = f'{monster["name"]}: {visible_score:.2f}'
 
-            draw_rectangle(
-                self.img_frame_debug, monster["position"], monster["size"],
+            self._draw_debug_rectangle(
+                monster["position"], monster["size"],
                 color, label
             )
 
@@ -2448,6 +2840,7 @@ class MapleStoryAutoBot:
             return
 
         self._last_capture_error = None
+        self._refresh_runtime_frame_config(geometry["output_size"])
         geometry_key = tuple(geometry.items())
         if geometry_key != getattr(self, "_last_capture_geometry", None):
             logger.info(
@@ -2459,15 +2852,53 @@ class MapleStoryAutoBot:
             )
             self._last_capture_geometry = geometry_key
 
-        # Preserve the native PotPlayer video raster for minimap routing. The
-        # full-frame vision image is intentionally normalized for monster/UI
-        # templates, but that downscale can collapse the 2x2 player dot.
-        if geometry["profile"] == "potplayer":
+        # Legacy normalized PotPlayer mode needs a second native minimap crop
+        # because downscaling can collapse its 2x2 player dot. Native mode
+        # already returns this exact video raster, so never process it twice.
+        if geometry["profile"] == "potplayer" and geometry.get(
+                "normalized", True):
             x0, y0, x1, y1 = geometry["video_roi"]
             self.img_capture_content = self.frame[y0:y1, x0:x1]
         else:
             self.img_capture_content = None
         return img_frame
+
+    def apply_saved_minimap_geometry(self):
+        """Crop the minimap from route metadata without scanning the frame."""
+        geometry = getattr(self, "minimap_geometry", None)
+        if geometry is None:
+            return None
+
+        try:
+            x, y, w, h = scale_minimap_rect(
+                geometry,
+                self.img_frame.shape[:2],
+            )
+            self.loc_minimap = (x, y)
+            self.img_minimap_screen = self.img_frame[y:y+h, x:x+w]
+            self.img_minimap_source = self.img_minimap_screen
+
+            # A normalized working frame can erase the tiny player dot. Apply
+            # the same saved rectangle to the native PotPlayer content instead
+            # of running a second contour scan there.
+            native_frame = getattr(self, "img_capture_content", None)
+            if native_frame is not None:
+                nx, ny, nw, nh = scale_minimap_rect(
+                    geometry,
+                    native_frame.shape[:2],
+                )
+                self.img_minimap_source = native_frame[
+                    ny:ny+nh, nx:nx+nw
+                ]
+        except ValueError as exc:
+            text = str(exc)
+            if text != getattr(self, "_last_minimap_geometry_error", None):
+                logger.error(f"Unable to apply saved minimap geometry: {text}")
+                self._last_minimap_geometry_error = text
+            return False
+
+        self._last_minimap_geometry_error = None
+        return True
 
     def is_player_stuck(self):
         """
@@ -2580,8 +3011,9 @@ class MapleStoryAutoBot:
         '''
         # Print text at bottom left corner
         self.fps = round(1.0 / (time.time() - self.t_last_frame))
-        text_y_interval = 23
-        text_y_start = 460
+        visual_scale = self.get_frame_visual_scale()
+        text_y_interval = max(1, int(round(23 * visual_scale)))
+        text_x, text_y_start = self.scale_debug_reference_point((10, 460))
         dt_screenshot = time.time() - self.kb.t_last_screenshot
         h, w = self.frame.shape[:2]
         text_list = [
@@ -2592,49 +3024,51 @@ class MapleStoryAutoBot:
             f"Press 'F2' to save screenshot{' : Saved' if dt_screenshot < 0.7 else ''}",
              "Press 'F12' to quit"]
         for idx, text in enumerate(text_list):
-            cv2.putText(
-                self.img_frame_debug, text,
-                (10, text_y_start + text_y_interval*idx),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255),
-                2, cv2.LINE_AA
+            self._draw_debug_text(
+                text,
+                (text_x, text_y_start + text_y_interval*idx),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.7,
+                (0, 0, 255),
+                2,
+                cv2.LINE_AA,
             )
 
         # Draw attack boxes only when a current screen-space player location is
         # available. Debug mode still shows the full-frame monster box below.
         if not getattr(self, "screen_player_location_valid", False):
-            draw_text(
-                self.img_frame_debug,
+            self._draw_debug_text(
                 "Player location unavailable",
                 (500, 60),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.7,
                 (0, 0, 255),
                 2,
+                reference_position=True,
             )
         elif self.cfg["bot"]["attack"] == "aoe_skill":
             x0, y0, x1, y1 = self.get_attack_range()
-            draw_rectangle(
-                self.img_frame_debug, (x0, y0),
+            self._draw_debug_rectangle(
+                (x0, y0),
                 (y1-y0, x1-x0),
                 (0, 0, 255), "Attack Range"
             )
         elif self.cfg["bot"]["attack"] == "directional":
             x0, y0, x1, y1 = self.get_attack_range(is_left=True)
-            draw_rectangle(
-                self.img_frame_debug, (x0, y0),
+            self._draw_debug_rectangle(
+                (x0, y0),
                 (y1-y0, x1-x0),
                 (0, 0, 255), "Attack Range(Left)"
             )
             x0, y0, x1, y1 = self.get_attack_range(is_left=False)
-            draw_rectangle(
-                self.img_frame_debug, (x0, y0),
+            self._draw_debug_rectangle(
+                (x0, y0),
                 (y1-y0, x1-x0),
                 (0, 0, 255), "Attack Range(Right)"
             )
 
         # Draw minimap rectangle on img debug
-        draw_rectangle(
-            self.img_frame_debug,
+        self._draw_debug_rectangle(
             self.loc_minimap,
             self.img_minimap_screen.shape[:2],
             (0, 0, 255), "minimap",thickness=2
@@ -2657,15 +3091,20 @@ class MapleStoryAutoBot:
 
         # Crop region
         mini_map_crop = self.img_route_debug[y0:y1, x0:x1]
+        if mini_map_crop.size == 0:
+            return
         mini_map_crop = cv2.resize(mini_map_crop,
-                                (int(mini_map_crop.shape[1] * 3),
-                                 int(mini_map_crop.shape[0] * 3)),
+                                (max(1, int(round(mini_map_crop.shape[1]
+                                                  * 3 * visual_scale))),
+                                 max(1, int(round(mini_map_crop.shape[0]
+                                                  * 3 * visual_scale)))),
                                 interpolation=cv2.INTER_NEAREST)
         # Paste into top-right corner of self.img_frame_debug
         h_crop, w_crop = mini_map_crop.shape[:2]
         h_frame, w_frame = self.img_frame_debug.shape[:2]
-        x_paste = w_frame - w_crop - 10  # 10px margin from right
-        y_paste = 10
+        paste_margin = max(1, int(round(10 * visual_scale)))
+        x_paste = max(0, w_frame - w_crop - paste_margin)
+        y_paste = paste_margin
         self.img_frame_debug[y_paste:y_paste + h_crop, x_paste:x_paste + w_crop] = mini_map_crop
 
         # Draw border around minimap
@@ -2674,7 +3113,7 @@ class MapleStoryAutoBot:
             (x_paste, y_paste),
             (x_paste + w_crop, y_paste + h_crop),
             color=(255, 255, 255),   # White border
-            thickness=2
+            thickness=max(1, int(round(2 * visual_scale)))
         )
 
         # Draw HP/MP/EXP bar on debug window
@@ -2682,21 +3121,32 @@ class MapleStoryAutoBot:
                       self.health_monitor.mp_percent,
                       self.health_monitor.exp_percent]
         for i, bar_name in enumerate(["HP", "MP", "EXP"]):
-            x_s, y_s = (250, 30)
             # Print bar ratio on debug window
-            cv2.putText(self.img_frame_debug,
-                        f"{bar_name}: {percent_bars[i]:.1f}%",
-                        (x_s, y_s + 30*i),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0,0,255), 2)
+            self._draw_debug_text(
+                f"{bar_name}: {percent_bars[i]:.1f}%",
+                (250, 30 + 30*i),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.8,
+                (0, 0, 255),
+                2,
+                reference_position=True,
+            )
             # Draw bar on debug window
-            x_s, y_s = (410, 13)
+            x_s, y_s = self.scale_debug_reference_point((410, 13 + 30*i))
             x, y, w, h = self.health_monitor.loc_size_bars[i]
-            self.img_frame_debug[y_s+30*i:y_s+h+30*i, x_s:x_s+w] = \
+            self.img_frame_debug[y_s:y_s+h, x_s:x_s+w] = \
                 self.img_frame[self.cfg["ui_coords"]["ui_y_start"]:, :][y:y+h, x:x+w]
 
         # Print command on screen
-        cv2.putText(self.img_frame_debug, f"Cmd: {self.cmd_move_x} {self.cmd_move_y} {self.cmd_action}",
-                    (10, 430), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+        self._draw_debug_text(
+            f"Cmd: {self.cmd_move_x} {self.cmd_move_y} {self.cmd_action}",
+            (10, 430),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.6,
+            (0, 255, 255),
+            2,
+            reference_position=True,
+        )
 
     def update_img_frame_debug(self):
         '''
@@ -2949,8 +3399,15 @@ class MapleStoryAutoBot:
             left_side_ok = is_monster_on_correct_side(monster_left, "left") if monster_left else False
             right_side_ok = is_monster_on_correct_side(monster_right, "right") if monster_right else False
             debug_text = f"L:{distance_left:.0f}({left_side_ok}) R:{distance_right:.0f}({right_side_ok}) Dir:{attack_direction}"
-            draw_text(self.img_frame_debug, debug_text,
-                      (10, 450), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 2)
+            self._draw_debug_text(
+                debug_text,
+                (10, 450),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.5,
+                (255, 255, 0),
+                2,
+                reference_position=True,
+            )
         return attack_direction
 
     def is_need_change_channel(self, loc_other_players):
@@ -3013,8 +3470,12 @@ class MapleStoryAutoBot:
         img_roi = self.img_frame[y0:y1, x0:x1]
 
         # Draw rectange on debug image
-        draw_rectangle(self.img_frame_debug, (x0, y0),
-                       (y1-y0, x1-x0), (0, 255, 0), "login_button box")
+        self._draw_debug_rectangle(
+            (x0, y0),
+            (y1-y0, x1-x0),
+            (0, 255, 0),
+            "login_button box",
+        )
 
         # Find the 'login' button
         loc, score, _ = find_pattern_sqdiff(
@@ -3231,47 +3692,62 @@ class MapleStoryAutoBot:
         ###################
         ### Get Minimap ###
         ###################
-        # Get minimap coordinate and size on game window
-        minimap_result = get_minimap_loc_size(self.img_frame)
-        if minimap_result is None:
-            if not self.is_debug_mode() and \
-                not self.remote_keyboard_target() and \
-                time.time() - self.t_last_minimap_update > 30:
-                # Unable to get minimap for 30 seconds -> assume it's login screen
-                loc_login_button = self.get_login_button_location()
-                if loc_login_button:
-                    logger.info("Found login button on screen. Proceed to login.")
-                    self.click_game_ui(loc_login_button, "auto_login")
-                    time.sleep(3)
-                    self.click_game_ui(
-                        self.cfg["ui_coords"]["select_character"],
-                        "auto_login",
-                    )
-                    time.sleep(2)
-        else:
-            x, y, w, h = minimap_result
-            # Shrink minimap boardary by one pixel to avoid pixel leaking to minimap
-            x += 1
-            y += 1
-            w -= 2
-            h -= 2
-            # update minimap image
-            self.loc_minimap = (x, y)
-            self.img_minimap_screen = self.img_frame[y:y+h, x:x+w]
-            self.img_minimap_source = self.img_minimap_screen
-            native_frame = getattr(self, "img_capture_content", None)
-            if native_frame is not None:
-                native_result = get_minimap_loc_size(native_frame)
-                if native_result is not None:
-                    nx, ny, nw, nh = native_result
-                    nx += 1
-                    ny += 1
-                    nw -= 2
-                    nh -= 2
-                    if nw > 0 and nh > 0:
-                        self.img_minimap_source = native_frame[
-                            ny:ny+nh, nx:nx+nw
-                        ]
+        # New route recordings persist a border-free minimap rectangle beside
+        # map.png. Main reuses that rectangle directly; legacy maps without the
+        # text file retain the old detector until they are re-recorded.
+        saved_geometry_status = self.apply_saved_minimap_geometry()
+        if saved_geometry_status is False:
+            return -1
+        minimap_updated = saved_geometry_status is True
+
+        if saved_geometry_status is None:
+            minimap_result = get_minimap_loc_size(self.img_frame)
+            if minimap_result is None:
+                if not self.is_debug_mode() and \
+                    not self.remote_keyboard_target() and \
+                    time.time() - self.t_last_minimap_update > 30:
+                    # Unable to get minimap for 30 seconds -> assume it's login screen
+                    loc_login_button = self.get_login_button_location()
+                    if loc_login_button:
+                        logger.info("Found login button on screen. Proceed to login.")
+                        self.click_game_ui(loc_login_button, "auto_login")
+                        time.sleep(3)
+                        self.click_game_ui(
+                            self.cfg["ui_coords"]["select_character"],
+                            "auto_login",
+                        )
+                        time.sleep(2)
+            else:
+                x, y, w, h = minimap_result
+                # Shrink the detected white border by one pixel on every side.
+                x += 1
+                y += 1
+                w -= 2
+                h -= 2
+                if w > 0 and h > 0:
+                    self.loc_minimap = (x, y)
+                    self.img_minimap_screen = self.img_frame[y:y+h, x:x+w]
+                    self.img_minimap_source = self.img_minimap_screen
+                    minimap_updated = True
+
+                    # Legacy normalized captures still use native content for
+                    # the tiny player dot. This fallback disappears once the
+                    # route has minimap_geometry.txt.
+                    native_frame = getattr(self, "img_capture_content", None)
+                    if native_frame is not None:
+                        native_result = get_minimap_loc_size(native_frame)
+                        if native_result is not None:
+                            nx, ny, nw, nh = native_result
+                            nx += 1
+                            ny += 1
+                            nw -= 2
+                            nh -= 2
+                            if nw > 0 and nh > 0:
+                                self.img_minimap_source = native_frame[
+                                    ny:ny+nh, nx:nx+nw
+                                ]
+
+        if minimap_updated:
             original_minimap_size = self.img_minimap_source.shape[:2]
             self.img_minimap = resize_minimap_to_reference(
                 self.img_minimap_source,
@@ -3322,9 +3798,12 @@ class MapleStoryAutoBot:
             self.loc_player = loc_player
 
         # Draw player center for debugging
-        draw_circle(self.img_frame_debug,
-                    self.loc_player, radius=3,
-                    color=(0, 0, 255), thickness=-1)
+        self._draw_debug_circle(
+            self.loc_player,
+            radius=3,
+            color=(0, 0, 255),
+            thickness=-1,
+        )
 
         # Get player location on minimap
         minimap_cfg = self.cfg["minimap"]
@@ -3443,6 +3922,9 @@ class MapleStoryAutoBot:
         self.update_info_on_img_frame_debug()
 
         # Save debug window to video
+        if getattr(self, "_video_record_path", None) is not None and \
+                self.video_writer is None:
+            self._open_video_writer_for_frame(self.img_frame_debug)
         if self.video_writer:
             self.video_writer.write(self.img_frame_debug)
 

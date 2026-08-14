@@ -24,7 +24,6 @@ eng_to_cn:
   disposed_flower_garden: 暗影花園
   mu_Lung_wild_bear_area_2: 野熊的領土2
   wisdom_forest: 智慧森林
-  henesys_east_field: 射手村東部平原
   # monster
   zombie_lupin: 天使猴
   black_axe_stump: 黑斧木妖
@@ -83,4 +82,3 @@ map_mobs_mapping:
   disposed_flower_garden: [nependeath, dark_nependeath]
   mu_Lung_wild_bear_area_2: [grizzly, panda]
   wisdom_forest: [snail, slime, green_mushroom]
-  henesys_east_field: [pig, ribbon_pig]

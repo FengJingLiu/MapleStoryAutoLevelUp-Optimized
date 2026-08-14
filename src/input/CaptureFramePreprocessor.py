@@ -1,4 +1,4 @@
-"""Normalize direct-game and PotPlayer capture frames for vision processing."""
+"""Extract game content from direct-game and PotPlayer capture frames."""
 
 from __future__ import annotations
 
@@ -100,25 +100,37 @@ def preprocess_capture_frame(
     window_title: str = "",
     skip_direct_size_check: bool = False,
 ):
-    """Extract pure game content and return the project's standard working frame.
+    """Extract pure game content and return the configured working frame.
 
     PotPlayer frames first remove the configured skin chrome and centered black
-    bars, then pass through the legacy game-content raster. This preserves the
-    coordinate/template geometry used by the original direct-window pipeline.
+    bars. By default they then pass through the legacy game-content raster to
+    preserve the original coordinate/template geometry. When
+    ``preserve_native_resolution`` is enabled, the cropped PotPlayer video is
+    returned at its native resolution instead.
     """
     if frame is None or getattr(frame, "ndim", 0) < 2 or frame.size == 0:
         raise ValueError("Captured frame is empty")
 
     game_window_cfg = cfg["game_window"]
+    profile = resolve_capture_profile(game_window_cfg, window_title)
+    preserve_native_resolution = bool(
+        game_window_cfg.get("preserve_native_resolution", False)
+    )
     expected_h, expected_w = _positive_pair(
         game_window_cfg["size"], "game_window.size"
     )
-    profile = resolve_capture_profile(game_window_cfg, window_title)
 
     if profile == POTPLAYER_PROFILE:
-        content, roi = _potplayer_video_roi(frame, game_window_cfg)
-        if content.shape[:2] != (expected_h, expected_w):
-            downscaling = content.shape[0] >= expected_h and content.shape[1] >= expected_w
+        native_content, roi = _potplayer_video_roi(frame, game_window_cfg)
+        content = native_content
+        if not preserve_native_resolution and content.shape[:2] != (
+            expected_h,
+            expected_w,
+        ):
+            downscaling = (
+                content.shape[0] >= expected_h
+                and content.shape[1] >= expected_w
+            )
             interpolation = cv2.INTER_AREA if downscaling else cv2.INTER_LINEAR
             content = cv2.resize(
                 content,
@@ -133,6 +145,7 @@ def preprocess_capture_frame(
                 f"frame {frame.shape[:2]}"
             )
         content = frame[title_bar_height:, :]
+        native_content = content
         roi = (0, title_bar_height, frame.shape[1], frame.shape[0])
 
         if not skip_direct_size_check:
@@ -150,16 +163,25 @@ def preprocess_capture_frame(
                     f"(expected {(expected_h, expected_w)})"
                 )
 
-    working_frame = cv2.resize(
-        content,
-        WINDOW_WORKING_SIZE,
-        interpolation=cv2.INTER_NEAREST,
+    normalized = not (
+        profile == POTPLAYER_PROFILE and preserve_native_resolution
     )
+    if normalized:
+        output_frame = cv2.resize(
+            content,
+            WINDOW_WORKING_SIZE,
+            interpolation=cv2.INTER_NEAREST,
+        )
+    else:
+        output_frame = content
     metadata = {
         "profile": profile,
         "source_size": tuple(frame.shape[:2]),
         "video_roi": roi,
+        "native_size": tuple(native_content.shape[:2]),
         "content_size": tuple(content.shape[:2]),
-        "working_size": tuple(working_frame.shape[:2]),
+        "output_size": tuple(output_frame.shape[:2]),
+        "working_size": tuple(output_frame.shape[:2]),
+        "normalized": normalized,
     }
-    return working_frame, metadata
+    return output_frame, metadata

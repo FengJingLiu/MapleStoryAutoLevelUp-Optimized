@@ -1047,8 +1047,19 @@ class MainWindow(QMainWindow):
         if img is None:
             return
 
+        if not img.flags.c_contiguous:
+            img = img.copy()
         height, width, _ = img.shape
-        qimg = QImage(img.data, width, height, QImage.Format_BGR888)
+        # Native PotPlayer widths such as 3579 have an unaligned three-byte
+        # scanline. Pass the real NumPy stride so QImage does not assume padded
+        # rows and read beyond the frame buffer.
+        qimg = QImage(
+            img.data,
+            width,
+            height,
+            int(img.strides[0]),
+            QImage.Format_BGR888,
+        )
         pixmap = QPixmap.fromImage(qimg)
 
         # Scale the image to fit label size but maintain aspect ratio
@@ -1064,8 +1075,16 @@ class MainWindow(QMainWindow):
         if img is None:
             return
 
+        if not img.flags.c_contiguous:
+            img = img.copy()
         height, width, _ = img.shape
-        qimg = QImage(img.data, width, height, QImage.Format_BGR888)
+        qimg = QImage(
+            img.data,
+            width,
+            height,
+            int(img.strides[0]),
+            QImage.Format_BGR888,
+        )
         pixmap = QPixmap.fromImage(qimg)
 
         scaled_pixmap = pixmap.scaled(

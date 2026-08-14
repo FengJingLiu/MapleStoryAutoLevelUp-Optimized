@@ -60,6 +60,45 @@ class RuneSolver:
     def reset(self):
         self.loc_rune = None
 
+    def _debug_visual_scale(self, img_debug):
+        """Return native-frame style scale for rune debug annotations."""
+        if img_debug is None:
+            return 1.0
+        reference = self.cfg.get("game_window", {}).get(
+            "coordinate_reference_size", (700, 1296)
+        )
+        try:
+            ref_h, ref_w = map(float, reference[:2])
+            if ref_h <= 0 or ref_w <= 0:
+                raise ValueError
+        except (TypeError, ValueError, IndexError):
+            ref_h, ref_w = (700.0, 1296.0)
+        frame_h, frame_w = img_debug.shape[:2]
+        return max(0.1, min(frame_h / ref_h, frame_w / ref_w))
+
+    def _draw_debug_rectangle(self, img_debug, *args, **kwargs):
+        kwargs["visual_scale"] = self._debug_visual_scale(img_debug)
+        draw_rectangle(img_debug, *args, **kwargs)
+
+    def _draw_debug_circle(
+        self,
+        img_debug,
+        center,
+        radius,
+        color,
+        thickness,
+        *,
+        scale_radius=False,
+    ):
+        if img_debug is None:
+            return
+        visual_scale = self._debug_visual_scale(img_debug)
+        if scale_radius:
+            radius = max(1, int(round(radius * visual_scale)))
+        if thickness >= 0:
+            thickness = max(1, int(round(thickness * visual_scale)))
+        draw_circle(img_debug, center, radius, color, thickness)
+
     def solve_rune(self, img, img_debug):
         '''
         Automatically solves the rune puzzle mini-game by recognizing directional arrows
@@ -112,7 +151,13 @@ class RuneSolver:
                 # Circle Debug
                 for (cx, cy, r) in circles:
                     # Offset back to original coordinates on full image
-                    draw_circle(img_debug, (x + cx, y + cy), r, (0, 0, 255), 2)
+                    self._draw_debug_circle(
+                        img_debug,
+                        (x + cx, y + cy),
+                        r,
+                        (0, 0, 255),
+                        2,
+                    )
 
                 # Loop through all possible arrows template and choose the most possible one
                 best_score = float('inf')
@@ -129,7 +174,7 @@ class RuneSolver:
                             f"(score={round(best_score, 2)})")
 
                 # Update img_frame_debug
-                draw_rectangle(
+                self._draw_debug_rectangle(
                     img_debug, (x, y), (size, size),
                     (0, 0, 255), str(round(best_score, 2))
                 )
@@ -168,7 +213,7 @@ class RuneSolver:
                         self.img_rune_enable)
         # Debug
         if self.cfg['rune_detect']['debug']:
-            draw_rectangle(
+            self._draw_debug_rectangle(
                 img_debug, (x0, y0), (y1-y0, x1-x0),
                 (0, 0, 255), f"Rune Enable Msg({round(score, 2)})")
 
@@ -201,7 +246,7 @@ class RuneSolver:
 
         # Debug
         if self.cfg['rune_detect']['debug']:
-            draw_rectangle(
+            self._draw_debug_rectangle(
                 img_debug, (x0, y0), (y1-y0, x1-x0),
                 (0, 0, 255), f"Rune Warning({round(score, 2)})")
 
@@ -231,7 +276,7 @@ class RuneSolver:
         y1 = min(h, loc_player[1])
 
         # Debug
-        draw_rectangle(
+        self._draw_debug_rectangle(
             img_debug, (x0, y0), (y1-y0, x1-x0),
             (255, 0, 0), "Rune Detection Range"
         )
@@ -294,7 +339,7 @@ class RuneSolver:
 
         # Draw all parts on debug window
         for (i, loc, score, shape) in matches:
-            draw_rectangle(
+            self._draw_debug_rectangle(
                 img_debug,
                 (x0 + loc[0], y0 + loc[1]),
                 shape,
@@ -305,8 +350,14 @@ class RuneSolver:
             )
 
         # Draw rune location on debug window
-        draw_circle(img_debug, self.loc_rune,
-                    radius=5, color=(0, 255, 255), thickness=-1)
+        self._draw_debug_circle(
+            img_debug,
+            self.loc_rune,
+            radius=5,
+            color=(0, 255, 255),
+            thickness=-1,
+            scale_radius=True,
+        )
 
         screenshot(img_debug, "rune_detected")
 
@@ -394,7 +445,13 @@ class RuneSolver:
                 circles = np.around(circles[0]).astype(int)  # Flatten and round
                 for (cx, cy, r) in circles:
                     # Offset back to original coordinates on full image
-                    draw_circle(img_debug, (x + cx, y + cy), r, (0, 255, 0), 1)
+                    self._draw_debug_circle(
+                        img_debug,
+                        (x + cx, y + cy),
+                        r,
+                        (0, 255, 0),
+                        1,
+                    )
 
         return num_circles >= 3
 
@@ -427,7 +484,7 @@ class RuneSolver:
                 if score < best_score:
                     best_score = score
 
-        draw_rectangle(
+        self._draw_debug_rectangle(
             img_debug, (x, y), (size, size),
             (0, 0, 255), str(round(best_score, 2))
         )
