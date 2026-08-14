@@ -191,9 +191,11 @@ nametag:
     yolo_name_search_tolerance: [14, 8] # Local [x, y] tolerance around the box
     yolo_name_max_gap: 12        # Maximum actual gap from box bottom to name
 
-  # Optional fourth anchor: the character's tiger hood/head. Standing poses
-  # can recover when all text is covered; the hood-only climbing pose is used
-  # only near an already known ladder position because it is less distinctive.
+  # Optional fourth anchor: the character's tiger hood/head. Under a freshly
+  # detected smile, climbing vs standing templates determine ladder state.
+  # Standing poses can also recover Hero when all text is covered; the less
+  # distinctive climbing hood is restricted to a known local anchor or a
+  # previously confirmed ladder position.
   appearance:
     enable: auto                 # Auto-load only templates for nametag.name
     diff_thres: 0.16            # Standing-head SQDIFF threshold
@@ -410,17 +412,14 @@ minimap:
   # 🗺️ Mini-Map
   # The minimap appears in the top-left corner of the game window.
   # It is used to estimate the player’s current location in the world.
-  player_color: [136, 255, 255]   # 🟡 BGR value of the yellow player dot on the minimap
-  player_color_tolerance: 65      # Capture-card per-channel color tolerance
+  # Current capture-card center sample: RGB(233,252,78) -> BGR(78,252,233).
+  player_color: [78, 252, 233]    # 🟡 BGR value of the yellow player dot on the minimap
+  player_color_tolerance: 10      # Tight tolerance avoids nearby yellow artwork
   player_min_component_area: 2    # HDMI scaling can reduce the marker to 2 pixels
   other_player_color: [0, 0, 255] # 🔴 BGR value of the red other player dot on the minimap
-  # Route-map files were recorded from a specific minimap raster. PotPlayer
-  # may scale that UI with the HDMI desktop, so restore the recorded size
-  # before matching the current minimap against map.png. Values are [h, w].
-  reference_size_by_map:
-    fire_land_1: [142, 259]
-    wisdom_forest: [149, 180]
-    henesys_east_field: [92, 203]
+  # Route matching uses the captured minimap's native raster without resizing.
+  # A map and all of its route images must therefore be recorded with the same
+  # capture resolution and in-game minimap/UI scale used during automation.
   debug_window_upscale: 4         # 🔍 Zoom factor for the route debug image (for visualization only)
   debug_window_max_screen_ratio: 0.85  # Keep the complete growing route preview on screen
   offset: [0, 0]                  # 📐 Don't set this unless playing on global server
@@ -455,7 +454,6 @@ route_recoder:
   # A distant global match is accepted immediately when its score is better
   # than the local candidate by at least this amount (for in-map portals).
   teleport_score_margin: 0.03
-
 game_window:
   capture_profile: "auto"      # Options: "auto" "direct" "potplayer"
   # PotPlayer uses a client-drawn skin, so remove its chrome before

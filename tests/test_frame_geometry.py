@@ -153,7 +153,7 @@ def test_scales_full_frame_pixel_settings_without_mutating_source():
     assert scaled["directional_attack"]["range_x"] == 1050
     assert scaled["directional_attack"]["range_y"] == 140
     assert scaled["monster_detect"]["search_box_margin"] == 150
-    assert scaled["monster_detect"]["max_mob_area_trigger"] == 1500
+    assert scaled["monster_detect"]["max_mob_area_trigger"] == 9000
     assert scaled["character"] == {"width": 300, "height": 300}
     assert scaled["edge_teleport"]["trigger_box_width"] == 60
     assert scaled["edge_teleport"]["trigger_box_height"] == 20

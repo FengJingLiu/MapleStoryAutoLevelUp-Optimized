@@ -24,7 +24,8 @@ from src.utils.common import (
     get_minimap_loc_size,
     get_player_location_on_minimap,
     resize_window,
-    resize_minimap_to_reference,
+    copy_minimap_native_raster, copy_minimap_native_location,
+    route_map_can_fit_minimap,
 )
 
 
@@ -309,16 +310,36 @@ class MinimapDetectionTests(unittest.TestCase):
 
         self.assertEqual(get_minimap_loc_size(frame), (7, 42, 122, 72))
 
-    def test_fire_land_reference_size_is_restored(self):
+    def test_minimap_native_raster_is_not_resized(self):
         minimap = np.zeros((70, 120, 3), dtype=np.uint8)
-        cfg = {
-            "bot": {"map": "fire_land_1"},
-            "minimap": {"reference_size_by_map": {"fire_land_1": (142, 259)}},
-        }
 
-        resized = resize_minimap_to_reference(minimap, cfg)
+        native = copy_minimap_native_raster(minimap)
 
-        self.assertEqual(resized.shape, (142, 259, 3))
+        self.assertEqual(native.shape, (70, 120, 3))
+        self.assertTrue(np.array_equal(native, minimap))
+        self.assertIsNot(native, minimap)
+
+    def test_minimap_player_location_is_not_rescaled_or_rounded_again(self):
+        self.assertEqual(
+            copy_minimap_native_location((211, 137)),
+            (211, 137),
+        )
+
+    def test_legacy_route_map_smaller_than_native_minimap_is_rejected(self):
+        legacy_map = np.zeros((322, 240, 3), dtype=np.uint8)
+        native_minimap = np.zeros((293, 350, 3), dtype=np.uint8)
+
+        self.assertFalse(
+            route_map_can_fit_minimap(legacy_map, native_minimap)
+        )
+
+    def test_native_route_map_can_contain_native_minimap(self):
+        native_map = np.zeros((410, 480, 3), dtype=np.uint8)
+        native_minimap = np.zeros((293, 350, 3), dtype=np.uint8)
+
+        self.assertTrue(
+            route_map_can_fit_minimap(native_map, native_minimap)
+        )
 
     def test_player_dot_allows_capture_card_color_drift(self):
         minimap = np.zeros((50, 80, 3), dtype=np.uint8)
@@ -409,6 +430,109 @@ class MinimapDetectionTests(unittest.TestCase):
 
 
 class AutoBotLifecycleTests(unittest.TestCase):
+    @staticmethod
+    def _route_color_bot():
+        bot = MapleStoryAutoBot.__new__(MapleStoryAutoBot)
+        bot.loc_player_global = (10, 10)
+        bot.img_route = np.zeros((21, 21, 3), dtype=np.uint8)
+        bot.img_route_debug = None
+        bot.img_frame_debug = None
+        bot.idx_routes = 0
+        bot.color_code = {
+            (255, 0, 0): "left none none",
+            (0, 0, 255): "right none none",
+            (255, 0, 255): "none none jump",
+            (255, 0, 127): "none up teleport",
+            (255, 255, 0): "none none goal",
+            (0, 255, 127): "stop stop stop",
+        }
+        bot.color_code_up_down = {
+            (127, 127, 127): "none up none",
+        }
+        bot.cfg = {
+            "route": {"search_range": 10},
+            "teleport": {
+                "is_use_teleport_to_walk": False,
+                "cooldown": 1,
+            },
+            "key": {"teleport": "e"},
+        }
+        bot.img_routes = [bot.img_route]
+        bot.is_on_ladder = False
+        bot.cmd_move_x = "none"
+        bot.cmd_move_y = "none"
+        bot.cmd_action = "none"
+        bot.t_last_teleport = time.time()
+        bot.is_near_edge = Mock(return_value=False)
+        return bot
+
+    def test_route_point_actions_are_ignored_until_player_pixel_overlaps(self):
+        bot = self._route_color_bot()
+        bot.img_route[10, 9] = (255, 0, 255)
+
+        color_code, color_code_up_down = bot.get_nearest_color_code()
+
+        self.assertIsNone(color_code)
+        self.assertIsNone(color_code_up_down)
+
+    def test_route_point_actions_trigger_at_player_center_pixel(self):
+        action_cases = {
+            (255, 0, 255): "none none jump",
+            (255, 0, 127): "none up teleport",
+            (255, 255, 0): "none none goal",
+            (0, 255, 127): "stop stop stop",
+        }
+        for color, command in action_cases.items():
+            with self.subTest(command=command):
+                bot = self._route_color_bot()
+                bot.img_route[10, 10] = color
+
+                color_code, _ = bot.get_nearest_color_code()
+
+                self.assertIsNotNone(color_code)
+                self.assertEqual(color_code["pixel"], (10, 10))
+                self.assertEqual(color_code["command"], command)
+                self.assertEqual(color_code["distance"], 0)
+                self.assertTrue(color_code["exact_action"])
+
+    def test_route_movement_colors_keep_search_range_tolerance(self):
+        bot = self._route_color_bot()
+        bot.img_route[10, 4] = (255, 0, 0)
+        bot.img_route[6, 10] = (127, 127, 127)
+
+        color_code, color_code_up_down = bot.get_nearest_color_code()
+
+        self.assertEqual(color_code["command"], "left none none")
+        self.assertEqual(color_code["distance"], 6)
+        self.assertFalse(color_code["exact_action"])
+        self.assertEqual(color_code_up_down["command"], "none up none")
+        self.assertEqual(color_code_up_down["distance"], 4)
+
+    def test_exact_action_has_priority_over_ladder_complement(self):
+        bot = self._route_color_bot()
+        bot.img_route[10, 10] = (255, 0, 255)
+        bot.img_route[9, 10] = (127, 127, 127)
+        bot.is_on_ladder = True
+
+        bot.update_cmd_by_route()
+
+        self.assertEqual(
+            (bot.cmd_move_x, bot.cmd_move_y, bot.cmd_action),
+            ("none", "none", "jump"),
+        )
+
+    def test_nearby_action_does_not_override_movement(self):
+        bot = self._route_color_bot()
+        bot.img_route[10, 6] = (255, 0, 255)
+        bot.img_route[10, 10] = (255, 0, 0)
+
+        bot.update_cmd_by_route()
+
+        self.assertEqual(
+            (bot.cmd_move_x, bot.cmd_move_y, bot.cmd_action),
+            ("left", "none", "none"),
+        )
+
     @staticmethod
     def _route_recovery_bot(route_count=4, active_index=0):
         bot = MapleStoryAutoBot.__new__(MapleStoryAutoBot)
@@ -806,6 +930,33 @@ class AutoBotLifecycleTests(unittest.TestCase):
 
         self.assertEqual(location, (55, 47))
         self.assertEqual(bot.last_appearance_match["pose"], "climbing")
+
+    def test_smile_anchored_climbing_hood_enters_ladder_state(self):
+        bot = self._make_appearance_bot("appearance_climb.png")
+
+        state = bot._update_ladder_state_from_smile_pose((55, 47))
+
+        self.assertTrue(state)
+        self.assertTrue(bot.is_on_ladder)
+
+    def test_smile_anchored_standing_head_leaves_ladder_state(self):
+        bot = self._make_appearance_bot("appearance_stand_left.png")
+        bot.is_on_ladder = True
+
+        state = bot._update_ladder_state_from_smile_pose((28, 51))
+
+        self.assertFalse(state)
+        self.assertFalse(bot.is_on_ladder)
+
+    def test_inconclusive_smile_anchored_pose_keeps_ladder_state(self):
+        bot = self._make_appearance_bot("appearance_climb.png")
+        bot.img_frame_gray[:] = 0
+        bot.is_on_ladder = True
+
+        state = bot._update_ladder_state_from_smile_pose((55, 47))
+
+        self.assertIsNone(state)
+        self.assertTrue(bot.is_on_ladder)
 
     def test_nametag_entry_recovers_from_head_when_all_text_is_hidden(self):
         project_root = Path(__file__).resolve().parents[1]

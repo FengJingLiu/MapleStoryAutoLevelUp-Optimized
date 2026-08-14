@@ -306,6 +306,22 @@ class RouteRecorderGeometryTests(unittest.TestCase):
         self.assertTrue(np.all(alignment[20, 15] == 80))
         self.assertEqual(mask[20, 15], 255)
 
+    def test_native_alignment_scales_dynamic_marker_exclusion(self):
+        minimap = np.full((293, 350, 3), 80, dtype=np.uint8)
+        minimap[130:145, 200:215] = (98, 243, 213)
+        minimap[60:75, 290:305] = (0, 0, 200)
+
+        alignment, mask = prepare_minimap_for_alignment(
+            minimap,
+            player_location=(207, 137),
+        )
+
+        self.assertTrue(np.all(alignment[137, 207] == 0))
+        self.assertEqual(mask[137, 207], 0)
+        # A 15x15 native marker (225 pixels) exceeded the old fixed area=100.
+        self.assertTrue(np.all(alignment[67, 297] == 0))
+        self.assertEqual(mask[67, 297], 0)
+
     def test_alignment_keeps_large_colored_minimap_artwork(self):
         minimap = np.full((40, 60, 3), 80, dtype=np.uint8)
         minimap[5:20, 5:20] = (0, 0, 200)
@@ -337,7 +353,7 @@ class RouteRecorderGeometryTests(unittest.TestCase):
         self.assertEqual(recorder.loc_minimap_global, (3, 3))
         self.assertEqual(recorder.loc_player_global_last, (5, 6))
 
-    def test_player_global_location_reuses_masked_minimap_match(self):
+    def test_player_global_location_tracks_centroid_pixel_changes_directly(self):
         recorder = RouteRecorder.__new__(RouteRecorder)
         recorder.loc_minimap_global = (7, 9)
         recorder.loc_player_minimap = (4, 5)
@@ -346,6 +362,10 @@ class RouteRecorderGeometryTests(unittest.TestCase):
         recorder.img_route_debug = np.zeros((40, 40, 3), dtype=np.uint8)
 
         self.assertEqual(recorder.get_player_location_on_global_map(), (11, 14))
+
+        recorder.loc_player_minimap = (5, 6)
+
+        self.assertEqual(recorder.get_player_location_on_global_map(), (12, 15))
 
     def test_out_of_bounds_route_preview_is_skipped(self):
         recorder = RouteRecorder.__new__(RouteRecorder)

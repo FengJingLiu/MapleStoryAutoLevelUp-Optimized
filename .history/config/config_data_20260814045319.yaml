@@ -25,7 +25,6 @@ eng_to_cn:
   mu_Lung_wild_bear_area_2: 野熊的領土2
   wisdom_forest: 智慧森林
   henesys_east_field: 射手村東部平原
-  swamp_land_1: 沼澤地1
   # monster
   zombie_lupin: 天使猴
   black_axe_stump: 黑斧木妖
@@ -85,4 +84,3 @@ map_mobs_mapping:
   mu_Lung_wild_bear_area_2: [grizzly, panda]
   wisdom_forest: [snail, slime, green_mushroom]
   henesys_east_field: [pig, ribbon_pig]
-  swamp_land_1: [wild_boar, fire_boar, zombie_mushroom]

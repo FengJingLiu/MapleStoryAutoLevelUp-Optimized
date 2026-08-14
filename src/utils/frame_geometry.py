@@ -127,6 +127,7 @@ def scale_runtime_pixel_config(
     scale_x = output_w / ref_w
     scale_y = output_h / ref_h
     scale_radius = max(scale_x, scale_y)
+    scale_area = scale_x * scale_y
 
     # UI points and rectangles are all in full game-frame coordinates.  Only
     # two-number vectors are coordinates; thresholds such as
@@ -163,6 +164,13 @@ def scale_runtime_pixel_config(
         _scale_scalar(result, (section, "range_x"), scale_x)
         _scale_scalar(result, (section, "range_y"), scale_y)
     _scale_scalar(result, ("monster_detect", "search_box_margin"), scale_radius)
+    # This threshold is an intersection area in full-frame pixels, so it must
+    # scale by both axes to retain the same physical overlap requirement.
+    _scale_scalar(
+        result,
+        ("monster_detect", "max_mob_area_trigger"),
+        scale_area,
+    )
     _scale_scalar(result, ("character", "width"), scale_x)
     _scale_scalar(result, ("character", "height"), scale_y)
     _scale_scalar(result, ("edge_teleport", "trigger_box_width"), scale_x)

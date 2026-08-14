@@ -17,7 +17,8 @@ from src.utils.logger import logger
 from src.utils.common import (
     find_pattern_sqdiff, draw_rectangle, screenshot,
     get_minimap_loc_size, get_player_location_on_minimap,
-    resize_minimap_to_reference,
+    copy_minimap_native_raster, copy_minimap_native_location,
+    route_map_can_fit_minimap,
     load_yaml, override_cfg, is_mac, load_image,
 )
 from src.input.KeyBoardListener import KeyBoardListener, normalize_key_name
@@ -90,8 +91,8 @@ def route_forward_keys_from_config(cfg):
 def prepare_minimap_for_alignment(
         img_minimap,
         player_location,
-        player_radius=5,
-        max_colored_marker_area=100,
+        player_radius=None,
+        max_colored_marker_area=None,
     ):
     """Return a minimap copy and mask with moving UI markers excluded.
 
@@ -106,6 +107,15 @@ def prepare_minimap_for_alignment(
         alignment_image != [0, 0, 0], axis=2
     ).astype(np.uint8) * 255
     excluded = np.zeros(alignment_image.shape[:2], dtype=np.uint8)
+    min_side = min(alignment_image.shape[:2])
+    if player_radius is None:
+        # About five pixels on the former 149px-tall Wisdom Forest raster and
+        # ten pixels on its 293px native capture.
+        player_radius = max(5, int(round(min_side * 0.034)))
+    if max_colored_marker_area is None:
+        # Component area grows quadratically when the UI raster grows.
+        marker_span = max(10, int(round(min_side * 0.067)))
+        max_colored_marker_area = marker_span * marker_span
 
     if player_location is not None:
         px, py = map(int, player_location)
@@ -652,6 +662,9 @@ class RouteRecorder():
         self.img_route_debug = None # route map for visualization
         self.img_minimap = None # minimap on game screen
         self.img_map = None # map
+        self._native_minimap_size = None
+        self._last_native_minimap_error = None
+        self._last_route_map_size_error = None
         # Timers
         self.t_last_frame = time.time() # Last frame timer, for fps calculation
         self.t_last_draw_blob = time.time() # Last draw blob timer
@@ -847,15 +860,48 @@ class RouteRecorder():
         # Image for debug use
         self.img_frame_debug = self.img_frame.copy()
 
-        # UI scale, expanded/collapsed state, and fullscreen transitions may
-        # move or resize the minimap. Re-detect it on every native frame rather
-        # than reusing the first frame's screen coordinates.
+        # The minimap may move on screen, so re-detect its rectangle every
+        # frame. Its native raster size is locked below because resizing would
+        # invalidate the recorded route coordinate system.
         if not self.update_minimap_from_current_frame():
             return -1
-        self.img_minimap = resize_minimap_to_reference(
-            self.img_minimap_source,
-            self.cfg,
+        native_size = self.img_minimap_source.shape[:2]
+        expected_size = getattr(self, "_native_minimap_size", None)
+        if expected_size is not None and native_size != expected_size:
+            error_key = (expected_size, native_size)
+            if error_key != getattr(
+                self, "_last_native_minimap_error", None
+            ):
+                logger.error(
+                    "Native minimap raster changed from "
+                    f"{expected_size[::-1]} to {native_size[::-1]}; "
+                    "discarding this frame to preserve route coordinates"
+                )
+                self._last_native_minimap_error = error_key
+            return -1
+        self._native_minimap_size = native_size
+        self._last_native_minimap_error = None
+        self.img_minimap = copy_minimap_native_raster(
+            self.img_minimap_source
         )
+
+        if self.img_map is not None and not route_map_can_fit_minimap(
+            self.img_map, self.img_minimap
+        ):
+            map_size = self.img_map.shape[:2]
+            error_key = (map_size, native_size)
+            if error_key != getattr(
+                self, "_last_route_map_size_error", None
+            ):
+                logger.error(
+                    "Existing map.png is too small for the native minimap: "
+                    f"map={map_size[::-1]}, minimap={native_size[::-1]}. "
+                    "Back up the old map directory and create a fresh native "
+                    "map instead of reusing this canvas"
+                )
+                self._last_route_map_size_error = error_key
+            return -1
+        self._last_route_map_size_error = None
 
         # Replace black pixels (0, 0, 0) with (1, 1, 1)
         black_mask = np.all(self.img_minimap == [0, 0, 0], axis=-1)
@@ -873,11 +919,8 @@ class RouteRecorder():
         )
         loc_player_minimap = None
         if loc_player_minimap_source:
-            source_h, source_w = self.img_minimap_source.shape[:2]
-            map_h, map_w = self.img_minimap.shape[:2]
-            loc_player_minimap = (
-                int(round(loc_player_minimap_source[0] * map_w / source_w)),
-                int(round(loc_player_minimap_source[1] * map_h / source_h)),
+            loc_player_minimap = copy_minimap_native_location(
+                loc_player_minimap_source
             )
         if loc_player_minimap is None:
             now = time.monotonic()
@@ -991,7 +1034,7 @@ class RouteRecorder():
         cv2.imshow("Map", self.img_map)
         self.img_route_debug = self.img_route.copy()
 
-        # Get player location on global map
+        # Use the current-frame hero-marker centroid without route smoothing.
         self.loc_player_global = self.get_player_location_on_global_map()
 
         # Determine which color code to use based on user input

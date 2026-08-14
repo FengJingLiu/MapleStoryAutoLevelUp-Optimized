@@ -514,44 +514,39 @@ def get_minimap_loc_size(img_frame):
     # logger.warning("Minimap not found in the game frame.")
     return None  # minimap not found
 
-def resize_minimap_to_reference(img_minimap, cfg):
-    """Resize a captured minimap to the raster used by a stored route map.
+def copy_minimap_native_raster(img_minimap):
+    """Return an independent minimap image without changing its dimensions.
 
-    Capture cards can carry a high-resolution game desktop that PotPlayer then
-    scales into its own window. The combat frame is normalized separately, but
-    route-map matching must use the pixel size from the original map recording.
-    Reference sizes are stored as ``[height, width]`` per map.
+    Route maps and action coordinates now use the captured minimap's native
+    raster.  Keeping a copy prevents alignment cleanup from modifying the
+    source crop (and therefore the captured game frame) in-place.
     """
     if img_minimap is None or img_minimap.size == 0:
         return img_minimap
+    return img_minimap.copy()
 
-    map_name = cfg.get("bot", {}).get("map")
-    reference_sizes = cfg.get("minimap", {}).get("reference_size_by_map", {})
-    reference_size = reference_sizes.get(map_name)
-    if reference_size is None:
-        return img_minimap
-    if not isinstance(reference_size, (list, tuple)) or len(reference_size) != 2:
-        raise ValueError(
-            f"minimap.reference_size_by_map.{map_name} must be [height, width]"
-        )
 
-    target_h, target_w = (int(reference_size[0]), int(reference_size[1]))
-    if target_h <= 0 or target_w <= 0:
-        raise ValueError(
-            f"Invalid minimap reference size for {map_name}: {reference_size}"
-        )
-    if img_minimap.shape[:2] == (target_h, target_w):
-        return img_minimap
+def copy_minimap_native_location(location):
+    """Keep a detected minimap point in the native raster coordinate system."""
+    if location is None:
+        return None
+    return tuple(map(int, location[:2]))
 
-    downscaling = (
-        img_minimap.shape[0] >= target_h and img_minimap.shape[1] >= target_w
-    )
-    interpolation = cv2.INTER_AREA if downscaling else cv2.INTER_LINEAR
-    return cv2.resize(
-        img_minimap,
-        (target_w, target_h),
-        interpolation=interpolation,
-    )
+
+def route_map_can_fit_minimap(img_map, img_minimap):
+    """Return whether a route-map canvas can contain the native minimap.
+
+    ``find_pattern_sqdiff`` pads an undersized target image for general-purpose
+    matching.  That behavior would hide the most common legacy-route mismatch:
+    an old, downscaled map that is narrower or shorter than the native minimap.
+    """
+    if img_map is None or img_minimap is None:
+        return False
+    if img_map.size == 0 or img_minimap.size == 0:
+        return False
+    map_h, map_w = img_map.shape[:2]
+    minimap_h, minimap_w = img_minimap.shape[:2]
+    return map_h >= minimap_h and map_w >= minimap_w
 
 def get_player_location_on_minimap(
         img_minimap,

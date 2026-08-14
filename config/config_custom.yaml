@@ -1,6 +1,5 @@
 bot:
-  map: henesys_east_field
-  mode: debug
+  map: wisdom_forest
 game_window:
   auto_resize: false
   capture_profile: potplayer
@@ -12,15 +11,14 @@ health_monitor:
   enable: false
 key:
   aoe_skill: shift
-  directional_attack: control
+  directional_attack: shift
   jump: alt
 nametag:
-  enable: false
-  overhead_marker:
-    enable: true
   medal:
     enable: true
   name: liu_muning
+  overhead_marker:
+    enable: true
   pet:
     enable: true
   template_reference_size:

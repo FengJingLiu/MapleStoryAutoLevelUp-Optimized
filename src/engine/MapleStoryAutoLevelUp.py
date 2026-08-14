@@ -25,7 +25,8 @@ from src.utils.logger import logger
 from src.utils.common import (find_pattern_sqdiff, draw_rectangle, draw_circle,
     draw_line, draw_text, screenshot, nms,
     load_image, get_mask, get_minimap_loc_size, get_player_location_on_minimap,
-    resize_minimap_to_reference,
+    copy_minimap_native_raster, copy_minimap_native_location,
+    route_map_can_fit_minimap,
     is_mac, override_cfg, load_yaml, get_all_other_player_locations_on_minimap,
     click_in_game_window, mask_route_colors, to_opencv_hsv, debug_minimap_colors,
     activate_game_window, normalize_pixel_coordinate, resize_window
@@ -129,8 +130,11 @@ class MapleStoryAutoBot:
         self.img_minimap = np.zeros((10, 10, 3), dtype=np.uint8) # minimap on game screen
         self.img_minimap_screen = self.img_minimap # unscaled minimap in screen coordinates
         self.img_minimap_source = self.img_minimap # native capture-card minimap
+        self._native_minimap_size = None
+        self._last_native_minimap_error = None
         self.img_capture_content = None
         self.minimap_geometry = None
+        self._last_route_map_size_error = None
         # Timers
         self.t_last_frame = time.time() # Last frame timer, for fps calculation
         self.t_watch_dog = time.time() # Last movement timer
@@ -461,6 +465,10 @@ class MapleStoryAutoBot:
         self.img_routes = []
         self.monsters_info = {}
         self.minimap_geometry = None
+        self._native_minimap_size = None
+        self._last_native_minimap_error = None
+        self._last_native_minimap_log = None
+        self._last_route_map_size_error = None
         self.img_nametag = None
         self.img_nametag_gray = None
         self.img_nametag_medal = None
@@ -1481,7 +1489,48 @@ class MapleStoryAutoBot:
             thickness=1,
             text_height=0.45,
         )
+        self._update_ladder_state_from_smile_pose(best_match["player"])
         return best_match["player"]
+
+    def _update_ladder_state_from_smile_pose(self, player_location):
+        """Classify the tiger hood directly below a fresh smile marker.
+
+        The smile provides a unique Hero anchor.  Appearance matching is then
+        restricted to that anchor: a climbing hood enters ladder state and a
+        standing head leaves it.  An inconclusive frame deliberately keeps the
+        previous state instead of falling back to screen-motion heuristics.
+        """
+        appearance_cfg = self.cfg.get("nametag", {}).get("appearance", {})
+        templates = getattr(self, "nametag_appearance_templates", [])
+        if appearance_cfg.get("enable", False) is False or not templates:
+            return None
+
+        matched_player = self.get_player_location_by_appearance(
+            expected_player=player_location,
+            allow_global=False,
+            strict_anchor=True,
+        )
+        match = getattr(self, "last_appearance_match", None)
+        if matched_player is None or not match:
+            return None
+
+        pose = str(match.get("pose", "")).lower()
+        if pose == "climbing":
+            new_state = True
+        elif pose == "standing":
+            new_state = False
+        else:
+            return None
+
+        previous_state = bool(getattr(self, "is_on_ladder", False))
+        self.is_on_ladder = new_state
+        if previous_state != new_state:
+            logger.info(
+                "[ladder] Smile-anchored tiger pose changed state to "
+                f"{'climbing' if new_state else 'standing'} "
+                f"(score={match['score']:.3f})"
+            )
+        return new_state
 
     def get_player_location_on_screen(self):
         """Run exactly one configured screen-space Hero locator."""
@@ -1501,7 +1550,8 @@ class MapleStoryAutoBot:
         return self.get_player_location_by_party_red_bar()
 
     def get_player_location_by_appearance(
-            self, expected_player=None, allow_global=True):
+            self, expected_player=None, allow_global=True,
+            strict_anchor=False):
         """Find the configured hood/head templates and infer player center.
 
         Standing templates may recover a fully covered nametag globally. The
@@ -1616,12 +1666,14 @@ class MapleStoryAutoBot:
             # nametag-derived point. A global standing recovery instead uses
             # a stricter score plus the existing two-frame jump confirmation.
             if is_local:
-                max_distance = int(appearance_cfg.get(
-                    "climb_validation_distance",
-                    appearance_cfg.get("validation_distance", 30),
-                )) if pose == "climbing" else int(
+                validation_distance = int(
                     appearance_cfg.get("validation_distance", 30)
                 )
+                max_distance = validation_distance
+                if pose == "climbing" and not strict_anchor:
+                    max_distance = int(appearance_cfg.get(
+                        "climb_validation_distance", validation_distance
+                    ))
                 distance = max(
                     abs(player[0] - template_expected[0]),
                     abs(player[1] - template_expected[1]),
@@ -2504,13 +2556,26 @@ class MapleStoryAutoBot:
 
         return loc_player_global
 
+    @staticmethod
+    def _route_command_requires_exact_position(command):
+        """Return whether a route command represents a point action.
+
+        Movement-only colors remain discoverable within ``search_range`` so
+        small minimap localization errors do not stop route following.  A
+        command with a non-``none`` action, however, must only be emitted when
+        the player's center is on an action-colored route pixel.
+        """
+        parts = str(command).split()
+        return len(parts) == 3 and parts[2] != "none"
+
     def get_nearest_color_code(self):
         '''
-        Searches for the nearest color-coded action marker
-        around the player on the route map.
+        Searches for route colors around the player on the route map.
 
         This function:
-        - Scans each pixel in the search box to find nearest color code
+        - Requires the player's center pixel to overlap point actions such as
+          jump, teleport, goal, and stop.
+        - Scans the search box for movement-only route colors.
         - Tracks the closest matching pixel using Manhattan distance (|dx| + |dy|).
         - Returns a dictionary containing the nearest matching
           pixel's position, color, action label, and distance.
@@ -2534,17 +2599,41 @@ class MapleStoryAutoBot:
         nearest_up_down = None
         min_dist = float('inf')
         min_dist_up_down = float('inf')
+
+        # Point actions must be under the player's center. Do this lookup
+        # independently of search_range (including a configured value of 0)
+        # and never pick the same action early from a neighboring pixel.
+        if 0 <= x0 < w and 0 <= y0 < h:
+            player_pixel = tuple(self.img_route[y0, x0])
+            player_command = self.color_code.get(player_pixel)
+            if player_command is not None and \
+                    self._route_command_requires_exact_position(player_command):
+                nearest = {
+                    "pixel": (x0, y0),
+                    "color": player_pixel,
+                    "command": player_command,
+                    "distance": 0,
+                    "exact_action": True,
+                }
+                min_dist = 0
+
         for y in range(y_min, y_max):
             for x in range(x_min, x_max):
                 pixel = tuple(self.img_route[y, x])  # (R, G, B)
                 dist = abs(x - x0) + abs(y - y0)
-                # Get nearest color
-                if pixel in self.color_code and dist < min_dist:
+                command = self.color_code.get(pixel)
+                # Movement-only route colors retain the configured search
+                # tolerance. Point actions were handled only at (x0, y0)
+                # above and are deliberately ignored everywhere else.
+                if command is not None and \
+                        not self._route_command_requires_exact_position(command) and \
+                        dist < min_dist:
                     nearest = {
                         "pixel": (x, y),
                         "color": pixel,
-                        "command": self.color_code[pixel],
-                        "distance": dist
+                        "command": command,
+                        "distance": dist,
+                        "exact_action": False,
                     }
                     min_dist = dist
                 # Get nearest color (up, dowm)
@@ -3998,7 +4087,13 @@ class MapleStoryAutoBot:
         # Use color_code and color_code_up_down to complement each other
         # To prevent character stuck at the end of ladder, we use two color color pixels
         # and let them complement with each other, to ensure smoothy ladder climbing
-        if color_code and color_code_up_down:
+        if color_code and color_code.get("exact_action", False):
+            # An exact point action owns the complete recorded command. In
+            # particular, do not complement a stationary jump with a nearby
+            # ladder up/down color after its exact trigger condition was met.
+            self.cmd_move_x, self.cmd_move_y, self.cmd_action = \
+                color_code["command"].split()
+        elif color_code and color_code_up_down:
             if color_code["distance"] < color_code_up_down["distance"]:
                 self.cmd_move_x, self.cmd_move_y, self.cmd_action = color_code["command"].split()
                 _, cmd, _ = color_code_up_down["command"].split()
@@ -4208,21 +4303,69 @@ class MapleStoryAutoBot:
                                 ]
 
         if minimap_updated:
-            original_minimap_size = self.img_minimap_source.shape[:2]
-            self.img_minimap = resize_minimap_to_reference(
-                self.img_minimap_source,
-                self.cfg,
+            native_size = self.img_minimap_source.shape[:2]
+            expected_size = getattr(self, "_native_minimap_size", None)
+            if expected_size is not None and native_size != expected_size:
+                error_key = (expected_size, native_size)
+                if error_key != getattr(
+                    self, "_last_native_minimap_error", None
+                ):
+                    logger.error(
+                        "[minimap] Native raster changed from "
+                        f"{expected_size[::-1]} to {native_size[::-1]}; "
+                        "discarding this frame because route coordinates "
+                        "cannot be rescaled"
+                    )
+                    self._last_native_minimap_error = error_key
+                return -1
+
+            self._native_minimap_size = native_size
+            self._last_native_minimap_error = None
+            self.img_minimap = copy_minimap_native_raster(
+                self.img_minimap_source
             )
-            calibrated_size = self.img_minimap.shape[:2]
-            calibration_key = (original_minimap_size, calibrated_size)
-            if original_minimap_size != calibrated_size and calibration_key != getattr(
-                self, "_last_minimap_calibration", None
-            ):
+
+            if self.minimap_geometry is not None:
+                _, _, recorded_w, recorded_h = \
+                    self.minimap_geometry["minimap_rect"]
+                recorded_size = (recorded_h, recorded_w)
+                if native_size != recorded_size:
+                    error_key = (recorded_size, native_size)
+                    if error_key != self._last_route_map_size_error:
+                        logger.error(
+                            "[minimap] Captured native raster "
+                            f"{native_size[::-1]} differs from the route's "
+                            f"recorded raster {recorded_size[::-1]}; use the "
+                            "same capture resolution/UI scale or re-record "
+                            "the map and routes"
+                        )
+                        self._last_route_map_size_error = error_key
+                    return -1
+
+            if self.cfg["bot"]["mode"] == "normal" and \
+                    self.img_map is not None and \
+                    not route_map_can_fit_minimap(
+                        self.img_map, self.img_minimap
+                    ):
+                map_size = self.img_map.shape[:2]
+                error_key = (map_size, native_size)
+                if error_key != self._last_route_map_size_error:
+                    logger.error(
+                        "[minimap] Existing map.png is too small for the "
+                        f"native minimap: map={map_size[::-1]}, "
+                        f"minimap={native_size[::-1]}. Re-record map.png and "
+                        "all route images without minimap resizing"
+                    )
+                    self._last_route_map_size_error = error_key
+                return -1
+
+            self._last_route_map_size_error = None
+            if native_size != getattr(self, "_last_native_minimap_log", None):
                 logger.info(
-                    "[minimap] Calibrated capture from "
-                    f"{original_minimap_size[::-1]} to {calibrated_size[::-1]}"
+                    "[minimap] Using native capture raster "
+                    f"{native_size[::-1]} without resizing"
                 )
-                self._last_minimap_calibration = calibration_key
+                self._last_native_minimap_log = native_size
             self.t_last_minimap_update = time.time()
 
         self.profiler.mark("Get Minimap Location and Size")
@@ -4241,16 +4384,6 @@ class MapleStoryAutoBot:
         # Update player location
         self.screen_player_location_valid = loc_player is not None
         if loc_player is not None:
-            # Check if character is on ladder
-            dx = abs(loc_player[0] - self.loc_player[0])
-            dy = abs(loc_player[1] - self.loc_player[1])
-            if self.is_on_ladder:
-                if dx > 3: # Leave ladder if there is horizontal move
-                    self.is_on_ladder = False
-            else:
-                if dx < 3 and dy != 0:
-                    self.is_on_ladder = True
-            # logger.info((self.is_on_ladder, dx, dy))
             # Update player location
             self.loc_player = loc_player
 
@@ -4274,11 +4407,8 @@ class MapleStoryAutoBot:
             ),
         )
         if loc_player_minimap_source:
-            source_h, source_w = self.img_minimap_source.shape[:2]
-            map_h, map_w = self.img_minimap.shape[:2]
-            self.loc_player_minimap = (
-                int(round(loc_player_minimap_source[0] * map_w / source_w)),
-                int(round(loc_player_minimap_source[1] * map_h / source_h)),
+            self.loc_player_minimap = copy_minimap_native_location(
+                loc_player_minimap_source
             )
 
         # Get other player location on minimap
