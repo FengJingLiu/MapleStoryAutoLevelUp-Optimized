@@ -38,6 +38,7 @@ nametag/*
 !nametag/liu_muning_appearance_climb.png
 !nametag/liu_muning_appearance_stand_left.png
 !nametag/liu_muning_appearance_stand_right.png
+!nametag/liu_muning_overhead_smile.png
 video/
 dist/
 .venv/

@@ -177,6 +177,26 @@ def scale_runtime_pixel_config(
     )
     _scale_scalar(result, ("nametag", "jump_confirm_radius"), scale_radius)
 
+    _scale_xy(
+        result,
+        ("nametag", "overhead_marker", "player_offset"),
+        scale_x,
+        scale_y,
+    )
+    _scale_scalar(
+        result, ("nametag", "overhead_marker", "component_width"), scale_x
+    )
+    _scale_scalar(
+        result, ("nametag", "overhead_marker", "component_height"), scale_y
+    )
+    for key in (
+        "match_search_tolerance",
+        "local_search_radius",
+    ):
+        _scale_scalar(
+            result, ("nametag", "overhead_marker", key), scale_radius
+        )
+
     _scale_scalar(result, ("nametag", "medal", "id_fragment_width"), scale_x)
     _scale_scalar(result, ("nametag", "medal", "id_fragment_stride"), scale_x)
     _scale_scalar(result, ("nametag", "medal", "center_offset_x"), scale_x)

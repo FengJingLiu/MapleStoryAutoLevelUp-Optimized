@@ -64,6 +64,14 @@ def _config():
             "jump_confirm_distance": 40,
             "jump_confirm_radius": 12,
             "diff_thres": 0.15,
+            "overhead_marker": {
+                "player_offset": [18, 71],
+                "component_width": 37,
+                "component_height": 30,
+                "match_search_tolerance": 2,
+                "local_search_radius": 90,
+                "diff_thres": 0.02,
+            },
             "medal": {
                 "id_fragment_width": 30,
                 "id_fragment_stride": 15,
@@ -163,6 +171,12 @@ def test_scales_nametag_anchors_and_template_offsets():
     # Isotropic distances/radii use max(x3, y2).
     assert nametag["jump_confirm_distance"] == 120
     assert nametag["jump_confirm_radius"] == 36
+    assert nametag["overhead_marker"]["player_offset"] == [54, 142]
+    assert nametag["overhead_marker"]["component_width"] == 111
+    assert nametag["overhead_marker"]["component_height"] == 60
+    assert nametag["overhead_marker"]["match_search_tolerance"] == 6
+    assert nametag["overhead_marker"]["local_search_radius"] == 270
+    assert nametag["overhead_marker"]["diff_thres"] == 0.02
     assert nametag["medal"]["id_fragment_width"] == 90
     assert nametag["medal"]["id_fragment_stride"] == 45
     assert nametag["medal"]["center_offset_x"] == 9

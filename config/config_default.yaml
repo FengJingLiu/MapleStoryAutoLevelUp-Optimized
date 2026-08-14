@@ -133,6 +133,28 @@ nametag:
   jump_confirm_distance: 40 # Larger screen-space jumps must repeat before acceptance
   jump_confirm_radius: 12   # Maximum difference between two pending jump candidates
 
+  # Optional overhead marker anchor. This is useful for characters that show
+  # a stable smile bubble above their head. Detection first filters white
+  # connected components (similar to party health-bar geometry filtering),
+  # then verifies the face locally with a masked template.
+  overhead_marker:
+    enable: False
+    name: ""                    # Empty loads nametag/<name>_overhead_smile.png
+    diff_thres: 0.02            # Masked SQDIFF threshold; lower is stricter
+    white_lower: [185, 185, 185] # BGR lower bound for the white bubble
+    component_width: 37         # White component size at the legacy 1296x700 frame
+    component_height: 30
+    component_size_tolerance: 0.20
+    min_fill_rate: 0.60
+    max_fill_rate: 0.90
+    match_search_tolerance: 2   # Verify a few pixels around the component alignment
+    player_offset: [18, 71]     # White-component top-left to existing Hero coordinate
+    local_search_radius: 90     # Prefer the bubble near the last valid Hero position
+    global_confirm_frames: 2    # Cold global matches must repeat before acceptance
+    lost_timeout_s: 2.0         # Reuse the last smile position until this timeout expires
+    require_unique_local: True  # Reject two identical bubbles near the cached Hero
+    require_unique_global: True # Reject multiple identical bubbles without local history
+
   # Optional second anchor: the medal immediately below the character ID.
   # A partial ID may use a looser threshold only when this medal also matches
   # in the expected position. If its template is absent, detection falls back

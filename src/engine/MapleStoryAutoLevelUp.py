@@ -104,6 +104,13 @@ class MapleStoryAutoBot:
         self.has_valid_nametag_location = False
         self.nametag_miss_count = 0
         self.pending_nametag_location = None
+        self.loc_overhead_marker_player = (0, 0)
+        self.has_valid_overhead_marker_location = False
+        self.overhead_marker_miss_count = 0
+        self.pending_overhead_marker_location = None
+        self.pending_overhead_marker_count = 0
+        self.t_last_overhead_marker_detected = None
+        self.last_overhead_marker_match = None
         self.screen_player_location_valid = False
         self.loc_party_red_bar = (0, 0) # party red bar location on game screen
         self.loc_minimap = (0, 0) # minimap location on game screen
@@ -144,6 +151,11 @@ class MapleStoryAutoBot:
         self._img_nametag_source = None
         self._img_nametag_medal_source = None
         self._img_nametag_pet_source = None
+        self.img_overhead_marker = None
+        self.img_overhead_marker_gray = None
+        self.img_overhead_marker_mask = None
+        self._img_overhead_marker_source = None
+        self.overhead_marker_component_bbox = None
         self._last_nametag_template_geometry = None
         self.loc_appearance_player = (0, 0)
         self.has_valid_appearance_location = False
@@ -459,7 +471,19 @@ class MapleStoryAutoBot:
         self._img_nametag_source = None
         self._img_nametag_medal_source = None
         self._img_nametag_pet_source = None
+        self.img_overhead_marker = None
+        self.img_overhead_marker_gray = None
+        self.img_overhead_marker_mask = None
+        self._img_overhead_marker_source = None
+        self.overhead_marker_component_bbox = None
         self._last_nametag_template_geometry = None
+        self.loc_overhead_marker_player = (0, 0)
+        self.has_valid_overhead_marker_location = False
+        self.overhead_marker_miss_count = 0
+        self.pending_overhead_marker_location = None
+        self.pending_overhead_marker_count = 0
+        self.t_last_overhead_marker_detected = None
+        self.last_overhead_marker_match = None
         self.has_valid_appearance_location = False
         self.pending_appearance_location = None
         self.pending_appearance_count = 0
@@ -682,6 +706,42 @@ class MapleStoryAutoBot:
                         "templates could be loaded"
                     )
 
+        marker_cfg = cfg["nametag"].get("overhead_marker", {})
+        if marker_cfg.get("enable", False):
+            marker_name = (
+                marker_cfg.get("name")
+                or f"{cfg['nametag']['name']}_overhead_smile"
+            )
+            marker_path = f"nametag/{marker_name}.png"
+            if not os.path.exists(marker_path):
+                logger.error(
+                    "Overhead Hero marker template not found: "
+                    f"{marker_path}; marker-only Hero detection cannot start"
+                )
+                return -1
+            try:
+                self.img_overhead_marker = load_image(marker_path)
+                self._img_overhead_marker_source = \
+                    self.img_overhead_marker.copy()
+                self._update_overhead_marker_template_metadata(marker_cfg)
+            except (cv2.error, OSError, RuntimeError, ValueError) as exc:
+                logger.error(
+                    "Unable to load overhead Hero marker template "
+                    f"{marker_path}: {exc}"
+                )
+                return -1
+            if self.overhead_marker_component_bbox is None or \
+                    not np.any(self.img_overhead_marker_mask):
+                logger.error(
+                    "Overhead Hero marker template has no usable white "
+                    f"component: {marker_path}"
+                )
+                return -1
+            logger.info(
+                "Loaded overhead Hero marker template: "
+                f"{marker_path}"
+            )
+
         # Load misc image
         lang = cfg["system"]["language"]
         self.img_create_party_enable  = load_image(f"misc/party_button_create_enable_{lang}.png")
@@ -751,11 +811,64 @@ class MapleStoryAutoBot:
         resized[resized_mask == 0] = (0, 255, 0)
         return resized
 
+    def _update_overhead_marker_template_metadata(self, marker_cfg=None):
+        """Cache the keyed mask and white-component geometry for the marker."""
+        image = getattr(self, "img_overhead_marker", None)
+        if image is None:
+            self.img_overhead_marker_gray = None
+            self.img_overhead_marker_mask = None
+            self.overhead_marker_component_bbox = None
+            return
+
+        if marker_cfg is None:
+            marker_cfg = (
+                (getattr(self, "cfg", None) or {})
+                .get("nametag", {})
+                .get("overhead_marker", {})
+            )
+        white_lower = marker_cfg.get("white_lower", (185, 185, 185))
+        if not isinstance(white_lower, (list, tuple)) or len(white_lower) != 3:
+            raise ValueError(
+                "nametag.overhead_marker.white_lower must be [B, G, R]"
+            )
+
+        self.img_overhead_marker_gray = cv2.cvtColor(
+            image, cv2.COLOR_BGR2GRAY
+        )
+        self.img_overhead_marker_mask = get_mask(image, (0, 255, 0))
+        white_mask = cv2.inRange(
+            image,
+            np.asarray(white_lower, dtype=np.uint8),
+            np.asarray((255, 255, 255), dtype=np.uint8),
+        )
+        white_mask[self.img_overhead_marker_mask == 0] = 0
+        count, _, stats, _ = cv2.connectedComponentsWithStats(
+            white_mask, connectivity=8
+        )
+        if count <= 1:
+            self.overhead_marker_component_bbox = None
+            logger.warning(
+                "Overhead Hero marker has no white connected component"
+            )
+            return
+
+        component_index = 1 + int(np.argmax(stats[1:, cv2.CC_STAT_AREA]))
+        self.overhead_marker_component_bbox = tuple(map(int, (
+            stats[component_index, cv2.CC_STAT_LEFT],
+            stats[component_index, cv2.CC_STAT_TOP],
+            stats[component_index, cv2.CC_STAT_WIDTH],
+            stats[component_index, cv2.CC_STAT_HEIGHT],
+        )))
+
     def _refresh_nametag_templates(self, output_size):
         """Scale source hero templates from their recorded frame geometry."""
         nametag_cfg = self.cfg.get("nametag", {})
+        marker_cfg = nametag_cfg.get("overhead_marker", {})
         reference_size = nametag_cfg.get("template_reference_size")
-        if not nametag_cfg.get("enable", False) or reference_size is None:
+        if not (
+            nametag_cfg.get("enable", False)
+            or marker_cfg.get("enable", False)
+        ) or reference_size is None:
             return
         if not isinstance(reference_size, (list, tuple)) or \
                 len(reference_size) != 2:
@@ -812,6 +925,12 @@ class MapleStoryAutoBot:
             "img_nametag_pet",
             "img_nametag_pet_gray",
         )
+        resize_source(
+            "_img_overhead_marker_source",
+            "img_overhead_marker",
+            "img_overhead_marker_gray",
+        )
+        self._update_overhead_marker_template_metadata(marker_cfg)
 
         runtime_templates = nametag_cfg.get("appearance", {}).get(
             "templates", []
@@ -952,6 +1071,12 @@ class MapleStoryAutoBot:
             self.has_valid_nametag_location = False
             self.nametag_miss_count = 0
             self.pending_nametag_location = None
+            self.has_valid_overhead_marker_location = False
+            self.overhead_marker_miss_count = 0
+            self.pending_overhead_marker_location = None
+            self.pending_overhead_marker_count = 0
+            self.t_last_overhead_marker_detected = None
+            self.last_overhead_marker_match = None
             self.has_valid_appearance_location = False
             self.pending_appearance_location = None
             self.pending_appearance_count = 0
@@ -1039,6 +1164,341 @@ class MapleStoryAutoBot:
         self._video_record_path = None
         self._video_record_size = None
         logger.info("[stop_record] Stop recording")
+
+    def get_player_location_by_overhead_marker(
+            self, expected_player=None, allow_global=True):
+        """Locate Hero from the configured white smile bubble.
+
+        A cheap connected-component pass first filters by the bubble's white
+        geometry. Only those small candidates are checked with the masked face
+        template. Local matches near the previous Hero position are accepted
+        immediately; cold full-frame matches use consecutive-frame protection.
+        """
+        marker_cfg = (
+            self.cfg.get("nametag", {}).get("overhead_marker", {})
+        )
+        if not marker_cfg.get("enable", False):
+            return None
+
+        template = getattr(self, "img_overhead_marker", None)
+        if template is None or getattr(self, "img_frame", None) is None:
+            return None
+        if getattr(self, "overhead_marker_component_bbox", None) is None or \
+                getattr(self, "img_overhead_marker_mask", None) is None:
+            self._update_overhead_marker_template_metadata(marker_cfg)
+        component_bbox = getattr(
+            self, "overhead_marker_component_bbox", None
+        )
+        template_mask = getattr(self, "img_overhead_marker_mask", None)
+        template_gray = getattr(self, "img_overhead_marker_gray", None)
+        if component_bbox is None or template_mask is None or \
+                template_gray is None:
+            return None
+
+        frame = self.img_frame
+        camera_y_end = min(
+            frame.shape[0], int(self.cfg["ui_coords"]["ui_y_start"])
+        )
+        if camera_y_end <= 0:
+            return None
+        img_camera = frame[:camera_y_end, :]
+        frame_gray = getattr(self, "img_frame_gray", None)
+        if frame_gray is None:
+            img_camera_gray = cv2.cvtColor(img_camera, cv2.COLOR_BGR2GRAY)
+        else:
+            img_camera_gray = frame_gray[:camera_y_end, :]
+
+        white_lower = marker_cfg.get("white_lower", (185, 185, 185))
+        lower_white = np.asarray(white_lower, dtype=np.uint8)
+        upper_white = np.asarray((255, 255, 255), dtype=np.uint8)
+        expected_width = max(1, int(marker_cfg.get(
+            "component_width", component_bbox[2]
+        )))
+        expected_height = max(1, int(marker_cfg.get(
+            "component_height", component_bbox[3]
+        )))
+        size_tolerance = max(0.0, float(marker_cfg.get(
+            "component_size_tolerance", 0.20
+        )))
+        width_tolerance = max(2, int(round(
+            expected_width * size_tolerance
+        )))
+        height_tolerance = max(2, int(round(
+            expected_height * size_tolerance
+        )))
+        min_fill_rate = float(marker_cfg.get("min_fill_rate", 0.60))
+        max_fill_rate = float(marker_cfg.get("max_fill_rate", 0.90))
+        match_tolerance = max(0, int(marker_cfg.get(
+            "match_search_tolerance", 2
+        )))
+        diff_thres = float(marker_cfg.get("diff_thres", 0.02))
+        player_offset = tuple(map(int, marker_cfg.get(
+            "player_offset", (0, 0)
+        )))
+        template_h, template_w = template_gray.shape[:2]
+        component_template_x, component_template_y, _, _ = component_bbox
+        camera_h, camera_w = img_camera.shape[:2]
+
+        def scan_region(bounds):
+            region_x0, region_y0, region_x1, region_y1 = bounds
+            region_x0 = max(0, min(camera_w, int(region_x0)))
+            region_y0 = max(0, min(camera_h, int(region_y0)))
+            region_x1 = max(region_x0, min(camera_w, int(region_x1)))
+            region_y1 = max(region_y0, min(camera_h, int(region_y1)))
+            if region_x1 <= region_x0 or region_y1 <= region_y0:
+                return []
+
+            white_mask = cv2.inRange(
+                img_camera[region_y0:region_y1, region_x0:region_x1],
+                lower_white,
+                upper_white,
+            )
+            count, _, stats, _ = cv2.connectedComponentsWithStats(
+                white_mask, connectivity=8
+            )
+            matches = []
+            for component_index in range(1, count):
+                x = int(stats[component_index, cv2.CC_STAT_LEFT])
+                y = int(stats[component_index, cv2.CC_STAT_TOP])
+                width = int(stats[component_index, cv2.CC_STAT_WIDTH])
+                height = int(stats[component_index, cv2.CC_STAT_HEIGHT])
+                area = int(stats[component_index, cv2.CC_STAT_AREA])
+                if abs(width - expected_width) > width_tolerance or \
+                        abs(height - expected_height) > height_tolerance:
+                    continue
+                fill_rate = area / float(max(1, width * height))
+                if not min_fill_rate <= fill_rate <= max_fill_rate:
+                    continue
+
+                component_x = region_x0 + x
+                component_y = region_y0 + y
+                estimated_template_x = component_x - component_template_x
+                estimated_template_y = component_y - component_template_y
+                search_x0 = max(
+                    0, estimated_template_x - match_tolerance
+                )
+                search_y0 = max(
+                    0, estimated_template_y - match_tolerance
+                )
+                search_x1 = min(
+                    camera_w,
+                    estimated_template_x + template_w + match_tolerance,
+                )
+                search_y1 = min(
+                    camera_h,
+                    estimated_template_y + template_h + match_tolerance,
+                )
+                search_image = img_camera_gray[
+                    search_y0:search_y1, search_x0:search_x1
+                ]
+                if search_image.shape[0] < template_h or \
+                        search_image.shape[1] < template_w:
+                    continue
+
+                result = cv2.matchTemplate(
+                    search_image,
+                    template_gray,
+                    cv2.TM_SQDIFF_NORMED,
+                    mask=template_mask,
+                )
+                result = np.nan_to_num(
+                    result, nan=1.0, posinf=1.0, neginf=1.0
+                )
+                score, _, match_loc, _ = cv2.minMaxLoc(result)
+                score = float(score)
+                if score >= diff_thres:
+                    continue
+
+                template_x = search_x0 + int(match_loc[0])
+                template_y = search_y0 + int(match_loc[1])
+                matched_component = (
+                    template_x + component_template_x,
+                    template_y + component_template_y,
+                )
+                player = (
+                    matched_component[0] + player_offset[0],
+                    matched_component[1] + player_offset[1],
+                )
+                if not (
+                    0 <= player[0] < camera_w
+                    and 0 <= player[1] < camera_h
+                ):
+                    continue
+                matches.append({
+                    "score": score,
+                    "component": matched_component,
+                    "shape": (height, width),
+                    "player": player,
+                    "fill_rate": fill_rate,
+                })
+            return matches
+
+        def record_miss(status, *, reset_pending=True, match=None):
+            self.overhead_marker_miss_count = getattr(
+                self, "overhead_marker_miss_count", 0
+            ) + 1
+            if reset_pending:
+                self.pending_overhead_marker_location = None
+                self.pending_overhead_marker_count = 0
+            now = time.monotonic()
+            last_detected = getattr(
+                self, "t_last_overhead_marker_detected", None
+            )
+            lost_timeout_s = max(0.0, float(marker_cfg.get(
+                "lost_timeout_s", 2.0
+            )))
+            cache_age_s = (
+                None if last_detected is None else now - last_detected
+            )
+            use_cached_location = (
+                getattr(
+                    self, "has_valid_overhead_marker_location", False
+                )
+                and cache_age_s is not None
+                and cache_age_s <= lost_timeout_s
+            )
+            if not use_cached_location:
+                self.has_valid_overhead_marker_location = False
+            self.last_overhead_marker_match = {
+                "status": f"{status},cached" if use_cached_location else status,
+                "cache_age_s": cache_age_s,
+                **({} if match is None else match),
+            }
+            if not use_cached_location:
+                return None
+
+            cached_component = (
+                self.loc_overhead_marker_player[0] - player_offset[0],
+                self.loc_overhead_marker_player[1] - player_offset[1],
+            )
+            self._draw_debug_rectangle(
+                cached_component,
+                (expected_height, expected_width),
+                (0, 165, 255),
+                (
+                    f"HeroSmile:cached {cache_age_s:.1f}/"
+                    f"{lost_timeout_s:.1f}s"
+                ),
+                thickness=1,
+                text_height=0.45,
+            )
+            return self.loc_overhead_marker_player
+
+        if expected_player is None and getattr(
+                self, "has_valid_overhead_marker_location", False):
+            expected_player = self.loc_overhead_marker_player
+
+        best_match = None
+        match_scope = "global"
+        if expected_player is not None:
+            expected_player = tuple(map(int, expected_player))
+            expected_component = (
+                expected_player[0] - player_offset[0],
+                expected_player[1] - player_offset[1],
+            )
+            local_radius = max(1, int(marker_cfg.get(
+                "local_search_radius", 90
+            )))
+            local_matches = scan_region((
+                expected_component[0] - local_radius,
+                expected_component[1] - local_radius,
+                expected_component[0] + expected_width + local_radius,
+                expected_component[1] + expected_height + local_radius,
+            ))
+            if local_matches:
+                if marker_cfg.get("require_unique_local", True) and \
+                        len(local_matches) != 1:
+                    return record_miss("ambiguous-local")
+                best_match = min(local_matches, key=lambda item: (
+                    max(
+                        abs(item["player"][0] - expected_player[0]),
+                        abs(item["player"][1] - expected_player[1]),
+                    ),
+                    item["score"],
+                ))
+                match_scope = "local"
+
+        if best_match is None:
+            if not allow_global:
+                return record_miss("not-found")
+            global_matches = scan_region((0, 0, camera_w, camera_h))
+            if not global_matches:
+                return record_miss("not-found")
+            if marker_cfg.get("require_unique_global", True) and \
+                    len(global_matches) != 1:
+                return record_miss("ambiguous")
+            best_match = min(
+                global_matches, key=lambda item: item["score"]
+            )
+
+        if match_scope == "global":
+            confirm_frames = max(1, int(marker_cfg.get(
+                "global_confirm_frames", 2
+            )))
+            if confirm_frames > 1:
+                pending = getattr(
+                    self, "pending_overhead_marker_location", None
+                )
+                if pending is not None:
+                    self.pending_overhead_marker_count = getattr(
+                        self, "pending_overhead_marker_count", 0
+                    ) + 1
+                else:
+                    self.pending_overhead_marker_count = 1
+                self.pending_overhead_marker_location = best_match["player"]
+                if self.pending_overhead_marker_count < confirm_frames:
+                    self._draw_debug_rectangle(
+                        best_match["component"],
+                        best_match["shape"],
+                        (0, 165, 255),
+                        (
+                            "HeroSmile:pending "
+                            f"{self.pending_overhead_marker_count}/"
+                            f"{confirm_frames}"
+                        ),
+                        thickness=1,
+                        text_height=0.45,
+                    )
+                    return record_miss(
+                        "pending", reset_pending=False, match=best_match
+                    )
+
+        self.loc_overhead_marker_player = best_match["player"]
+        self.has_valid_overhead_marker_location = True
+        self.overhead_marker_miss_count = 0
+        self.t_last_overhead_marker_detected = time.monotonic()
+        self.pending_overhead_marker_location = None
+        self.pending_overhead_marker_count = 0
+        self.last_overhead_marker_match = {
+            "status": match_scope,
+            **best_match,
+        }
+        self._draw_debug_rectangle(
+            best_match["component"],
+            best_match["shape"],
+            (0, 255, 0),
+            f"HeroSmile:{best_match['score']:.3f},{match_scope}",
+            thickness=1,
+            text_height=0.45,
+        )
+        return best_match["player"]
+
+    def get_player_location_on_screen(self):
+        """Run exactly one configured screen-space Hero locator."""
+        expected_player = None
+        if getattr(self, "screen_player_location_valid", False):
+            expected_player = getattr(self, "loc_player", None)
+        marker_cfg = (
+            self.cfg.get("nametag", {}).get("overhead_marker", {})
+        )
+        if marker_cfg.get("enable", False):
+            return self.get_player_location_by_overhead_marker(
+                expected_player=expected_player, allow_global=True
+            ), None
+
+        if self.cfg["nametag"]["enable"]:
+            return self.get_player_location_by_nametag(), None
+        return self.get_player_location_by_party_red_bar()
 
     def get_player_location_by_appearance(
             self, expected_player=None, allow_global=True):
@@ -3774,12 +4234,9 @@ class MapleStoryAutoBot:
         ### Player Location Detection ###
         #################################
         # Get player location in game window
-        if self.cfg["nametag"]["enable"]:
-            loc_player = self.get_player_location_by_nametag()
-        else:
-            loc_player, loc_party_red_bar = self.get_player_location_by_party_red_bar()
-            if loc_party_red_bar is not None:
-                self.loc_party_red_bar = loc_party_red_bar
+        loc_player, loc_party_red_bar = self.get_player_location_on_screen()
+        if loc_party_red_bar is not None:
+            self.loc_party_red_bar = loc_party_red_bar
 
         # Update player location
         self.screen_player_location_valid = loc_player is not None
@@ -3797,13 +4254,14 @@ class MapleStoryAutoBot:
             # Update player location
             self.loc_player = loc_player
 
-        # Draw player center for debugging
-        self._draw_debug_circle(
-            self.loc_player,
-            radius=3,
-            color=(0, 0, 255),
-            thickness=-1,
-        )
+        # Do not draw an expired coordinate beside "location unavailable".
+        if self.screen_player_location_valid:
+            self._draw_debug_circle(
+                self.loc_player,
+                radius=3,
+                color=(0, 0, 255),
+                thickness=-1,
+            )
 
         # Get player location on minimap
         minimap_cfg = self.cfg["minimap"]

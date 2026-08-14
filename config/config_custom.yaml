@@ -15,7 +15,9 @@ key:
   directional_attack: control
   jump: alt
 nametag:
-  enable: true
+  enable: false
+  overhead_marker:
+    enable: true
   medal:
     enable: true
   name: liu_muning

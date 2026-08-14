@@ -702,7 +702,7 @@ class RouteRecorder():
         if self.args.map != '':
             self.img_map = load_image(f"{self.args.map}")
         else:
-            existing_map_path = os.path.join(map_dir, "map.png")
+            existing_map_path = os.path.join(self.map_dir, "map.png")
             if os.path.isfile(existing_map_path):
                 self.img_map = load_image(existing_map_path)
                 logger.info(f"Loaded preserved map: {existing_map_path}")
