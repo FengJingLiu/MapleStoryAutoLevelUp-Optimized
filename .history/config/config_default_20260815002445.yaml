@@ -36,7 +36,6 @@ key:
   #   - "shift":  Shift key
   aoe_skill: "shift"            # 💥 AoE skill; also used by directional_aoe
   directional_attack: "w"   # ⚔️ Basic directional attack (e.g., Magic Claw or throwing stars)
-  power_knockback: "s"      # 🏹 Archer Power Knock-Back for monsters that are too close
   teleport: "e"             # 🌀 Teleport skill. Set to "" if not usable
   jump: "space"             # 🦘 Jump key
   add_hp: "1"               # ❤️ Use HP potion. Set to "" to disable auto-healing
@@ -49,8 +48,8 @@ buff_skill:
   # Automatically apply buff skills when the cooldowns are ready.
   # Buff skills are like: Mage's Magic Guard, Cleric's Angel's Blessing, Thief's Speed Boost
   # ⚠️ Note: If your have a pet to apply buff for you, you can ignore this.
-  keys: ["insert"]        # ⌨️ List of keys to cast each buff skill (e.g., ["a", "s"])
-  cooldown: [600]         # ⏱️ Cooldown time (in seconds), matches the order of `keys`
+  keys: []                # ⌨️ List of keys to cast each buff skill (e.g., ["a", "s"])
+  cooldown: []            # ⏱️ Cooldown time (in seconds), matches the order of `keys`
   action_cooldown: 1      # 🕒 Delay (in seconds) after buffing before continuing actions
 
 directional_attack:
@@ -62,16 +61,6 @@ directional_attack:
   cooldown: 0.9              # ⏱️ Time between attacks (in seconds)
   character_turn_delay: 0.08 # 🔄 Hold a new facing direction before attacking
   attack_recovery_delay: 0.90 # 🏹 Block every other input after attack TAP completes
-
-power_knockback:
-  # 🏹 Archer close-range fallback (Power Knock-Back / 强力击退)
-  # A monster inside trigger_distance_x blocks bow attacks on that whole side.
-  # If the other side has a shootable monster, the bot attacks that side first.
-  enable: true                 # Set false for non-archer directional builds
-  trigger_distance_x: 100     # ↔️ Inclusive center-to-center close distance (pixels)
-  range_y: 70                 # ↕️ Total vertical detection range (pixels)
-  cooldown: 0.9               # ⏱️ Minimum time between Power Knock-Back uses
-  attack_recovery_delay: 0.90 # 🏹 Block every other input after the S TAP completes
 
 directional_aoe:
   # 🏹 Single-sided AoE (for example, an archer's multi-target skill)
@@ -331,13 +320,7 @@ route:
   # The character follows a pre-defined route image (route*.png) using color-coded commands.
   search_range: 10            # 🔍 Radius (in pixels) to search for the nearest route color around the player
   jump_down_cooldown: 3.0     # ⏱️ Cooldown (in seconds) for 'jump down' action to prevent continuous descent
-  jump_up_settle_delay: 0.6   # 🛑 Seconds the hero center must remain exactly on a stationary-jump center
-  jump_alignment_nudge_ms: 30 # ↔️ Duration of each left/right centering pulse
-  portal_sweep_nudge_ms: 30       # Horizontal TAP duration while Up remains held
-  portal_sweep_edge_margin: 2     # Turn inward this many pixels before a block edge
-  portal_sweep_repeat_interval: 0.2 # Minimum seconds between pulses on an unchanged frame
-  portal_sweep_exit_distance: 10  # Minimum sudden minimap displacement for success
-  portal_sweep_max_duration: 6.0  # Release control after a failed activation attempt
+  jump_up_settle_delay: 0.6  # 🛑 Release movement and settle before a straight-up jump
 
   # 🎨 Color-coded(RGB) actions for route navigation
   # "<left-right command, up-down command, action>"
@@ -354,7 +337,6 @@ route:
     "127,0,255": "none down teleport"   # 🟪 Purple
     "0,127,0": "left none teleport"     # 🟩 Dark green
     "139,69,19": "right none teleport"  # 🟫 Brown
-    "127,255,255": "none up portal"     # Light cyan portal region
 
   # 🎨 Color-coded(RGB) actions for up and down
   color_code_up_down:

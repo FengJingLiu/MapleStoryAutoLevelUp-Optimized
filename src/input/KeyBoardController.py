@@ -245,9 +245,33 @@ class KeyBoardController():
         self.attack_recovery_delay = max(
             0.0, float(directional_cfg.get("attack_recovery_delay", 0.90))
         )
+        directional_aoe_cfg = self.cfg.get("directional_aoe", {})
+        self.directional_aoe_key = self.cfg.get("key", {}).get(
+            "aoe_skill", ""
+        )
+        self.directional_aoe_recovery_delay = max(
+            0.0,
+            float(directional_aoe_cfg.get("attack_recovery_delay", 0.90)),
+        )
+        power_knockback_cfg = self.cfg.get("power_knockback", {})
+        self.power_knockback_key = self.cfg.get("key", {}).get(
+            "power_knockback", ""
+        )
+        self.power_knockback_recovery_delay = max(
+            0.0,
+            float(power_knockback_cfg.get("attack_recovery_delay", 0.90)),
+        )
         self.jump_up_settle_delay = max(
             0.0,
             float(cfg.get("route", {}).get("jump_up_settle_delay", 0.15)),
+        )
+        self.jump_alignment_nudge_ms = max(
+            1,
+            int(cfg.get("route", {}).get("jump_alignment_nudge_ms", 30)),
+        )
+        self.portal_sweep_nudge_ms = max(
+            1,
+            int(cfg.get("route", {}).get("portal_sweep_nudge_ms", 30)),
         )
 
         # use 'ctrl', 'alt' for mac, because it's hard to get around
@@ -270,7 +294,51 @@ class KeyBoardController():
         else:
             raise ValueError(f"Unexpected attack type: {cfg['bot']['attack']}")
 
+        if cfg["bot"]["attack"] == "directional" and \
+                directional_aoe_cfg.get("enable", False) and \
+                (
+                    not isinstance(self.directional_aoe_key, str)
+                    or not self.directional_aoe_key.strip()
+                ):
+            raise ValueError(
+                "key.aoe_skill is required when directional_aoe is enabled"
+            )
+        if cfg["bot"]["attack"] == "directional" and \
+                power_knockback_cfg.get("enable", False) and \
+                (
+                    not isinstance(self.power_knockback_key, str)
+                    or not self.power_knockback_key.strip()
+                ):
+            raise ValueError(
+                "key.power_knockback is required when power_knockback is enabled"
+            )
+
         validate_config_keys(cfg)
+        if cfg["bot"]["attack"] == "directional" and \
+                directional_aoe_cfg.get("enable", False) and \
+                usage_from_text(self.directional_aoe_key) == \
+                usage_from_text(self.attack_key):
+            raise ValueError(
+                "key.aoe_skill must differ from key.directional_attack when "
+                "directional_aoe is enabled"
+            )
+        if cfg["bot"]["attack"] == "directional" and \
+                power_knockback_cfg.get("enable", False) and \
+                usage_from_text(self.power_knockback_key) == \
+                usage_from_text(self.attack_key):
+            raise ValueError(
+                "key.power_knockback must differ from "
+                "key.directional_attack when power_knockback is enabled"
+            )
+        if cfg["bot"]["attack"] == "directional" and \
+                power_knockback_cfg.get("enable", False) and \
+                directional_aoe_cfg.get("enable", False) and \
+                usage_from_text(self.power_knockback_key) == \
+                usage_from_text(self.directional_aoe_key):
+            raise ValueError(
+                "key.power_knockback must differ from key.aoe_skill when "
+                "power_knockback and directional_aoe are enabled"
+            )
         if connect_input:
             self.input_client = configure_esp32_input(cfg)
         else:
@@ -351,9 +419,23 @@ class KeyBoardController():
             # frame's direction while an ESP32 request is in flight.
             self.cmd_left_right = cmd_left_right
             self.cmd_up_down = cmd_up_down
-            # Actions are edge-triggered. Movement persists as state, but a
-            # route pixel that remains visible must not generate 30 TAPs/s.
-            if cmd_action != self._last_source_action:
+            # Route actions are edge-triggered so a visible route pixel cannot
+            # generate 30 TAPs/s. Combat actions are already rate-limited by
+            # the engine cooldown/recovery gates, so allow a newly consumed
+            # attack to be queued again even if its action name is unchanged.
+            retriggerable_action = (
+                cmd_action in {
+                    "attack",
+                    "directional_aoe",
+                    "power_knockback",
+                    "jump_align_left",
+                    "jump_align_right",
+                    "portal_sweep_left",
+                    "portal_sweep_right",
+                }
+                and self.cmd_action == "none"
+            )
+            if cmd_action != self._last_source_action or retriggerable_action:
                 self.cmd_action = cmd_action
             elif cmd_action == "none":
                 self.cmd_action = "none"
@@ -471,10 +553,18 @@ class KeyBoardController():
                 self.cached_facing = cmd_left_right
         return True
 
-    def perform_directional_attack(self, direction):
+    def perform_directional_attack(
+            self, direction, attack_key=None, recovery_delay=None):
         """Turn, release movement, and attack as one indivisible HID action."""
         if direction not in {"left", "right"}:
             return False
+        if attack_key is None:
+            attack_key = self.attack_key
+        if not isinstance(attack_key, str) or not attack_key.strip():
+            return False
+        if recovery_delay is None:
+            recovery_delay = self.attack_recovery_delay
+        recovery_delay = max(0.0, float(recovery_delay))
 
         with _input_transaction_lock:
             if not _regular_input_allowed():
@@ -520,7 +610,7 @@ class KeyBoardController():
 
             duration_ms = 50
             success, _ = _invoke_input(
-                "tap", self.attack_key, duration_ms
+                "tap", attack_key.strip(), duration_ms
             )
             if not success:
                 self._invalidate_facing_cache()
@@ -531,7 +621,7 @@ class KeyBoardController():
             # is conservative when an ACK is delayed or the TAP result is
             # uncertain: no command can leak through immediately after timeout.
             _set_input_recovery(
-                self.attack_recovery_delay,
+                recovery_delay,
             )
             self.t_last_skill = time.time()
             return True
@@ -577,6 +667,102 @@ class KeyBoardController():
             if not success:
                 self._invalidate_facing_cache()
                 return False
+            return True
+
+    def perform_jump_alignment_nudge(self, direction):
+        """Release held movement and apply one short centering pulse."""
+        if direction not in {"left", "right"}:
+            return False
+
+        with _input_transaction_lock:
+            if not _regular_input_allowed():
+                return False
+
+            success, _ = _invoke_input("set_state", [])
+            if not success:
+                self._invalidate_facing_cache()
+                return False
+            with self._ensure_command_lock():
+                self.cmd_left_right_last = "none"
+                self.cmd_up_down_last = "none"
+
+            if not _regular_input_allowed():
+                self._invalidate_facing_cache()
+                return False
+
+            success, _ = _invoke_input(
+                "tap", direction, self.jump_alignment_nudge_ms
+            )
+            if not success:
+                self._invalidate_facing_cache()
+                return False
+            with self._ensure_command_lock():
+                self.cached_facing = direction
+            return True
+
+    def perform_aligned_jump(self):
+        """Jump immediately after the vision loop verified a stable center."""
+        with _input_transaction_lock:
+            if not _regular_input_allowed():
+                return False
+
+            success, _ = _invoke_input("set_state", [])
+            if not success:
+                self._invalidate_facing_cache()
+                return False
+            with self._ensure_command_lock():
+                self.cmd_left_right_last = "none"
+                self.cmd_up_down_last = "none"
+
+            # There is deliberately no fixed sleep here. The vision loop has
+            # already observed the exact route center continuously for the
+            # configured settle interval; sleeping now would reintroduce the
+            # stale-coordinate jump this action is designed to avoid.
+            if not _regular_input_allowed():
+                self._invalidate_facing_cache()
+                return False
+            success, _ = _invoke_input(
+                "tap", self.cfg["key"]["jump"], 50
+            )
+            if not success:
+                self._invalidate_facing_cache()
+                return False
+            return True
+
+    def perform_portal_sweep_step(self, direction):
+        """Hold Up and apply one short horizontal portal-search pulse."""
+        if direction not in {"left", "right"}:
+            return False
+
+        with _input_transaction_lock:
+            if not _regular_input_allowed():
+                return False
+
+            # Keep Up persistent while the horizontal direction is only a
+            # short TAP. Both reports stay in one transaction so no movement,
+            # attack, or safety release can be interleaved between them.
+            success, _ = _invoke_input("set_state", ["up"])
+            if not success:
+                self._invalidate_facing_cache()
+                return False
+            with self._ensure_command_lock():
+                self.cmd_left_right_last = "none"
+                self.cmd_up_down_last = "up"
+
+            # Pause/capture loss can occur while waiting for the STATE ACK.
+            # Never send a late horizontal pulse after input was suspended.
+            if not _regular_input_allowed():
+                self._invalidate_facing_cache()
+                return False
+
+            success, _ = _invoke_input(
+                "tap", direction, self.portal_sweep_nudge_ms
+            )
+            if not success:
+                self._invalidate_facing_cache()
+                return False
+            with self._ensure_command_lock():
+                self.cached_facing = direction
             return True
 
     def stop(self):
@@ -654,11 +840,60 @@ class KeyBoardController():
                 # Direction and attack must remain paired. This branch runs
                 # before buffs, movement, or healing and owns the HID output
                 # transaction until TAP has been sent.
-                if (
-                    cmd_action == "attack"
-                    and self.cfg["bot"]["attack"] == "directional"
-                ):
-                    if self.perform_directional_attack(cmd_left_right):
+                if cmd_action in {
+                        "attack", "directional_aoe", "power_knockback"} and \
+                        self.cfg["bot"]["attack"] == "directional":
+                    attack_key = None
+                    recovery_delay = None
+                    if cmd_action == "directional_aoe":
+                        attack_key = getattr(
+                            self,
+                            "directional_aoe_key",
+                            self.cfg.get("key", {}).get("aoe_skill", ""),
+                        )
+                        recovery_delay = getattr(
+                            self,
+                            "directional_aoe_recovery_delay",
+                            self.attack_recovery_delay,
+                        )
+                    elif cmd_action == "power_knockback":
+                        attack_key = getattr(
+                            self,
+                            "power_knockback_key",
+                            self.cfg.get("key", {}).get(
+                                "power_knockback", ""
+                            ),
+                        )
+                        recovery_delay = getattr(
+                            self,
+                            "power_knockback_recovery_delay",
+                            self.attack_recovery_delay,
+                        )
+                    if self.perform_directional_attack(
+                            cmd_left_right,
+                            attack_key=attack_key,
+                            recovery_delay=recovery_delay,
+                    ):
+                        self._consume_action(cmd_action)
+                    self.limit_fps()
+                    continue
+
+                if cmd_action in {"jump_align_left", "jump_align_right"}:
+                    direction = cmd_action.rsplit("_", 1)[-1]
+                    if self.perform_jump_alignment_nudge(direction):
+                        self._consume_action(cmd_action)
+                    self.limit_fps()
+                    continue
+
+                if cmd_action in {"portal_sweep_left", "portal_sweep_right"}:
+                    direction = cmd_action.rsplit("_", 1)[-1]
+                    if self.perform_portal_sweep_step(direction):
+                        self._consume_action(cmd_action)
+                    self.limit_fps()
+                    continue
+
+                if cmd_action == "jump_aligned":
+                    if self.perform_aligned_jump():
                         self._consume_action(cmd_action)
                     self.limit_fps()
                     continue

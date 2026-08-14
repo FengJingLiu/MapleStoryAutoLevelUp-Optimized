@@ -160,9 +160,15 @@ def scale_runtime_pixel_config(
     _scale_scalar(result, ("rune_solver", "arrow_box_size"), scale_radius)
 
     # Combat and game-camera geometry.
-    for section in ("aoe_skill", "directional_attack"):
+    for section in ("aoe_skill", "directional_attack", "directional_aoe"):
         _scale_scalar(result, (section, "range_x"), scale_x)
         _scale_scalar(result, (section, "range_y"), scale_y)
+    _scale_scalar(
+        result,
+        ("power_knockback", "trigger_distance_x"),
+        scale_x,
+    )
+    _scale_scalar(result, ("power_knockback", "range_y"), scale_y)
     _scale_scalar(result, ("monster_detect", "search_box_margin"), scale_radius)
     # This threshold is an intersection area in full-frame pixels, so it must
     # scale by both axes to retain the same physical overlap requirement.

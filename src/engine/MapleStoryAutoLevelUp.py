@@ -83,6 +83,23 @@ class MapleStoryAutoBot:
         self._video_record_size = None
         self.color_code = {} # For color code instruction
         self.color_code_up_down = {} # Color code only contain 'up' and 'down'
+        self._stationary_jump_targets_by_route = []
+        self._stationary_jump_alignment_key = None
+        self._stationary_jump_aligned_since = None
+        self._stationary_jump_alignment_active = False
+        self._stationary_jump_fired_key = None
+        self._portal_sweep_active = False
+        self._portal_sweep_key = None
+        self._portal_sweep_region = None
+        self._portal_sweep_direction = None
+        self._portal_sweep_origin = None
+        self._portal_sweep_started_at = None
+        self._portal_sweep_last_observed_position = None
+        self._portal_sweep_last_nudge_position = None
+        self._portal_sweep_last_nudge_direction = None
+        self._portal_sweep_last_nudge_time = 0.0
+        self._portal_sweep_failed_key = None
+        self._portal_sweep_failed_region = None
         self.thread_auto_bot = None # thread for running autobot
         self.cmd_move_x = "none" # "left" "right"
         self.cmd_move_y = "none" # "up" "down"
@@ -140,6 +157,8 @@ class MapleStoryAutoBot:
         self.t_watch_dog = time.time() # Last movement timer
         self.t_last_teleport = time.time() # Last teleport timer
         self.t_last_attack = time.time() # Last attack timer for cooldown
+        self.t_last_directional_aoe = time.time() # Last single-sided AoE timer
+        self.t_last_power_knockback = time.time() # Last close-range knockback timer
         self.t_last_minimap_update = time.time()
         self.t_to_change_channel = time.time()
         # Images
@@ -411,6 +430,8 @@ class MapleStoryAutoBot:
         """Fail closed once when the capture stream becomes stale."""
         if self.kb is None or getattr(self, "_input_suspended_for_capture", False):
             return False
+        self._reset_stationary_jump_alignment()
+        self._reset_portal_sweep()
         self.kb.set_command("none none none")
         if hasattr(self.kb, "set_capture_available"):
             self.kb.set_capture_available(False)
@@ -457,12 +478,87 @@ class MapleStoryAutoBot:
             )
             return -1
 
+        directional_aoe_cfg = cfg.get("directional_aoe", {})
+        directional_aoe_enabled = directional_aoe_cfg.get("enable", False)
+        if not isinstance(directional_aoe_enabled, bool):
+            logger.error("[load_config] directional_aoe.enable must be boolean")
+            return -1
+        if directional_aoe_enabled and cfg["bot"]["attack"] == "directional":
+            min_monsters = directional_aoe_cfg.get("min_monsters")
+            if isinstance(min_monsters, bool) or not isinstance(min_monsters, int) \
+                    or min_monsters < 1:
+                logger.error(
+                    "[load_config] directional_aoe.min_monsters must be an "
+                    "integer greater than or equal to 1"
+                )
+                return -1
+            for field_name in ("range_x", "range_y"):
+                value = directional_aoe_cfg.get(field_name)
+                if isinstance(value, bool) or not isinstance(value, int) \
+                        or value <= 0:
+                    logger.error(
+                        f"[load_config] directional_aoe.{field_name} must be "
+                        "a positive integer"
+                    )
+                    return -1
+            for field_name in ("cooldown", "attack_recovery_delay"):
+                value = directional_aoe_cfg.get(field_name)
+                if isinstance(value, bool) or not isinstance(value, (int, float)) \
+                        or value < 0:
+                    logger.error(
+                        f"[load_config] directional_aoe.{field_name} must be "
+                        "a non-negative number"
+                    )
+                    return -1
+            aoe_key = cfg.get("key", {}).get("aoe_skill", "")
+            if not isinstance(aoe_key, str) or not aoe_key.strip():
+                logger.error(
+                    "[load_config] key.aoe_skill is required when "
+                    "directional_aoe is enabled"
+                )
+                return -1
+
+        power_knockback_cfg = cfg.get("power_knockback", {})
+        power_knockback_enabled = power_knockback_cfg.get("enable", False)
+        if not isinstance(power_knockback_enabled, bool):
+            logger.error("[load_config] power_knockback.enable must be boolean")
+            return -1
+        if power_knockback_enabled and cfg["bot"]["attack"] == "directional":
+            for field_name in ("trigger_distance_x", "range_y"):
+                value = power_knockback_cfg.get(field_name)
+                if isinstance(value, bool) or not isinstance(value, int) \
+                        or value <= 0:
+                    logger.error(
+                        f"[load_config] power_knockback.{field_name} must be "
+                        "a positive integer"
+                    )
+                    return -1
+            for field_name in ("cooldown", "attack_recovery_delay"):
+                value = power_knockback_cfg.get(field_name)
+                if isinstance(value, bool) or not isinstance(value, (int, float)) \
+                        or value < 0:
+                    logger.error(
+                        f"[load_config] power_knockback.{field_name} must be "
+                        "a non-negative number"
+                    )
+                    return -1
+            knockback_key = cfg.get("key", {}).get("power_knockback", "")
+            if not isinstance(knockback_key, str) or not knockback_key.strip():
+                logger.error(
+                    "[load_config] key.power_knockback is required when "
+                    "power_knockback is enabled"
+                )
+                return -1
+
         # One UI controller can be paused and loaded again with another map or
         # mode. Never retain route or monster resources from that prior run.
         self.img_map = None
         self.img_route = None
         self.img_route_debug = None
         self.img_routes = []
+        self._stationary_jump_targets_by_route = []
+        self._reset_stationary_jump_alignment()
+        self._reset_portal_sweep()
         self.monsters_info = {}
         self.minimap_geometry = None
         self._native_minimap_size = None
@@ -562,12 +658,16 @@ class MapleStoryAutoBot:
             route_files = sorted(glob.glob(f"minimaps/{map_name}/route*.png"))
             route_files = [p for p in route_files if not p.endswith("route_rest.png")]
             self.img_routes = []
+            self._stationary_jump_targets_by_route = []
             for route_file in route_files:
                 img = cv2.cvtColor(load_image(route_file), cv2.COLOR_BGR2RGB)
                 # Remove pixel in map that is color code
                 img = mask_route_colors(self.img_map, img, cfg["route"]["color_code"])
                 img = mask_route_colors(self.img_map, img, cfg["route"]["color_code_up_down"])
                 self.img_routes.append(img)
+                self._stationary_jump_targets_by_route.append(
+                    self._find_stationary_jump_targets(img)
+                )
 
         if mode in {"normal", "debug"} and monster_backend == "template":
             # Load monsters images from monster/<monster_name>.
@@ -1060,8 +1160,12 @@ class MapleStoryAutoBot:
             self.t_watch_dog = time.time()
             self.t_last_teleport = time.time()
             self.t_last_attack = time.time()
+            self.t_last_directional_aoe = time.time()
+            self.t_last_power_knockback = time.time()
             self.t_last_minimap_update = time.time()
             self.t_to_change_channel = time.time()
+            self._reset_stationary_jump_alignment()
+            self._reset_portal_sweep()
 
             # Set init state
             if self.args.init_state != "":
@@ -2557,6 +2661,337 @@ class MapleStoryAutoBot:
         return loc_player_global
 
     @staticmethod
+    def _is_stationary_jump_route_command(command):
+        """Return whether a route action is a directionless vertical jump."""
+        parts = str(command).split()
+        return (
+            len(parts) == 3
+            and parts[0] in {"none", "stop"}
+            and parts[1] in {"none", "stop"}
+            and parts[2] == "jump"
+        )
+
+    def _find_stationary_jump_targets(self, img_route):
+        """Find explicit centers for compact stationary-jump marker blobs.
+
+        The current recorder draws point actions as a radius-two disk. Older
+        routes also contain long or fragmented magenta strokes whose geometric
+        center is not necessarily the intended action point, so those retain
+        the legacy pixel-overlap behavior.
+        """
+        if img_route is None:
+            return ()
+
+        targets = []
+        for color, command in self.color_code.items():
+            if not self._is_stationary_jump_route_command(command):
+                continue
+
+            mask = np.all(img_route == color, axis=2).astype(np.uint8)
+            component_count, labels, stats, _ = \
+                cv2.connectedComponentsWithStats(mask, connectivity=8)
+            for component_idx in range(1, component_count):
+                x, y, width, height, area = map(
+                    int, stats[component_idx]
+                )
+                # A recorder point is a compact radius-two blob. Do not infer
+                # centers for historical horizontal strokes or tiny remnants.
+                if width > 5 or height > 5 or width < 3 or height < 3 \
+                        or area < 8:
+                    continue
+
+                ys, xs = np.where(labels == component_idx)
+                center_x = float(np.mean(xs))
+                center_y = float(np.mean(ys))
+                distances = (
+                    (xs.astype(float) - center_x) ** 2
+                    + (ys.astype(float) - center_y) ** 2
+                )
+                center_idx = int(np.argmin(distances))
+                center = (int(xs[center_idx]), int(ys[center_idx]))
+                targets.append({
+                    "center": center,
+                    "color": tuple(color),
+                    "command": command,
+                    "pixels": frozenset(
+                        (int(px), int(py)) for px, py in zip(xs, ys)
+                    ),
+                    "bbox": (x, y, width, height),
+                })
+
+        return tuple(sorted(
+            targets,
+            key=lambda target: (
+                target["center"][1], target["center"][0]
+            ),
+        ))
+
+    def _get_active_stationary_jump_targets(self):
+        """Return cached targets for the active route, with a test fallback."""
+        route_idx = int(getattr(self, "idx_routes", 0))
+        routes = getattr(self, "img_routes", ())
+        cached = getattr(self, "_stationary_jump_targets_by_route", ())
+        if 0 <= route_idx < len(routes) and \
+                0 <= route_idx < len(cached) and \
+                self.img_route is routes[route_idx]:
+            return cached[route_idx]
+        return self._find_stationary_jump_targets(self.img_route)
+
+    def _get_nearby_stationary_jump_target(self):
+        """Return a same-row compact jump target inside route search range."""
+        x0, y0 = self.loc_player_global
+        search_range = max(0, int(self.cfg["route"]["search_range"]))
+        candidates = []
+        for target in self._get_active_stationary_jump_targets():
+            target_x, target_y = target["center"]
+            dx = target_x - x0
+            dy = target_y - y0
+            # Horizontal input cannot correct a vertical mismatch. Requiring
+            # the exact target row also prevents attraction to another floor.
+            if dy != 0 or abs(dx) > search_range:
+                continue
+            candidates.append((abs(dx), target_y, target_x, target))
+
+        if not candidates:
+            return None
+        return min(candidates, key=lambda item: item[:3])[3]
+
+    def _reset_stationary_jump_alignment(self):
+        self._stationary_jump_alignment_key = None
+        self._stationary_jump_aligned_since = None
+        self._stationary_jump_alignment_active = False
+        self._stationary_jump_fired_key = None
+
+    def _update_cmd_for_stationary_jump_alignment(self, route_action):
+        """Nudge onto a jump center, visually settle there, then jump once."""
+        target = tuple(route_action["target_center"])
+        alignment_key = (int(self.idx_routes), target)
+        if alignment_key != getattr(
+                self, "_stationary_jump_alignment_key", None):
+            self._stationary_jump_alignment_key = alignment_key
+            self._stationary_jump_aligned_since = None
+            self._stationary_jump_fired_key = None
+
+        self._stationary_jump_alignment_active = True
+        player = tuple(map(int, self.loc_player_global))
+        player_x, player_y = player
+        target_x, target_y = target
+
+        if player != target:
+            self._stationary_jump_aligned_since = None
+            self._stationary_jump_fired_key = None
+            if player_y == target_y:
+                self.cmd_action = (
+                    "jump_align_right"
+                    if player_x < target_x
+                    else "jump_align_left"
+                )
+            return
+
+        now = time.monotonic()
+        if self._stationary_jump_aligned_since is None:
+            # This frame releases the final correction. Future frames must
+            # continue to observe the exact center before Jump is permitted.
+            self._stationary_jump_aligned_since = now
+            return
+
+        settle_delay = max(
+            0.0,
+            float(self.cfg["route"].get("jump_up_settle_delay", 0.6)),
+        )
+        if now - self._stationary_jump_aligned_since < settle_delay:
+            return
+
+        # Keep emitting the same source action while the player remains at the
+        # center. KeyBoardController edge-triggering consumes it only once.
+        self._stationary_jump_fired_key = alignment_key
+        self.cmd_action = "jump_aligned"
+
+    @staticmethod
+    def _is_portal_sweep_route_command(command):
+        parts = str(command).split()
+        return len(parts) == 3 and parts[2] == "portal"
+
+    @staticmethod
+    def _get_route_color_component(img_route, seed, color):
+        """Return the 8-connected route-color component containing seed."""
+        if img_route is None:
+            return None
+        seed_x, seed_y = map(int, seed)
+        height, width = img_route.shape[:2]
+        if not (0 <= seed_x < width and 0 <= seed_y < height):
+            return None
+        if tuple(img_route[seed_y, seed_x]) != tuple(color):
+            return None
+
+        mask = np.all(img_route == color, axis=2).astype(np.uint8)
+        component_count, labels, stats, _ = \
+            cv2.connectedComponentsWithStats(mask, connectivity=8)
+        component_idx = int(labels[seed_y, seed_x])
+        if component_idx <= 0 or component_idx >= component_count:
+            return None
+        x, y, component_width, component_height, area = map(
+            int, stats[component_idx]
+        )
+        return {
+            "bbox": (
+                x,
+                y,
+                x + component_width - 1,
+                y + component_height - 1,
+            ),
+            "area": area,
+            "color": tuple(color),
+        }
+
+    def _reset_portal_sweep(self):
+        self._portal_sweep_active = False
+        self._portal_sweep_key = None
+        self._portal_sweep_region = None
+        self._portal_sweep_direction = None
+        self._portal_sweep_origin = None
+        self._portal_sweep_started_at = None
+        self._portal_sweep_last_observed_position = None
+        self._portal_sweep_last_nudge_position = None
+        self._portal_sweep_last_nudge_direction = None
+        self._portal_sweep_last_nudge_time = 0.0
+        self._portal_sweep_failed_key = None
+        self._portal_sweep_failed_region = None
+
+    def _clear_failed_portal_if_departed(self):
+        """Allow a failed portal region to retry only after Hero leaves it."""
+        failed_key = getattr(self, "_portal_sweep_failed_key", None)
+        region = getattr(self, "_portal_sweep_failed_region", None)
+        if failed_key is None or region is None:
+            return
+        player_x, player_y = map(int, self.loc_player_global)
+        left, top, right, bottom = region["bbox"]
+        if int(self.idx_routes) != int(failed_key[0]) or not (
+                left <= player_x <= right and top <= player_y <= bottom):
+            self._portal_sweep_failed_key = None
+            self._portal_sweep_failed_region = None
+
+    def _update_active_portal_sweep(self):
+        """Hold Up and pulse left/right without leaving the portal region."""
+        if not getattr(self, "_portal_sweep_active", False):
+            return False
+        region = getattr(self, "_portal_sweep_region", None)
+        sweep_key = getattr(self, "_portal_sweep_key", None)
+        if region is None or sweep_key is None or \
+                int(self.idx_routes) != int(sweep_key[0]):
+            self._reset_portal_sweep()
+            return False
+
+        player_x, player_y = map(int, self.loc_player_global)
+        left, top, right, bottom = region["bbox"]
+        now = time.monotonic()
+        if getattr(self, "_portal_sweep_started_at", None) is None:
+            self._portal_sweep_started_at = now
+        max_duration = max(
+            0.1,
+            float(self.cfg["route"].get(
+                "portal_sweep_max_duration", 6.0
+            )),
+        )
+        if now - self._portal_sweep_started_at >= max_duration:
+            logger.warning(
+                "[route] Portal sweep timed out; release Up and wait until "
+                "Hero leaves the marker before retrying"
+            )
+            failed_key = sweep_key
+            failed_region = region
+            self._reset_portal_sweep()
+            self._portal_sweep_failed_key = failed_key
+            self._portal_sweep_failed_region = failed_region
+            return False
+
+        player_position = (player_x, player_y)
+        last_observed = getattr(
+            self, "_portal_sweep_last_observed_position", None
+        )
+        exit_distance = max(
+            1,
+            int(self.cfg["route"].get("portal_sweep_exit_distance", 10)),
+        )
+        region_width = right - left + 1
+        teleport_step = 0
+        if last_observed is not None:
+            teleport_step = (
+                abs(player_x - last_observed[0])
+                + abs(player_y - last_observed[1])
+            )
+        self._portal_sweep_last_observed_position = player_position
+        if teleport_step >= max(exit_distance, region_width + 2):
+            logger.info(
+                "[route] Portal sweep completed after a minimap jump of "
+                f"{teleport_step} pixels to {self.loc_player_global}"
+            )
+            self._reset_portal_sweep()
+            return False
+
+        configured_margin = max(
+            0,
+            int(self.cfg["route"].get("portal_sweep_edge_margin", 1)),
+        )
+        edge_margin = min(configured_margin, max(0, (region_width - 1) // 2))
+        direction = getattr(self, "_portal_sweep_direction", None)
+        if player_x <= left + edge_margin:
+            direction = "right"
+        elif player_x >= right - edge_margin:
+            direction = "left"
+        elif direction not in {"left", "right"}:
+            direction = "right" if player_x <= (left + right) // 2 else "left"
+
+        self._portal_sweep_direction = direction
+        self._portal_sweep_active = True
+        self.cmd_move_x = "none"
+        self.cmd_move_y = "up"
+        last_position = getattr(
+            self, "_portal_sweep_last_nudge_position", None
+        )
+        last_direction = getattr(
+            self, "_portal_sweep_last_nudge_direction", None
+        )
+        repeat_interval = max(
+            0.0,
+            float(self.cfg["route"].get(
+                "portal_sweep_repeat_interval", 0.2
+            )),
+        )
+        can_nudge = (
+            player_position != last_position
+            or direction != last_direction
+            or now - getattr(
+                self, "_portal_sweep_last_nudge_time", 0.0
+            ) >= repeat_interval
+        )
+        if region_width > 1 and can_nudge:
+            self.cmd_action = f"portal_sweep_{direction}"
+            self._portal_sweep_last_nudge_position = player_position
+            self._portal_sweep_last_nudge_direction = direction
+            self._portal_sweep_last_nudge_time = now
+        else:
+            # Hold Up between pulses. This gives the capture pipeline time to
+            # observe the prior nudge before another horizontal TAP is sent.
+            self.cmd_action = "none"
+        return True
+
+    def _start_portal_sweep(self, route_action):
+        region = route_action.get("portal_region")
+        if region is None:
+            return False
+        sweep_key = (int(self.idx_routes), tuple(region["bbox"]))
+        if sweep_key != getattr(self, "_portal_sweep_key", None):
+            self._reset_portal_sweep()
+            self._portal_sweep_key = sweep_key
+            self._portal_sweep_region = region
+            self._portal_sweep_origin = tuple(map(int, self.loc_player_global))
+            self._portal_sweep_last_observed_position = \
+                self._portal_sweep_origin
+        self._portal_sweep_active = True
+        return self._update_active_portal_sweep()
+
+    @staticmethod
     def _route_command_requires_exact_position(command):
         """Return whether a route command represents a point action.
 
@@ -2573,8 +3008,9 @@ class MapleStoryAutoBot:
         Searches for route colors around the player on the route map.
 
         This function:
-        - Requires the player's center pixel to overlap point actions such as
-          jump, teleport, goal, and stop.
+        - Aligns compact stationary-jump blobs by their explicit center.
+        - Requires the player's center pixel to overlap other point actions
+          such as directional jump, teleport, goal, and stop.
         - Scans the search box for movement-only route colors.
         - Tracks the closest matching pixel using Manhattan distance (|dx| + |dy|).
         - Returns a dictionary containing the nearest matching
@@ -2600,6 +3036,20 @@ class MapleStoryAutoBot:
         min_dist = float('inf')
         min_dist_up_down = float('inf')
 
+        stationary_jump_target = self._get_nearby_stationary_jump_target()
+        if stationary_jump_target is not None:
+            target_center = stationary_jump_target["center"]
+            nearest = {
+                "pixel": target_center,
+                "color": stationary_jump_target["color"],
+                "command": stationary_jump_target["command"],
+                "distance": abs(target_center[0] - x0),
+                "exact_action": False,
+                "stationary_jump_alignment": True,
+                "target_center": target_center,
+            }
+            min_dist = nearest["distance"]
+
         # Point actions must be under the player's center. Do this lookup
         # independently of search_range (including a configured value of 0)
         # and never pick the same action early from a neighboring pixel.
@@ -2608,14 +3058,41 @@ class MapleStoryAutoBot:
             player_command = self.color_code.get(player_pixel)
             if player_command is not None and \
                     self._route_command_requires_exact_position(player_command):
-                nearest = {
-                    "pixel": (x0, y0),
-                    "color": player_pixel,
-                    "command": player_command,
-                    "distance": 0,
-                    "exact_action": True,
-                }
-                min_dist = 0
+                portal_region = None
+                portal_failed = False
+                if self._is_portal_sweep_route_command(player_command):
+                    portal_region = self._get_route_color_component(
+                        self.img_route,
+                        (x0, y0),
+                        player_pixel,
+                    )
+                    if portal_region is not None:
+                        portal_key = (
+                            int(self.idx_routes),
+                            tuple(portal_region["bbox"]),
+                        )
+                        portal_failed = portal_key == getattr(
+                            self, "_portal_sweep_failed_key", None
+                        )
+                aligned_component = any(
+                    (x0, y0) in target["pixels"]
+                    for target in self._get_active_stationary_jump_targets()
+                )
+                if not portal_failed and not (
+                    self._is_stationary_jump_route_command(player_command)
+                    and aligned_component
+                ):
+                    nearest = {
+                        "pixel": (x0, y0),
+                        "color": player_pixel,
+                        "command": player_command,
+                        "distance": 0,
+                        "exact_action": True,
+                    }
+                    if portal_region is not None:
+                        nearest["portal_sweep"] = True
+                        nearest["portal_region"] = portal_region
+                    min_dist = 0
 
         for y in range(y_min, y_max):
             for x in range(x_min, x_max):
@@ -2625,7 +3102,8 @@ class MapleStoryAutoBot:
                 # Movement-only route colors retain the configured search
                 # tolerance. Point actions were handled only at (x0, y0)
                 # above and are deliberately ignored everywhere else.
-                if command is not None and \
+                if stationary_jump_target is None and \
+                        command is not None and \
                         not self._route_command_requires_exact_position(command) and \
                         dist < min_dist:
                     nearest = {
@@ -2697,11 +3175,12 @@ class MapleStoryAutoBot:
 
         return nearest, nearest_up_down  # if not found return none
 
-    def get_attack_range(self, is_left=True):
+    def get_attack_range(self, is_left=True, attack_type=None):
         '''
         get_attack_range
         '''
-        if self.cfg["bot"]["attack"] == "aoe_skill":
+        attack_type = attack_type or self.cfg["bot"]["attack"]
+        if attack_type == "aoe_skill":
             dx = self.cfg["aoe_skill"]["range_x"] // 2
             dy = self.cfg["aoe_skill"]["range_y"] // 2
             x0 = max(0, self.loc_player[0] - dx)
@@ -2709,21 +3188,164 @@ class MapleStoryAutoBot:
             y0 = max(0, self.loc_player[1] - dy)
             y1 = min(self.img_frame.shape[0], self.loc_player[1] + dy)
 
-        elif self.cfg["bot"]["attack"] == "directional":
+        elif attack_type in {
+                "directional", "directional_aoe", "power_knockback"}:
+            if attack_type == "directional":
+                section = "directional_attack"
+            elif attack_type == "directional_aoe":
+                section = "directional_aoe"
+            else:
+                section = "power_knockback"
+            attack_cfg = self.cfg[section]
+            range_x = int(
+                attack_cfg[
+                    "trigger_distance_x"
+                    if attack_type == "power_knockback"
+                    else "range_x"
+                ]
+            )
+            range_y = int(attack_cfg["range_y"])
             if is_left:
-                x0 = self.loc_player[0] - self.cfg["directional_attack"]["range_x"]
+                x0 = self.loc_player[0] - range_x
                 x1 = self.loc_player[0]
             else:
                 x0 = self.loc_player[0]
-                x1 = x0 + self.cfg["directional_attack"]["range_x"]
-            y0 = self.loc_player[1] - self.cfg["directional_attack"]["range_y"] // 2
-            y1 = y0 + self.cfg["directional_attack"]["range_y"]
+                x1 = x0 + range_x
+            y0 = self.loc_player[1] - range_y // 2
+            y1 = y0 + range_y
         else:
-            raise RuntimeError(f"Unsupported attack mode: {self.cfg['bot']['attack']}")
+            raise RuntimeError(f"Unsupported attack mode: {attack_type}")
 
         return (x0, y0, x1, y1)
 
-    def get_nearest_monster(self, is_left=True):
+    def get_power_knockback_monsters(self, is_left=True):
+        """Return same-height monsters inside the close-range threshold.
+
+        Near monsters are selected from the raw detections by center distance,
+        rather than by the normal attack-overlap threshold. A sprite that
+        crosses the Hero center can otherwise be mostly outside one half-box
+        even though it is exactly the monster preventing an archer from
+        shooting.
+        """
+        knockback_cfg = self.cfg["power_knockback"]
+        max_distance_x = int(knockback_cfg["trigger_distance_x"])
+        half_range_y = int(knockback_cfg["range_y"]) / 2.0
+        player_x, player_y = self.loc_player
+        keyboard_controller = getattr(self, "kb", None)
+        facing = getattr(keyboard_controller, "cached_facing", None)
+        if facing not in {"left", "right"}:
+            facing = getattr(self, "cmd_move_x", None)
+        if facing not in {"left", "right"}:
+            facing = "left"
+
+        close_monsters = []
+        for monster in self.monsters:
+            monster_x, monster_y = detection_center(monster)
+            distance_x = abs(monster_x - player_x)
+            if distance_x > max_distance_x or \
+                    abs(monster_y - player_y) > half_range_y:
+                continue
+
+            if monster_x < player_x:
+                direction = "left"
+            elif monster_x > player_x:
+                direction = "right"
+            else:
+                # Exact center overlap has no geometric side. Use the last
+                # trustworthy facing so the escape skill remains actionable.
+                direction = facing
+
+            if (direction == "left") == bool(is_left):
+                close_monsters.append(monster)
+
+        return close_monsters
+
+    def get_monsters_in_attack_range(
+            self, is_left=True, attack_type="directional"):
+        """Return monsters that can be hit in one directional attack box.
+
+        Search margins only decide which detections are collected. This method
+        applies the real overlap threshold. AoE counting assigns a box to
+        exactly one side using its center, so a large detection crossing the
+        player is not counted on both sides. Normal nearest-target selection
+        uses the same side rule so an invalid crossing box cannot hide a valid
+        target farther away.
+        """
+        attack_box = self.get_attack_range(
+            is_left=is_left,
+            attack_type=attack_type,
+        )
+        monsters_info = getattr(self, "monsters_info", {})
+        legacy_min_mob_area = None
+        if not self.is_yolo_monster_detection() and monsters_info:
+            legacy_min_mob_area = min(
+                img.shape[0] * img.shape[1]
+                for _, imgs in monsters_info.items()
+                for img, _ in imgs
+            )
+
+        player_x = self.loc_player[0]
+        attackable_monsters = []
+        for monster in self.monsters:
+            monster_center_x = detection_center(monster)[0]
+            if is_left and monster_center_x >= player_x:
+                continue
+            if not is_left and monster_center_x <= player_x:
+                continue
+
+            monster_box = detection_to_box(monster)
+            inter_area = intersection_area(attack_box, monster_box)
+            monster_area = max(0, monster_box[2] - monster_box[0]) * max(
+                0, monster_box[3] - monster_box[1]
+            )
+            inter_area_thres = min(
+                monster_area
+                if legacy_min_mob_area is None
+                else legacy_min_mob_area,
+                self.cfg['monster_detect']['max_mob_area_trigger'],
+            )
+            if inter_area > 0 and inter_area >= inter_area_thres:
+                attackable_monsters.append(monster)
+
+        if self.cfg["monster_detect"].get("with_enemy_hp_bar", False):
+            # The legacy fallback can report the same entity once from its
+            # sprite and once from its wider inferred health-bar box. Compare
+            # intersection against the smaller box instead of IoU; different
+            # widths can describe the same entity while producing a low IoU.
+            visual_monsters = [
+                monster for monster in attackable_monsters
+                if monster.get("name") != "Health Bar"
+            ]
+            health_bar_monsters = [
+                monster for monster in attackable_monsters
+                if monster.get("name") == "Health Bar"
+            ]
+
+            def box_area(monster):
+                x0, y0, x1, y1 = detection_to_box(monster)
+                return max(0, x1 - x0) * max(0, y1 - y0)
+
+            unmatched_health_bars = []
+            for health_bar in health_bar_monsters:
+                health_box = detection_to_box(health_bar)
+                health_area = box_area(health_bar)
+                is_duplicate = any(
+                    (
+                        intersection_area(
+                            health_box,
+                            detection_to_box(monster),
+                        )
+                        / max(1, min(health_area, box_area(monster)))
+                    ) >= 0.5
+                    for monster in visual_monsters
+                )
+                if not is_duplicate:
+                    unmatched_health_bars.append(health_bar)
+            attackable_monsters = visual_monsters + unmatched_health_bars
+
+        return attackable_monsters
+
+    def get_nearest_monster(self, is_left=True, attack_type="directional"):
         '''
         Finds the nearest monster within the player's attack range.
 
@@ -2741,42 +3363,60 @@ class MapleStoryAutoBot:
             dict or None: The nearest monster's info dict, or None if no valid match.
         '''
 
-        x0, y0, x1, y1 = self.get_attack_range(is_left=is_left)
+        attackable_monsters = self.get_monsters_in_attack_range(
+            is_left=is_left,
+            attack_type=attack_type,
+        )
+        return min(
+            attackable_monsters,
+            key=lambda monster: (
+                abs(detection_center(monster)[0] - self.loc_player[0])
+                + abs(detection_center(monster)[1] - self.loc_player[1])
+            ),
+            default=None,
+        )
 
-        nearest_monster = None
-        min_distance = float('inf')
-        attack_box = (x0, y0, x1, y1)
-        legacy_min_mob_area = None
-        if not self.is_yolo_monster_detection() and self.monsters_info:
-            legacy_min_mob_area = min(
-                img.shape[0] * img.shape[1]
-                for _, imgs in self.monsters_info.items()
-                for img, _ in imgs
-            )
-        for monster in self.monsters:
-            monster_box = detection_to_box(monster)
-            inter_area = intersection_area(attack_box, monster_box)
-            monster_area = max(0, monster_box[2] - monster_box[0]) * max(
-                0, monster_box[3] - monster_box[1]
-            )
-            inter_area_thres = min(
-                monster_area
-                if legacy_min_mob_area is None
-                else legacy_min_mob_area,
-                self.cfg['monster_detect']['max_mob_area_trigger'],
-            )
-            if inter_area >= inter_area_thres:
-                # Compute distance to player center
-                monster_center = detection_center(monster)
-                dx = monster_center[0] - self.loc_player[0]
-                dy = monster_center[1] - self.loc_player[1]
-                distance = abs(dx) + abs(dy)  # Manhattan distance
+    def get_directional_aoe_direction(
+            self, monsters_left, monsters_right, min_monsters):
+        """Choose a qualifying side for a single-sided AoE attack."""
+        counts = {
+            "left": len(monsters_left),
+            "right": len(monsters_right),
+        }
+        qualifying = [
+            direction
+            for direction, count in counts.items()
+            if count >= min_monsters
+        ]
+        if not qualifying:
+            return None
+        if len(qualifying) == 1:
+            return qualifying[0]
+        if counts["left"] != counts["right"]:
+            return max(qualifying, key=counts.get)
 
-                if distance < min_distance:
-                    min_distance = distance
-                    nearest_monster = monster
+        def nearest_distance(monsters):
+            return min(
+                abs(detection_center(monster)[0] - self.loc_player[0])
+                + abs(detection_center(monster)[1] - self.loc_player[1])
+                for monster in monsters
+            )
 
-        return nearest_monster
+        distances = {
+            "left": nearest_distance(monsters_left),
+            "right": nearest_distance(monsters_right),
+        }
+        if distances["left"] != distances["right"]:
+            return min(qualifying, key=distances.get)
+
+        keyboard_controller = getattr(self, "kb", None)
+        facing = getattr(keyboard_controller, "cached_facing", None)
+        if facing in qualifying:
+            return facing
+        route_direction = getattr(self, "cmd_move_x", None)
+        if route_direction in qualifying:
+            return route_direction
+        return "left"
 
     def is_yolo_monster_detection(self):
         """Return whether the active config uses the YOLO mob backend."""
@@ -3465,6 +4105,15 @@ class MapleStoryAutoBot:
         Returns:
             bool: True if the player is stuck, False otherwise.
         """
+        if getattr(self, "_stationary_jump_alignment_active", False) or \
+                getattr(self, "_portal_sweep_active", False):
+            # Centering may intentionally spend longer than the normal stuck
+            # timeout issuing tiny corrections, verifying a full stop, or
+            # searching a portal region while Up remains held.
+            self.loc_watch_dog = self.loc_player_global
+            self.t_watch_dog = time.time()
+            return False
+
         dx = abs(self.loc_player_global[0] - self.loc_watch_dog[0])
         dy = abs(self.loc_player_global[1] - self.loc_watch_dog[1])
 
@@ -3615,6 +4264,33 @@ class MapleStoryAutoBot:
                 (y1-y0, x1-x0),
                 (0, 0, 255), "Attack Range(Right)"
             )
+            directional_aoe_cfg = self.cfg.get("directional_aoe", {})
+            if directional_aoe_cfg.get("enable", False):
+                min_monsters = directional_aoe_cfg["min_monsters"]
+                for is_left, direction in ((True, "Left"), (False, "Right")):
+                    x0, y0, x1, y1 = self.get_attack_range(
+                        is_left=is_left,
+                        attack_type="directional_aoe",
+                    )
+                    self._draw_debug_rectangle(
+                        (x0, y0),
+                        (y1-y0, x1-x0),
+                        (255, 0, 255),
+                        f"Directional AoE({direction}, N>={min_monsters})",
+                    )
+            power_knockback_cfg = self.cfg.get("power_knockback", {})
+            if power_knockback_cfg.get("enable", False):
+                for is_left, direction in ((True, "Left"), (False, "Right")):
+                    x0, y0, x1, y1 = self.get_attack_range(
+                        is_left=is_left,
+                        attack_type="power_knockback",
+                    )
+                    self._draw_debug_rectangle(
+                        (x0, y0),
+                        (y1-y0, x1-x0),
+                        (0, 165, 255),
+                        f"Power Knockback({direction})",
+                    )
 
         # Draw minimap rectangle on img debug
         self._draw_debug_rectangle(
@@ -4043,6 +4719,15 @@ class MapleStoryAutoBot:
         self.cmd_move_x = "none"
         self.cmd_move_y = "none"
         self.cmd_action = "none"
+        self._stationary_jump_alignment_active = False
+        self._clear_failed_portal_if_departed()
+
+        # Once entered, a portal region owns input until the minimap confirms
+        # a sufficiently large displacement. Do this before ordinary route
+        # lookup because jumping/teleporting can move the hero off the marker
+        # while Up still needs to remain held.
+        if self._update_active_portal_sweep():
+            return
 
         # Get color code from the active route.
         color_code, color_code_up_down = self.get_nearest_color_code()
@@ -4078,11 +4763,27 @@ class MapleStoryAutoBot:
                 # watchdog can then perform its recovery action safely.
                 self.idx_routes = original_idx
                 self.img_route = self.img_routes[original_idx]
+                self._reset_stationary_jump_alignment()
                 if self.is_show_debug_window:
                     self.img_route_debug = cv2.cvtColor(
                         self.img_route, cv2.COLOR_RGB2BGR
                     )
                 return
+
+        if color_code and color_code.get("portal_sweep", False):
+            self._reset_stationary_jump_alignment()
+            self._start_portal_sweep(color_code)
+            return
+
+        if color_code and color_code.get(
+                "stationary_jump_alignment", False):
+            # This sub-state owns the whole frame. Attacks, ladder
+            # complementation, edge teleports, and random stuck recovery must
+            # not overwrite a one-pixel correction or the final aligned jump.
+            self._update_cmd_for_stationary_jump_alignment(color_code)
+            return
+
+        self._reset_stationary_jump_alignment()
 
         # Use color_code and color_code_up_down to complement each other
         # To prevent character stuck at the end of ladder, we use two color color pixels
@@ -4126,24 +4827,61 @@ class MapleStoryAutoBot:
             self.cmd_action = "jump"
 
     def update_cmd_by_mob_detection(self):
+        self._suppress_periodic_attack = False
+        combat_actions = {"attack", "directional_aoe", "power_knockback"}
+        if getattr(self, "_stationary_jump_alignment_active", False) or \
+                getattr(self, "_portal_sweep_active", False):
+            # Route alignment owns movement and action until its visually
+            # verified jump has been emitted. Portal activation likewise owns
+            # Up and its bounded horizontal search pulses.
+            self._suppress_periodic_attack = True
+            return
+
         # Never build an attack decision around an expired screen location.
         if not getattr(self, "screen_player_location_valid", False):
             self.monsters = []
             self.cmd_action = "none"
+            self._suppress_periodic_attack = True
             return
 
         # Get monster search box
         margin = self.cfg["monster_detect"]["search_box_margin"]
-        if self.cfg["bot"]["attack"] == "aoe_skill":
+        attack_mode = self.cfg["bot"]["attack"]
+        directional_aoe_cfg = self.cfg.get("directional_aoe", {})
+        directional_aoe_enabled = bool(
+            attack_mode == "directional"
+            and directional_aoe_cfg.get("enable", False)
+        )
+        power_knockback_cfg = self.cfg.get("power_knockback", {})
+        power_knockback_enabled = bool(
+            attack_mode == "directional"
+            and power_knockback_cfg.get("enable", False)
+        )
+        if attack_mode == "aoe_skill":
             dx = self.cfg["aoe_skill"]["range_x"] // 2 + margin
             dy = self.cfg["aoe_skill"]["range_y"] // 2 + margin
             cooldown = self.cfg["aoe_skill"]["cooldown"]
-        elif self.cfg["bot"]["attack"] == "directional":
-            dx = self.cfg["directional_attack"]["range_x"] + margin
-            dy = self.cfg["directional_attack"]["range_y"] + margin
-            cooldown = self.cfg["directional_attack"]["cooldown"]
+        elif attack_mode == "directional":
+            directional_cfg = self.cfg["directional_attack"]
+            range_x = int(directional_cfg["range_x"])
+            range_y = int(directional_cfg["range_y"])
+            if directional_aoe_enabled:
+                range_x = max(range_x, int(directional_aoe_cfg["range_x"]))
+                range_y = max(range_y, int(directional_aoe_cfg["range_y"]))
+            if power_knockback_enabled:
+                range_x = max(
+                    range_x,
+                    int(power_knockback_cfg["trigger_distance_x"]),
+                )
+                range_y = max(
+                    range_y,
+                    int(power_knockback_cfg["range_y"]),
+                )
+            dx = range_x + margin
+            dy = range_y + margin
+            cooldown = directional_cfg["cooldown"]
         else:
-            raise RuntimeError(f"Unsupported attack mode: {self.cfg['bot']['attack']}")
+            raise RuntimeError(f"Unsupported attack mode: {attack_mode}")
         x0 = max(0                      , self.loc_player[0] - dx)
         x1 = min(self.img_frame.shape[1], self.loc_player[0] + dx)
         y0 = max(0                      , self.loc_player[1] - dy)
@@ -4157,18 +4895,12 @@ class MapleStoryAutoBot:
             return
 
         # Update attack command
-        if self.cfg["bot"]["attack"] == "aoe_skill":
+        if attack_mode == "aoe_skill":
             if time.time() - self.t_last_attack > cooldown:
                 self.cmd_action = "attack"
                 self.t_last_attack = time.time()
 
-        elif self.cfg["bot"]["attack"] == "directional":
-            # Get nearest monster to player
-            monster_left  = self.get_nearest_monster(is_left = True)
-            monster_right = self.get_nearest_monster(is_left = False)
-            # Determine attack direction
-            attack_direction = self.get_attack_direction(monster_left, monster_right)
-            # Attack Command
+        elif attack_mode == "directional":
             keyboard_controller = getattr(self, "kb", None)
             attack_recovering = bool(
                 keyboard_controller is not None
@@ -4178,12 +4910,109 @@ class MapleStoryAutoBot:
                     lambda: False,
                 )()
             )
-            if time.time() - self.t_last_attack > cooldown and \
-                    attack_direction is not None and not attack_recovering:
-                self.cmd_action = "attack"
-                self.t_last_attack = time.time()
-                # Set up attack direction
-                self.cmd_move_x = attack_direction
+
+            close_monsters_left = []
+            close_monsters_right = []
+            if power_knockback_enabled:
+                close_monsters_left = self.get_power_knockback_monsters(
+                    is_left=True,
+                )
+                close_monsters_right = self.get_power_knockback_monsters(
+                    is_left=False,
+                )
+            left_blocked = bool(close_monsters_left)
+            right_blocked = bool(close_monsters_right)
+            if left_blocked or right_blocked:
+                # Patrol's blind periodic attack must not overwrite the
+                # close-range decision and fire a bow into a blocked side.
+                self._suppress_periodic_attack = True
+
+            if directional_aoe_enabled:
+                aoe_monsters_left = (
+                    []
+                    if left_blocked
+                    else self.get_monsters_in_attack_range(
+                        is_left=True,
+                        attack_type="directional_aoe",
+                    )
+                )
+                aoe_monsters_right = (
+                    []
+                    if right_blocked
+                    else self.get_monsters_in_attack_range(
+                        is_left=False,
+                        attack_type="directional_aoe",
+                    )
+                )
+                aoe_direction = self.get_directional_aoe_direction(
+                    aoe_monsters_left,
+                    aoe_monsters_right,
+                    directional_aoe_cfg["min_monsters"],
+                )
+                if aoe_direction is not None:
+                    self._suppress_periodic_attack = True
+                    now = time.time()
+                    if now - getattr(
+                            self, "t_last_directional_aoe", 0.0
+                    ) > directional_aoe_cfg["cooldown"] and \
+                            not attack_recovering:
+                        self.cmd_action = "directional_aoe"
+                        self.cmd_move_x = aoe_direction
+                        self.t_last_directional_aoe = now
+                        self.t_last_attack = now
+                    elif self.cmd_action in combat_actions:
+                        self.cmd_action = "none"
+                    # Reaching the threshold owns the attack decision. If the
+                    # AoE is cooling down, wait instead of falling back to a
+                    # normal attack.
+                    return
+
+            # Get nearest monster to player
+            monster_left = (
+                None
+                if left_blocked
+                else self.get_nearest_monster(is_left=True)
+            )
+            monster_right = (
+                None
+                if right_blocked
+                else self.get_nearest_monster(is_left=False)
+            )
+            # Determine attack direction
+            attack_direction = self.get_attack_direction(monster_left, monster_right)
+            if attack_direction is not None:
+                self._suppress_periodic_attack = True
+                now = time.time()
+                if now - self.t_last_attack > cooldown and \
+                        not attack_recovering:
+                    self.cmd_action = "attack"
+                    self.t_last_attack = now
+                    self.cmd_move_x = attack_direction
+                elif self.cmd_action in combat_actions:
+                    self.cmd_action = "none"
+                # A valid bow target always wins over close monsters on the
+                # opposite side, even while the normal attack is cooling down.
+                return
+
+            if power_knockback_enabled and (
+                    close_monsters_left or close_monsters_right):
+                knockback_direction = self.get_directional_aoe_direction(
+                    close_monsters_left,
+                    close_monsters_right,
+                    1,
+                )
+                now = time.time()
+                if knockback_direction is not None and now - getattr(
+                        self, "t_last_power_knockback", 0.0
+                ) > power_knockback_cfg["cooldown"] and \
+                        not attack_recovering:
+                    self.cmd_action = "power_knockback"
+                    self.cmd_move_x = knockback_direction
+                    self.t_last_power_knockback = now
+                    self.t_last_attack = now
+                elif self.cmd_action in combat_actions:
+                    self.cmd_action = "none"
+                return
 
     def update_cmd_by_random(self):
         '''

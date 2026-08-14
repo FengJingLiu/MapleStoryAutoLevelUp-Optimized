@@ -442,15 +442,24 @@ class AutoBotLifecycleTests(unittest.TestCase):
             (255, 0, 0): "left none none",
             (0, 0, 255): "right none none",
             (255, 0, 255): "none none jump",
+            (127, 255, 255): "none up portal",
             (255, 0, 127): "none up teleport",
             (255, 255, 0): "none none goal",
             (0, 255, 127): "stop stop stop",
         }
         bot.color_code_up_down = {
             (127, 127, 127): "none up none",
+            (255, 255, 127): "none down none",
         }
         bot.cfg = {
-            "route": {"search_range": 10},
+            "route": {
+                "search_range": 10,
+                "jump_up_settle_delay": 0.6,
+                "portal_sweep_edge_margin": 2,
+                "portal_sweep_exit_distance": 10,
+                "portal_sweep_repeat_interval": 0.2,
+                "portal_sweep_max_duration": 6.0,
+            },
             "teleport": {
                 "is_use_teleport_to_walk": False,
                 "cooldown": 1,
@@ -458,6 +467,7 @@ class AutoBotLifecycleTests(unittest.TestCase):
             "key": {"teleport": "e"},
         }
         bot.img_routes = [bot.img_route]
+        bot.is_show_debug_window = False
         bot.is_on_ladder = False
         bot.cmd_move_x = "none"
         bot.cmd_move_y = "none"
@@ -465,6 +475,26 @@ class AutoBotLifecycleTests(unittest.TestCase):
         bot.t_last_teleport = time.time()
         bot.is_near_edge = Mock(return_value=False)
         return bot
+
+    @staticmethod
+    def _draw_stationary_jump_blob(bot, center=(10, 10)):
+        cv2.circle(
+            bot.img_route,
+            center,
+            radius=2,
+            color=(255, 0, 255),
+            thickness=-1,
+        )
+
+    @staticmethod
+    def _draw_portal_region(bot, top_left=(5, 8), bottom_right=(15, 12)):
+        cv2.rectangle(
+            bot.img_route,
+            top_left,
+            bottom_right,
+            color=(127, 255, 255),
+            thickness=-1,
+        )
 
     def test_route_point_actions_are_ignored_until_player_pixel_overlaps(self):
         bot = self._route_color_bot()
@@ -532,6 +562,204 @@ class AutoBotLifecycleTests(unittest.TestCase):
             (bot.cmd_move_x, bot.cmd_move_y, bot.cmd_action),
             ("left", "none", "none"),
         )
+
+    def test_compact_stationary_jump_uses_blob_center_as_target(self):
+        bot = self._route_color_bot()
+        self._draw_stationary_jump_blob(bot, center=(10, 10))
+        bot.loc_player_global = (8, 10)
+
+        color_code, _ = bot.get_nearest_color_code()
+
+        self.assertTrue(color_code["stationary_jump_alignment"])
+        self.assertEqual(color_code["target_center"], (10, 10))
+        self.assertEqual(color_code["pixel"], (10, 10))
+        self.assertFalse(color_code["exact_action"])
+
+    def test_stationary_jump_blob_edge_nudges_toward_center(self):
+        bot = self._route_color_bot()
+        self._draw_stationary_jump_blob(bot, center=(10, 10))
+
+        bot.loc_player_global = (8, 10)
+        bot.update_cmd_by_route()
+        self.assertEqual(
+            (bot.cmd_move_x, bot.cmd_move_y, bot.cmd_action),
+            ("none", "none", "jump_align_right"),
+        )
+
+        bot.loc_player_global = (12, 10)
+        bot.update_cmd_by_route()
+        self.assertEqual(
+            (bot.cmd_move_x, bot.cmd_move_y, bot.cmd_action),
+            ("none", "none", "jump_align_left"),
+        )
+
+    def test_stationary_jump_waits_at_exact_center_then_uses_aligned_jump(self):
+        bot = self._route_color_bot()
+        self._draw_stationary_jump_blob(bot, center=(10, 10))
+        bot.loc_player_global = (10, 10)
+
+        with patch(
+            "src.engine.MapleStoryAutoLevelUp.time.monotonic",
+            side_effect=(100.0, 100.59, 100.61),
+        ):
+            bot.update_cmd_by_route()
+            self.assertEqual(bot.cmd_action, "none")
+            bot.update_cmd_by_route()
+            self.assertEqual(bot.cmd_action, "none")
+            bot.update_cmd_by_route()
+            self.assertEqual(bot.cmd_action, "jump_aligned")
+
+    def test_stationary_jump_alignment_resets_after_position_drifts(self):
+        bot = self._route_color_bot()
+        self._draw_stationary_jump_blob(bot, center=(10, 10))
+
+        with patch(
+            "src.engine.MapleStoryAutoLevelUp.time.monotonic",
+            side_effect=(100.0, 101.0),
+        ):
+            bot.loc_player_global = (10, 10)
+            bot.update_cmd_by_route()
+            bot.loc_player_global = (9, 10)
+            bot.update_cmd_by_route()
+            self.assertEqual(bot.cmd_action, "jump_align_right")
+            bot.loc_player_global = (10, 10)
+            bot.update_cmd_by_route()
+
+        self.assertEqual(bot.cmd_action, "none")
+        self.assertEqual(bot._stationary_jump_aligned_since, 101.0)
+
+    def test_stationary_jump_does_not_align_from_another_row(self):
+        bot = self._route_color_bot()
+        self._draw_stationary_jump_blob(bot, center=(10, 10))
+        bot.loc_player_global = (8, 9)
+
+        bot.update_cmd_by_route()
+
+        self.assertEqual(
+            (bot.cmd_move_x, bot.cmd_move_y, bot.cmd_action),
+            ("none", "none", "none"),
+        )
+        self.assertFalse(bot._stationary_jump_alignment_active)
+
+    def test_stationary_jump_alignment_owns_mob_and_stuck_decisions(self):
+        bot = self._route_color_bot()
+        bot._stationary_jump_alignment_active = True
+        bot.screen_player_location_valid = True
+        bot.cmd_action = "jump_align_right"
+        bot.loc_watch_dog = (0, 0)
+        bot.t_watch_dog = 0.0
+
+        bot.update_cmd_by_mob_detection()
+        self.assertEqual(bot.cmd_action, "jump_align_right")
+        self.assertFalse(bot.is_player_stuck())
+        self.assertEqual(bot.loc_watch_dog, bot.loc_player_global)
+
+    def test_portal_color_uses_its_connected_region(self):
+        bot = self._route_color_bot()
+        self._draw_portal_region(bot)
+
+        color_code, color_code_up_down = bot.get_nearest_color_code()
+
+        self.assertIsNone(color_code_up_down)
+        self.assertTrue(color_code["portal_sweep"])
+        self.assertEqual(color_code["command"], "none up portal")
+        self.assertEqual(color_code["portal_region"]["bbox"], (5, 8, 15, 12))
+
+    def test_legacy_light_yellow_remains_down_not_portal(self):
+        bot = self._route_color_bot()
+        bot.img_route[10, 10] = (255, 255, 127)
+
+        color_code, color_code_up_down = bot.get_nearest_color_code()
+
+        self.assertIsNone(color_code)
+        self.assertEqual(color_code_up_down["command"], "none down none")
+
+    def test_portal_region_holds_up_and_reverses_inside_bounds(self):
+        bot = self._route_color_bot()
+        self._draw_portal_region(bot)
+
+        with patch(
+            "src.engine.MapleStoryAutoLevelUp.time.monotonic",
+            side_effect=(100.0, 100.1, 100.2),
+        ):
+            bot.update_cmd_by_route()
+            self.assertEqual(
+                (bot.cmd_move_x, bot.cmd_move_y, bot.cmd_action),
+                ("none", "up", "portal_sweep_right"),
+            )
+
+            bot.loc_player_global = (13, 10)
+            bot.update_cmd_by_route()
+            self.assertEqual(
+                (bot.cmd_move_x, bot.cmd_move_y, bot.cmd_action),
+                ("none", "up", "portal_sweep_left"),
+            )
+
+            # An unchanged capture is not allowed to queue another horizontal
+            # pulse immediately; Up remains held while vision catches up.
+            bot.update_cmd_by_route()
+            self.assertEqual(
+                (bot.cmd_move_x, bot.cmd_move_y, bot.cmd_action),
+                ("none", "up", "none"),
+            )
+
+    def test_portal_region_completes_after_large_minimap_displacement(self):
+        bot = self._route_color_bot()
+        self._draw_portal_region(bot)
+        bot.update_cmd_by_route()
+        self.assertTrue(bot._portal_sweep_active)
+
+        bot.loc_player_global = (30, 10)
+
+        self.assertFalse(bot._update_active_portal_sweep())
+        self.assertFalse(bot._portal_sweep_active)
+
+    def test_portal_timeout_releases_control_until_hero_leaves_region(self):
+        bot = self._route_color_bot()
+        self._draw_portal_region(bot)
+
+        with patch(
+            "src.engine.MapleStoryAutoLevelUp.time.monotonic",
+            side_effect=(100.0, 106.1, 107.0),
+        ):
+            bot.update_cmd_by_route()
+            self.assertTrue(bot._portal_sweep_active)
+
+            bot.update_cmd_by_route()
+            self.assertFalse(bot._portal_sweep_active)
+            self.assertEqual(
+                (bot.cmd_move_x, bot.cmd_move_y, bot.cmd_action),
+                ("none", "none", "none"),
+            )
+
+            # The same marker remains blocked after timeout, so it cannot
+            # immediately reacquire and suppress the normal stuck watchdog.
+            bot.update_cmd_by_route()
+            self.assertFalse(bot._portal_sweep_active)
+
+            bot.loc_player_global = (20, 10)
+            bot.update_cmd_by_route()
+            self.assertIsNone(bot._portal_sweep_failed_key)
+
+            bot.loc_player_global = (10, 10)
+            bot.update_cmd_by_route()
+            self.assertTrue(bot._portal_sweep_active)
+
+    def test_portal_region_owns_mob_and_stuck_decisions(self):
+        bot = self._route_color_bot()
+        bot._portal_sweep_active = True
+        bot.screen_player_location_valid = True
+        bot.cmd_move_y = "up"
+        bot.cmd_action = "portal_sweep_right"
+        bot.loc_watch_dog = (0, 0)
+        bot.t_watch_dog = 0.0
+
+        bot.update_cmd_by_mob_detection()
+
+        self.assertEqual(bot.cmd_move_y, "up")
+        self.assertEqual(bot.cmd_action, "portal_sweep_right")
+        self.assertFalse(bot.is_player_stuck())
+        self.assertEqual(bot.loc_watch_dog, bot.loc_player_global)
 
     @staticmethod
     def _route_recovery_bot(route_count=4, active_index=0):

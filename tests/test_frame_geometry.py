@@ -46,6 +46,21 @@ def _config():
             "range_y": 70,
             "cooldown": 0.9,
         },
+        "directional_aoe": {
+            "enable": True,
+            "min_monsters": 3,
+            "range_x": 420,
+            "range_y": 110,
+            "cooldown": 1.2,
+            "attack_recovery_delay": 1.0,
+        },
+        "power_knockback": {
+            "enable": True,
+            "trigger_distance_x": 100,
+            "range_y": 70,
+            "cooldown": 0.9,
+            "attack_recovery_delay": 0.95,
+        },
         "monster_detect": {
             "search_box_margin": 50,
             "max_mob_area_trigger": 1500,
@@ -152,6 +167,21 @@ def test_scales_full_frame_pixel_settings_without_mutating_source():
     assert scaled["aoe_skill"]["range_y"] == 340
     assert scaled["directional_attack"]["range_x"] == 1050
     assert scaled["directional_attack"]["range_y"] == 140
+    assert scaled["directional_aoe"] == {
+        "enable": True,
+        "min_monsters": 3,
+        "range_x": 1260,
+        "range_y": 220,
+        "cooldown": 1.2,
+        "attack_recovery_delay": 1.0,
+    }
+    assert scaled["power_knockback"] == {
+        "enable": True,
+        "trigger_distance_x": 300,
+        "range_y": 140,
+        "cooldown": 0.9,
+        "attack_recovery_delay": 0.95,
+    }
     assert scaled["monster_detect"]["search_box_margin"] == 150
     assert scaled["monster_detect"]["max_mob_area_trigger"] == 9000
     assert scaled["character"] == {"width": 300, "height": 300}

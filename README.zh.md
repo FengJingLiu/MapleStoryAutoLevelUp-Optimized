@@ -176,10 +176,54 @@ python -m src.engine.MapleStoryAutoLevelUp --record
 #### 透過 config.yaml 選擇地圖
 在設定檔中修改：
 ```yaml
-# 於 config/config_default.yaml
+# 於 config/config_custom.yaml
 bot:
   map: ""  # 設定地圖名稱，可於 config/config_data.yaml 內查詢
 ```
+
+#### 弓箭手單側 AOE
+
+方向型角色可以保留普通攻擊，並在左側或右側技能範圍內的怪物數量
+達到門檻時改用單側 AOE。請在 `config/config_custom.yaml` 加入類似設定：
+
+```yaml
+bot:
+  attack: directional
+key:
+  directional_attack: control  # 普通攻擊鍵
+  aoe_skill: shift             # 單側 AOE 鍵；必須與普通攻擊鍵不同
+directional_aoe:
+  enable: true
+  min_monsters: 3              # 單側達到此數量（含）時施放
+  range_x: 350
+  range_y: 70
+  cooldown: 0.9
+  attack_recovery_delay: 0.9
+```
+
+若左右兩側都達到門檻，會先選怪物較多的一側；數量相同時選最近的一側。
+AOE 冷卻期間會等待，不會退回普通攻擊。
+
+#### 弓箭手近身強力擊退
+
+怪物距離太近而無法射箭時，可啟用近身備援技能，並將「強力擊退」綁定為
+`S`：
+
+```yaml
+key:
+  power_knockback: s
+power_knockback:
+  enable: true
+  trigger_distance_x: 100     # 水平中心距離，包含臨界值
+  range_y: 70
+  cooldown: 0.9
+  attack_recovery_delay: 0.9
+```
+
+任一近身怪會令同側暫時不可射箭；若另一側有可射的怪物，會優先攻擊另一側。
+只有左右都沒有可射目標時才會使用強力擊退。距離以原始 1296 x 700 基準像素
+設定，執行時會依目前擷取解析度自動縮放。
+
 * 按下 `F1` 暫停/繼續腳本
 * 按下 `F2` 截圖，檔案會存於 screenshot/
 * 按下 `F12` 結束腳本
@@ -201,6 +245,21 @@ python -m tools.routeRecorder --new_map <map_directory_name>
 | `F2` | 截圖（儲存於 `screenshot/`） |
 | `F3` | 儲存目前路徑並開始新的 |
 | `F4` | 將目前地圖存為 map.png |
+
+### 手工繪製傳送門觸發色塊
+
+路線製作器不會產生傳送門色塊。儲存路線後，請手工編輯對應的
+`minimaps/<map>/route*.png`，在傳送門觸發位置畫一個橫向實心色塊：
+
+- 顏色：RGB `(127, 255, 255)`，十六進位 `#7FFFFF`；若使用 OpenCV，BGR 為
+  `(255, 255, 127)`。
+- 建議尺寸約為小地圖座標的 `11 x 5` 像素。色塊應保持為單一連通區域，
+  並避免被其他路線顏色覆蓋。
+- 只有 Hero 色塊質心進入此區域才會觸發。程式會持續按住 `Up`，同時短按
+  左右方向鍵，並在到達該連通區域的左右邊界前反向。
+- 偵測到同一地圖內的瞬間位置跳變後會結束操作；若 6 秒內未成功，程式會
+  釋放控制，且必須等 Hero 離開色塊後才會再次嘗試。
+- RGB `(255, 255, 127)` 仍是原有的 `Down` 路線顏色，不可用作傳送門色塊。
 
 * 新地圖建立後，請至 config/config_data.yaml 登記怪物
 * 若為大型地圖，建議先探索一次地圖再開始記錄路徑

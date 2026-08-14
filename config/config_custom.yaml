@@ -1,5 +1,10 @@
 bot:
-  map: wisdom_forest
+  map: east_rocky_mountain_5
+buff_skill:
+  keys:
+  - ins
+directional_attack:
+  range_y: 60
 game_window:
   auto_resize: false
   capture_profile: potplayer
@@ -10,8 +15,7 @@ health_monitor:
   add_mp_percent: 0
   enable: false
 key:
-  aoe_skill: shift
-  directional_attack: shift
+  directional_attack: a
   jump: alt
 nametag:
   medal:

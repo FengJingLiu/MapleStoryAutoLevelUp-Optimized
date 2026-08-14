@@ -15,7 +15,10 @@ from PySide6.QtWidgets import (
     QPlainTextEdit, QTabWidget, QGroupBox, QFormLayout,
     QSizePolicy, QComboBox, QListWidgetItem, QScrollArea
 )
-from PySide6.QtGui import QTextCharFormat, QColor, QTextCursor, QPixmap, QImage, QIcon
+from PySide6.QtGui import (
+    QTextCharFormat, QColor, QTextCursor, QPixmap, QImage, QIcon,
+    QIntValidator,
+)
 from PySide6.QtCore import Qt, Signal
 
 # Local import
@@ -268,6 +271,13 @@ class MainWindow(QMainWindow):
         self.attack_range_x.setFixedWidth(60)
         form_left.addRow("Range X:", self.attack_range_x)
 
+        self.power_knockback_distance = QLineEdit()
+        self.power_knockback_distance.setFixedWidth(60)
+        self.power_knockback_distance.setValidator(
+            QIntValidator(1, 9999, self.power_knockback_distance)
+        )
+        form_left.addRow("Knockback Dist.:", self.power_knockback_distance)
+
         # Right column
         form_right = QFormLayout()
         self.attack_cooldown = QLineEdit()
@@ -292,6 +302,19 @@ class MainWindow(QMainWindow):
             lambda: validate_numerical_input(self.attack_range_y.text(), error_label, 0, 9999))
         self.attack_cooldown.editingFinished.connect(
             lambda: validate_numerical_input(self.attack_cooldown.text(), error_label, 0, 9999))
+        def validate_knockback_distance():
+            if self.power_knockback_distance.hasAcceptableInput():
+                error_label.setVisible(False)
+                return True
+            error_label.setText(
+                "Knockback distance must be an integer between 1 and 9999."
+            )
+            error_label.setVisible(True)
+            return False
+
+        self.power_knockback_distance.editingFinished.connect(
+            validate_knockback_distance
+        )
 
         # Final layout
         layout = QVBoxLayout()
@@ -309,6 +332,10 @@ class MainWindow(QMainWindow):
         self.basic_attack_key = SingleKeyEdit()
         self.basic_attack_key.setFixedWidth(100)
         form_left.addRow("Basic Attack:", self.basic_attack_key)
+
+        self.power_knockback_key = SingleKeyEdit()
+        self.power_knockback_key.setFixedWidth(100)
+        form_left.addRow("Power Knockback:", self.power_knockback_key)
 
         self.teleport_key = SingleKeyEdit()
         self.teleport_key.setFixedWidth(100)
@@ -784,10 +811,18 @@ class MainWindow(QMainWindow):
         self.attack_range_x.setText(str(atk_cfg["range_x"]))
         self.attack_cooldown.setText(str(atk_cfg["cooldown"]))
         self.attack_range_y.setText(str(atk_cfg["range_y"]))
+        self.power_knockback_distance.setText(str(
+            self.cfg.get("power_knockback", {}).get(
+                "trigger_distance_x", 100
+            )
+        ))
 
         # === Key Bindings ===
         key_cfg = self.cfg["key"]
         self.basic_attack_key.set_key(key_cfg["directional_attack"])
+        self.power_knockback_key.set_key(
+            key_cfg.get("power_knockback", "s")
+        )
         self.teleport_key.set_key(key_cfg["teleport"])
         self.party_key.set_key(key_cfg["party"])
         self.aoe_skill_key.set_key(key_cfg["aoe_skill"])
@@ -996,6 +1031,22 @@ class MainWindow(QMainWindow):
         else:
             logger.error(f"[update_cfg_from_main_ui] Unsupported attack mode: {self.cfg['bot']['attack']}")
         # Key binding gbox
+        self.cfg.setdefault("power_knockback", {})
+        if self.power_knockback_distance.hasAcceptableInput():
+            self.cfg["power_knockback"]["trigger_distance_x"] = int(
+                self.power_knockback_distance.text()
+            )
+        else:
+            prior_distance = int(
+                self.cfg["power_knockback"].get("trigger_distance_x", 100)
+            )
+            self.power_knockback_distance.setText(str(prior_distance))
+            logger.warning(
+                "[update_cfg_from_main_ui] Ignored invalid integer "
+                "Power Knockback distance"
+            )
+        self.cfg["key"]["power_knockback"] = \
+            self.power_knockback_key.get_key()
         self.cfg["key"]["teleport"] = self.teleport_key.get_key()
         self.cfg["key"]["party"] = self.party_key.get_key()
         self.cfg["key"]["aoe_skill"] = self.aoe_skill_key.get_key()

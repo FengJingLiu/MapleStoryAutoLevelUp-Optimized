@@ -240,10 +240,57 @@ python -m src.engine.MapleStoryAutoLevelUp --record
 #### Choose map via config_custom.yaml
 Edit your map selection in the config file:
 ```
-# In config/config_default.yaml
+# In config/config_custom.yaml
 bot:
   map: ""  # Set the map name. See available maps in config/config_data.yaml
 ```
+
+#### Archer single-sided AoE
+
+Directional characters can keep their normal attack and switch to a
+single-sided AoE when enough monsters overlap the configured left or right
+skill range. Add overrides like these to `config/config_custom.yaml`:
+
+```yaml
+bot:
+  attack: directional
+key:
+  directional_attack: control  # Your normal attack key
+  aoe_skill: shift             # Your single-sided AoE key; must be different
+directional_aoe:
+  enable: true
+  min_monsters: 3              # Cast at this count or higher on one side
+  range_x: 350
+  range_y: 70
+  cooldown: 0.9
+  attack_recovery_delay: 0.9
+```
+
+If both sides reach the threshold, the bot chooses the side with more
+monsters, then the nearer side when the counts are tied. While the AoE is on
+cooldown, it waits instead of falling back to a normal attack.
+
+#### Archer close-range Power Knock-Back
+
+When a monster is too close for a bow attack, enable the close-range fallback
+and bind Power Knock-Back to `S`:
+
+```yaml
+key:
+  power_knockback: s
+power_knockback:
+  enable: true
+  trigger_distance_x: 100     # Inclusive horizontal center distance
+  range_y: 70
+  cooldown: 0.9
+  attack_recovery_delay: 0.9
+```
+
+A close monster blocks bow attacks on its whole side. If the opposite side has
+a shootable monster, that side is attacked first. Power Knock-Back is used only
+when no side has a valid bow target. The distance is expressed in the original
+1296 x 700 reference pixels and is scaled automatically for the live capture.
+
 * Press 'F1' to pause/continue the script control
 * Press 'F2' to take a screenshot, which will be saved to screenshot/
 * Press 'F12' to terminate script
@@ -267,6 +314,23 @@ python -m tools.routeRecorder --new_map <map_directory_name>
 | `F2` | Take a screenshot (saved to `screenshot/`) |
 | `F3` | Save current route map and start a new one |
 | `F4` | Save the current map to map.png            |
+
+### Manually paint a portal activation region
+
+The route recorder does not create portal markers. After saving a route,
+manually edit the corresponding `minimaps/<map>/route*.png` file and paint a
+filled horizontal region over the portal activation position:
+
+- Color: RGB `(127, 255, 255)`, hex `#7FFFFF` (OpenCV BGR: `(255, 255, 127)`).
+- Recommended size: approximately `11 x 5` minimap pixels. Keep it as one
+  connected component and do not cover it with another route color.
+- The action starts only when the detected Hero centroid overlaps the region.
+  The bot holds `Up` and uses short left/right pulses, reversing before the
+  connected region's horizontal edges.
+- A successful in-map minimap jump ends the action. A failed attempt releases
+  control after 6 seconds and is not retried until Hero leaves the region.
+- RGB `(255, 255, 127)` remains the legacy `Down` route color and must not be
+  used for portal regions.
 
 * Please register mobs in config/config_data.yaml after creating a new map. 
 * If this is a big map, it's recommended to scan the map first instead of start record route right away.

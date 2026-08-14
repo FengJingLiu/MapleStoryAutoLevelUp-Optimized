@@ -151,6 +151,48 @@ class KeyboardControllerEsp32RoutingTests(unittest.TestCase):
         )
         sleep.assert_not_called()
 
+    def test_directional_aoe_uses_its_own_key_and_recovery_delay(self):
+        controller_module._input_allowed.set()
+        controller = self.make_directional_controller(facing="right")
+
+        with patch.object(controller_module.time, "sleep"):
+            self.assertTrue(controller.perform_directional_attack(
+                "left",
+                attack_key="shift",
+                recovery_delay=1.5,
+            ))
+
+        self.assertEqual(
+            controller_module._input_client.method_calls,
+            [
+                call.set_state(["left"]),
+                call.set_state([]),
+                call.tap("shift", 50),
+            ],
+        )
+        self.assertGreater(controller_module.input_recovery_remaining(), 1.4)
+
+    def test_power_knockback_uses_s_and_its_own_recovery_delay(self):
+        controller_module._input_allowed.set()
+        controller = self.make_directional_controller(facing="right")
+
+        with patch.object(controller_module.time, "sleep"):
+            self.assertTrue(controller.perform_directional_attack(
+                "left",
+                attack_key="s",
+                recovery_delay=1.1,
+            ))
+
+        self.assertEqual(
+            controller_module._input_client.method_calls,
+            [
+                call.set_state(["left"]),
+                call.set_state([]),
+                call.tap("s", 50),
+            ],
+        )
+        self.assertGreater(controller_module.input_recovery_remaining(), 1.0)
+
     def test_other_input_cannot_enter_directional_attack_transaction(self):
         controller_module._input_allowed.set()
         controller = self.make_directional_controller(facing="right")
@@ -428,6 +470,67 @@ class KeyboardControllerEsp32RoutingTests(unittest.TestCase):
         controller.set_command("left none jump")
         self.assertEqual(controller.cmd_action, "jump")
 
+    def test_consumed_portal_sweep_action_can_be_queued_again(self):
+        for action in ("portal_sweep_left", "portal_sweep_right"):
+            with self.subTest(action=action):
+                controller = controller_module.KeyBoardController.__new__(
+                    controller_module.KeyBoardController
+                )
+                controller.cmd_action = "none"
+                controller._last_source_action = "none"
+
+                controller.set_command(f"none up {action}")
+                controller._consume_action(action)
+                controller.set_command(f"none up {action}")
+
+                self.assertEqual(controller.cmd_action, action)
+
+    def test_portal_sweep_holds_up_and_taps_horizontal_direction(self):
+        controller_module._input_allowed.set()
+        controller = controller_module.KeyBoardController.__new__(
+            controller_module.KeyBoardController
+        )
+        controller.command_lock = controller_module.threading.RLock()
+        controller.cached_facing = "right"
+        controller.cmd_left_right_last = "right"
+        controller.cmd_up_down_last = "none"
+        controller.portal_sweep_nudge_ms = 37
+
+        self.assertTrue(controller.perform_portal_sweep_step("left"))
+
+        self.assertEqual(
+            controller_module._input_client.method_calls,
+            [call.set_state(["up"]), call.tap("left", 37)],
+        )
+        self.assertEqual(controller.cmd_left_right_last, "none")
+        self.assertEqual(controller.cmd_up_down_last, "up")
+        self.assertEqual(controller.cached_facing, "left")
+
+    def test_portal_sweep_rejects_unknown_horizontal_direction(self):
+        controller_module._input_allowed.set()
+        controller = controller_module.KeyBoardController.__new__(
+            controller_module.KeyBoardController
+        )
+
+        self.assertFalse(controller.perform_portal_sweep_step("none"))
+
+        controller_module._input_client.assert_not_called()
+
+    def test_consumed_combat_action_can_be_queued_again(self):
+        for action in ("attack", "directional_aoe", "power_knockback"):
+            with self.subTest(action=action):
+                controller = controller_module.KeyBoardController.__new__(
+                    controller_module.KeyBoardController
+                )
+                controller.cmd_action = "none"
+                controller._last_source_action = "none"
+
+                controller.set_command(f"left none {action}")
+                controller._consume_action(action)
+                controller.set_command(f"left none {action}")
+
+                self.assertEqual(controller.cmd_action, action)
+
     def test_disabled_control_does_not_require_an_esp32_connection(self):
         cfg = {
             "game_window": {"title": "Test Window"},
@@ -455,6 +558,216 @@ class KeyboardControllerEsp32RoutingTests(unittest.TestCase):
         thread_class.return_value.start.assert_called_once_with()
         self.assertIsNone(controller.input_client)
         self.assertFalse(controller.is_enable)
+        self.assertEqual(controller.portal_sweep_nudge_ms, 30)
+
+    def test_enabled_directional_aoe_requires_an_aoe_key(self):
+        cfg = {
+            "game_window": {"title": "Test Window"},
+            "buff_skill": {"keys": []},
+            "system": {
+                "key_debounce_interval": 1,
+                "fps_limit_keyboard_controller": 30,
+            },
+            "bot": {"attack": "directional"},
+            "directional_aoe": {
+                "enable": True,
+                "attack_recovery_delay": 1.0,
+            },
+            "key": {
+                "directional_attack": "control",
+                "aoe_skill": "",
+            },
+        }
+
+        with self.assertRaisesRegex(ValueError, "key.aoe_skill"):
+            controller_module.KeyBoardController(cfg, connect_input=False)
+
+    def test_directional_aoe_key_must_differ_from_normal_attack(self):
+        cfg = {
+            "game_window": {"title": "Test Window"},
+            "buff_skill": {"keys": []},
+            "system": {
+                "key_debounce_interval": 1,
+                "fps_limit_keyboard_controller": 30,
+            },
+            "bot": {"attack": "directional"},
+            "directional_aoe": {
+                "enable": True,
+                "attack_recovery_delay": 1.0,
+            },
+            "key": {
+                "directional_attack": "ctrl",
+                "aoe_skill": "control",
+            },
+        }
+
+        with self.assertRaisesRegex(ValueError, "must differ"):
+            controller_module.KeyBoardController(cfg, connect_input=False)
+
+    def test_enabled_power_knockback_requires_a_key(self):
+        cfg = {
+            "game_window": {"title": "Test Window"},
+            "buff_skill": {"keys": []},
+            "system": {
+                "key_debounce_interval": 1,
+                "fps_limit_keyboard_controller": 30,
+            },
+            "bot": {"attack": "directional"},
+            "power_knockback": {
+                "enable": True,
+                "attack_recovery_delay": 0.9,
+            },
+            "key": {
+                "directional_attack": "control",
+                "power_knockback": "",
+            },
+        }
+
+        with self.assertRaisesRegex(ValueError, "key.power_knockback"):
+            controller_module.KeyBoardController(cfg, connect_input=False)
+
+    def test_power_knockback_key_must_differ_from_normal_attack(self):
+        cfg = {
+            "game_window": {"title": "Test Window"},
+            "buff_skill": {"keys": []},
+            "system": {
+                "key_debounce_interval": 1,
+                "fps_limit_keyboard_controller": 30,
+            },
+            "bot": {"attack": "directional"},
+            "power_knockback": {
+                "enable": True,
+                "attack_recovery_delay": 0.9,
+            },
+            "key": {
+                "directional_attack": "s",
+                "power_knockback": "s",
+            },
+        }
+
+        with self.assertRaisesRegex(ValueError, "must differ"):
+            controller_module.KeyBoardController(cfg, connect_input=False)
+
+    def test_run_routes_directional_aoe_to_the_aoe_key(self):
+        controller = controller_module.KeyBoardController.__new__(
+            controller_module.KeyBoardController
+        )
+        controller.cfg = {
+            "esp32_hid": {"remote_target": True},
+            "bot": {"attack": "directional"},
+            "buff_skill": {"keys": [], "cooldown": [], "action_cooldown": 1},
+            "key": {"aoe_skill": "shift"},
+            "system": {"fps_limit_keyboard_controller": 30},
+        }
+        controller.command_lock = controller_module.threading.RLock()
+        controller.is_enable = True
+        controller.capture_available = True
+        controller.is_terminated = False
+        controller.is_need_force_heal = False
+        controller.cmd_left_right = "left"
+        controller.cmd_up_down = "none"
+        controller.cmd_action = "directional_aoe"
+        controller.cmd_left_right_last = ""
+        controller.cmd_up_down_last = ""
+        controller.directional_aoe_key = "shift"
+        controller.directional_aoe_recovery_delay = 1.2
+        controller.attack_recovery_delay = 0.9
+        controller.t_last_buff_cast = []
+        controller.t_last_skill = 0.0
+        controller.input_client = controller_module._input_client
+        controller.perform_directional_attack = Mock(return_value=True)
+        controller.release_all_key = Mock()
+
+        def stop_after_one_frame():
+            controller.is_terminated = True
+
+        controller.limit_fps = stop_after_one_frame
+        controller.run()
+
+        controller.perform_directional_attack.assert_called_once_with(
+            "left",
+            attack_key="shift",
+            recovery_delay=1.2,
+        )
+        self.assertEqual(controller.cmd_action, "none")
+
+    def test_run_routes_power_knockback_to_s(self):
+        controller = controller_module.KeyBoardController.__new__(
+            controller_module.KeyBoardController
+        )
+        controller.cfg = {
+            "esp32_hid": {"remote_target": True},
+            "bot": {"attack": "directional"},
+            "buff_skill": {"keys": [], "cooldown": [], "action_cooldown": 1},
+            "key": {"power_knockback": "s"},
+            "system": {"fps_limit_keyboard_controller": 30},
+        }
+        controller.command_lock = controller_module.threading.RLock()
+        controller.is_enable = True
+        controller.capture_available = True
+        controller.is_terminated = False
+        controller.is_need_force_heal = False
+        controller.cmd_left_right = "right"
+        controller.cmd_up_down = "none"
+        controller.cmd_action = "power_knockback"
+        controller.cmd_left_right_last = ""
+        controller.cmd_up_down_last = ""
+        controller.power_knockback_key = "s"
+        controller.power_knockback_recovery_delay = 1.1
+        controller.attack_recovery_delay = 0.9
+        controller.t_last_buff_cast = []
+        controller.t_last_skill = 0.0
+        controller.input_client = controller_module._input_client
+        controller.perform_directional_attack = Mock(return_value=True)
+        controller.release_all_key = Mock()
+
+        def stop_after_one_frame():
+            controller.is_terminated = True
+
+        controller.limit_fps = stop_after_one_frame
+        controller.run()
+
+        controller.perform_directional_attack.assert_called_once_with(
+            "right",
+            attack_key="s",
+            recovery_delay=1.1,
+        )
+        self.assertEqual(controller.cmd_action, "none")
+
+    def test_run_routes_portal_sweep_to_atomic_portal_step(self):
+        controller = controller_module.KeyBoardController.__new__(
+            controller_module.KeyBoardController
+        )
+        controller.cfg = {
+            "esp32_hid": {"remote_target": True},
+            "bot": {"attack": "directional"},
+            "buff_skill": {"keys": [], "cooldown": [], "action_cooldown": 1},
+            "system": {"fps_limit_keyboard_controller": 30},
+        }
+        controller.command_lock = controller_module.threading.RLock()
+        controller.is_enable = True
+        controller.capture_available = True
+        controller.is_terminated = False
+        controller.is_need_force_heal = False
+        controller.cmd_left_right = "none"
+        controller.cmd_up_down = "up"
+        controller.cmd_action = "portal_sweep_right"
+        controller.cmd_left_right_last = ""
+        controller.cmd_up_down_last = ""
+        controller.t_last_buff_cast = []
+        controller.t_last_skill = 0.0
+        controller.input_client = controller_module._input_client
+        controller.perform_portal_sweep_step = Mock(return_value=True)
+        controller.release_all_key = Mock()
+
+        def stop_after_one_frame():
+            controller.is_terminated = True
+
+        controller.limit_fps = stop_after_one_frame
+        controller.run()
+
+        controller.perform_portal_sweep_step.assert_called_once_with("right")
+        self.assertEqual(controller.cmd_action, "none")
 
     def test_remote_target_does_not_depend_on_computer_a_focus(self):
         controller = controller_module.KeyBoardController.__new__(

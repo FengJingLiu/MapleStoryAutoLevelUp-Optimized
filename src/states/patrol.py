@@ -20,6 +20,10 @@ class PatrolState(State):
         return None
 
     def on_frame(self):
+        # Patrol has no route update to rebuild this source command. The
+        # keyboard consumes only its own queued copy, so clear the prior frame
+        # here to prevent a retriggerable attack/knockback from being replayed.
+        self.bot.cmd_action = "none"
         x, y = self.bot.loc_player
         h, w = self.bot.img_frame.shape[:2]
         loc_player_ratio = float(x)/float(w)
@@ -46,7 +50,8 @@ class PatrolState(State):
 
         # Update attack commend by periodically attack
         if time.time() - self.bot.t_last_attack > \
-            self.bot.cfg["patrol"]["patrol_attack_interval"]:
+            self.bot.cfg["patrol"]["patrol_attack_interval"] and \
+                not getattr(self.bot, "_suppress_periodic_attack", False):
             self.bot.cmd_action = "attack"
             self.bot.t_last_attack = time.time()
 
