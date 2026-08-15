@@ -3,6 +3,7 @@ KeyBoardController
 Simulate user keyboard input to control character in the game 
 '''
 # Standard Import
+import math
 import threading
 import time
 
@@ -229,8 +230,8 @@ class KeyBoardController():
         self.command_lock = threading.RLock()
         self.cached_facing = None
         # Monotonic timestamp for the currently held horizontal direction.
-        # Rope mounting uses this to preserve an existing same-direction run
-        # instead of stopping and rebuilding momentum.
+        # Running jumps and rope mounting use this to preserve an existing
+        # same-direction run instead of stopping and rebuilding momentum.
         self.direction_held_since = None
         self.direction_held_generation = None
         self.window_title = cfg["game_window"]["title"]
@@ -247,6 +248,7 @@ class KeyBoardController():
         # Flags
         self.is_enable = bool(connect_input)
         self.capture_available = bool(capture_available)
+        self.session_recovery_active = False
         self.is_need_force_heal = False
         self.is_terminated = False
         # Parameters
@@ -278,6 +280,10 @@ class KeyBoardController():
         self.jump_up_settle_delay = max(
             0.0,
             float(cfg.get("route", {}).get("jump_up_settle_delay", 0.15)),
+        )
+        self.directional_jump_runup_ms = max(
+            0,
+            int(cfg.get("route", {}).get("directional_jump_runup_ms", 180)),
         )
         self.jump_alignment_nudge_ms = max(
             1,
@@ -388,12 +394,11 @@ class KeyBoardController():
         toggle_enable
         '''
         self.is_enable = not self.is_enable
-        if self.is_enable and getattr(
-            self, "capture_available", True
-        ) and self.is_game_window_active():
-            _input_allowed.set()
-        else:
-            _input_allowed.clear()
+        with _input_transaction_lock:
+            if self._automation_input_active():
+                _input_allowed.set()
+            else:
+                _input_allowed.clear()
         logger.info(f"Player pressed F1, is_enable:{self.is_enable}")
 
         # Make sure all key are released
@@ -413,8 +418,9 @@ class KeyBoardController():
         '''
         self.release_all_key()
         self.is_enable = True
-        if getattr(self, "capture_available", True) and self.is_game_window_active():
-            _input_allowed.set()
+        with _input_transaction_lock:
+            if self._automation_input_active():
+                _input_allowed.set()
 
     def set_capture_available(self, available):
         """Gate remote input independently from the user's pause setting."""
@@ -425,9 +431,159 @@ class KeyBoardController():
         if not available:
             _input_allowed.clear()
             self.release_all_key()
-        elif self.is_enable and self.is_game_window_active():
-            _input_allowed.set()
+        else:
+            with _input_transaction_lock:
+                if self._automation_input_active():
+                    _input_allowed.set()
         return True
+
+    def _automation_input_active(self):
+        """Return whether the normal movement/action worker may emit HID."""
+        return bool(
+            getattr(self, "is_enable", False)
+            and getattr(self, "capture_available", True)
+            and not getattr(self, "session_recovery_active", False)
+            and not getattr(self, "is_terminated", False)
+            and self.is_game_window_active()
+        )
+
+    def suspend_automation_for_session_recovery(self):
+        """Stop every automatic producer while retaining an explicit TAP path.
+
+        The global regular-input gate must stay closed throughout recovery so
+        the worker cannot replay a stale movement snapshot, forced heal, or
+        scheduled buff after RELEASE_ALL. Only the explicit recovery methods
+        ``press_session_recovery_key``, ``move_session_recovery_mouse``, and
+        the two explicit recovery click methods may emit HID while this flag
+        is active.
+        """
+        # Signal in-flight multi-step actions to abort at their next regular
+        # permission check, then serialize the final state clear and release.
+        self.session_recovery_active = True
+        _input_allowed.clear()
+        with _input_transaction_lock:
+            self.session_recovery_active = True
+            _input_allowed.clear()
+            with self._ensure_command_lock():
+                self.cmd_left_right = "none"
+                self.cmd_up_down = "none"
+                self.cmd_action = "none"
+                self._last_source_action = "none"
+                self.is_need_force_heal = False
+            success, _ = _invoke_input("release_all")
+            self._invalidate_facing_cache()
+            return success
+
+    def press_session_recovery_key(self, key, duration=0.05):
+        """Send one explicit recovery TAP while regular automation is gated."""
+        key = key.strip() if isinstance(key, str) else ""
+        if not key:
+            return False
+        with _input_transaction_lock:
+            if not getattr(self, "session_recovery_active", False) or \
+                    not getattr(self, "is_enable", False) or \
+                    not getattr(self, "capture_available", True) or \
+                    getattr(self, "is_terminated", False) or \
+                    not self.is_game_window_active():
+                return False
+            duration_ms = max(1, int(round(float(duration) * 1000)))
+            success, result = _invoke_input("tap", key, duration_ms)
+            return result if success else False
+
+    def move_session_recovery_mouse(self, dx, dy):
+        """Move the remote pointer once while regular automation is gated.
+
+        Relative movement is deliberately issued as a one-shot command.  If
+        its serial acknowledgement is lost, ``_invoke_input`` treats the
+        command as consumed; the visual recovery loop observes the next frame
+        instead of replaying a movement that may already have happened.
+        """
+        if isinstance(dx, bool) or not isinstance(dx, int) or \
+                isinstance(dy, bool) or not isinstance(dy, int):
+            return False
+        with _input_transaction_lock:
+            if not getattr(self, "session_recovery_active", False) or \
+                    not getattr(self, "is_enable", False) or \
+                    not getattr(self, "capture_available", True) or \
+                    getattr(self, "is_terminated", False) or \
+                    not self.is_game_window_active():
+                return False
+            success, result = _invoke_input("mouse_move", dx, dy, 0)
+            return result if success else False
+
+    def click_session_recovery_mouse(
+        self,
+        button="left",
+        duration=0.05,
+    ):
+        """Click once at the current remote pointer position."""
+        try:
+            duration_ms = max(1, int(round(float(duration) * 1000)))
+        except (TypeError, ValueError, OverflowError):
+            return False
+        with _input_transaction_lock:
+            if not getattr(self, "session_recovery_active", False) or \
+                    not getattr(self, "is_enable", False) or \
+                    not getattr(self, "capture_available", True) or \
+                    getattr(self, "is_terminated", False) or \
+                    not self.is_game_window_active():
+                return False
+            success, result = _invoke_input(
+                "mouse_click", button, duration_ms
+            )
+            return result if success else False
+
+    def click_session_recovery_point(
+        self,
+        x,
+        y,
+        frame_width,
+        frame_height,
+        button="left",
+        duration=0.05,
+    ):
+        """Click one capture-frame point through the gated absolute HID path."""
+        try:
+            x = float(x)
+            y = float(y)
+            frame_width = int(frame_width)
+            frame_height = int(frame_height)
+            duration_ms = max(1, int(round(float(duration) * 1000)))
+        except (TypeError, ValueError, OverflowError):
+            return False
+        if not all(math.isfinite(value) for value in (x, y)) or \
+                frame_width <= 1 or frame_height <= 1 or \
+                not 0 <= x < frame_width or not 0 <= y < frame_height:
+            return False
+
+        absolute_x = int(round(x * 32767 / (frame_width - 1)))
+        absolute_y = int(round(y * 32767 / (frame_height - 1)))
+        with _input_transaction_lock:
+            if not getattr(self, "session_recovery_active", False) or \
+                    not getattr(self, "is_enable", False) or \
+                    not getattr(self, "capture_available", True) or \
+                    getattr(self, "is_terminated", False) or \
+                    not self.is_game_window_active():
+                return False
+            success, result = _invoke_input(
+                "mouse_click_at",
+                absolute_x,
+                absolute_y,
+                button,
+                duration_ms,
+            )
+            return result if success else False
+
+    def resume_automation_after_session_recovery(self):
+        """Reopen regular HID only if the user's other safety gates allow it."""
+        with _input_transaction_lock:
+            was_active = getattr(self, "session_recovery_active", False)
+            self.session_recovery_active = False
+            if self._automation_input_active():
+                _input_allowed.set()
+            else:
+                _input_allowed.clear()
+            return was_active
 
     def set_command(self, new_command):
         '''
@@ -678,6 +834,77 @@ class KeyBoardController():
             and cmd_left_right in {"none", "stop"}
             and cmd_up_down in {"none", "stop"}
         )
+
+    @staticmethod
+    def is_directional_jump_command(cmd_left_right, cmd_up_down, cmd_action):
+        """Return whether a route command requests a running jump."""
+        return (
+            cmd_action == "jump"
+            and cmd_left_right in {"left", "right"}
+            and cmd_up_down in {"none", "stop"}
+        )
+
+    def perform_directional_jump(self, direction):
+        """Build any missing horizontal run-up, then jump without releasing it."""
+        if direction not in {"left", "right"}:
+            return False
+
+        with _input_transaction_lock:
+            if not _regular_input_allowed():
+                return False
+
+            # The horizontal direction stays held through and after the TAP,
+            # preserving the momentum needed to reach a nearby rope.
+            success, _ = _invoke_input("set_state", [direction])
+            if not success:
+                self._invalidate_facing_cache()
+                return False
+
+            now = time.monotonic()
+            generation = _input_state_generation()
+            with self._ensure_command_lock():
+                previous_direction = getattr(
+                    self, "cmd_left_right_last", ""
+                )
+                held_since = getattr(self, "direction_held_since", None)
+                held_generation = getattr(
+                    self, "direction_held_generation", None
+                )
+                if (
+                    previous_direction != direction
+                    or held_since is None
+                    or held_since > now
+                    or held_generation != generation
+                ):
+                    held_since = now
+                self.direction_held_since = held_since
+                self.direction_held_generation = generation
+                self.cached_facing = direction
+                self.cmd_left_right_last = direction
+                self.cmd_up_down_last = "none"
+
+            required_runup = max(
+                0.0,
+                float(getattr(self, "directional_jump_runup_ms", 180))
+                / 1000.0,
+            )
+            remaining_runup = max(0.0, required_runup - (now - held_since))
+            if remaining_runup > 0.0:
+                time.sleep(remaining_runup)
+
+            # F1 pause or capture loss can occur during the run-up. Never send
+            # a delayed jump after regular input has been suspended.
+            if not _regular_input_allowed():
+                self._invalidate_facing_cache()
+                return False
+
+            success, _ = _invoke_input(
+                "tap", self.cfg["key"]["jump"], 50
+            )
+            if not success:
+                self._invalidate_facing_cache()
+                return False
+            return True
 
     def perform_stationary_jump(self):
         """Release movement, wait for inertia to settle, then jump atomically."""
@@ -980,20 +1207,19 @@ class KeyBoardController():
                 # A physical BLE keyboard follows foreground focus. Release held
                 # movement on the active -> inactive edge so another app cannot
                 # receive a stuck direction key.
-                input_active = (
-                    self.is_enable
-                    and getattr(self, "capture_available", True)
-                    and self.is_game_window_active()
-                )
+                with _input_transaction_lock:
+                    input_active = self._automation_input_active()
+                    if input_active:
+                        _input_allowed.set()
+                    else:
+                        _input_allowed.clear()
                 if not input_active:
-                    _input_allowed.clear()
                     if was_input_active:
                         self.release_all_key()
                     was_input_active = False
                     self.limit_fps()
                     continue
                 was_input_active = True
-                _input_allowed.set()
 
                 # No HID reports may be sent during the attack animation. Drop
                 # no commands here: the main loop keeps replacing the command
@@ -1098,10 +1324,20 @@ class KeyBoardController():
                     self.limit_fps()
                     continue
 
+                # Orange/cyan route points request a running jump. If movement
+                # was just stopped or reversed, build the configured minimum
+                # horizontal momentum before the jump TAP.
+                if self.is_directional_jump_command(
+                    cmd_left_right, cmd_up_down, cmd_action
+                ):
+                    if self.perform_directional_jump(cmd_left_right):
+                        self._consume_action(cmd_action)
+                    self.limit_fps()
+                    continue
+
                 # Magenta route points request a vertical jump with no
                 # directional input. Let horizontal inertia decay before the
-                # jump TAP; directional and down-jump commands keep their
-                # original immediate behavior.
+                # jump TAP; down-jump commands keep their original behavior.
                 if self.is_stationary_jump_command(
                     cmd_left_right, cmd_up_down, cmd_action
                 ):

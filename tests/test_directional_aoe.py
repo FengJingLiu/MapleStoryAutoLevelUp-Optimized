@@ -26,7 +26,7 @@ class DirectionalAoeDecisionTests(unittest.TestCase):
     def make_bot(
             monsters, *, threshold=3, aoe_cooldown=1.5,
             knockback_enabled=False, knockback_distance=40,
-            knockback_cooldown=1.0):
+            knockback_cooldown=1.0, hp_bar_supplement=False):
         bot = MapleStoryAutoBot.__new__(MapleStoryAutoBot)
         bot.cfg = {
             "bot": {"attack": "directional"},
@@ -49,12 +49,26 @@ class DirectionalAoeDecisionTests(unittest.TestCase):
                 "range_y": 80,
                 "cooldown": knockback_cooldown,
                 "attack_recovery_delay": 0.9,
+                "hp_bar_supplement": {
+                    "enable": hp_bar_supplement,
+                    "lower_hsv": [50, 120, 80],
+                    "upper_hsv": [75, 255, 255],
+                    "search_above_y": 90,
+                    "search_below_y": 10,
+                    "min_width": 6,
+                    "max_width": 30,
+                    "min_height": 1,
+                    "max_height": 4,
+                    "min_fill_rate": 0.75,
+                    "min_aspect_ratio": 3.0,
+                },
             },
             "monster_detect": {
                 "backend": "yolo",
                 "search_box_margin": 10,
                 "max_mob_area_trigger": 400,
             },
+            "ui_coords": {"ui_y_start": 180},
         }
         bot.img_frame = np.zeros((200, 400, 3), dtype=np.uint8)
         bot.loc_player = (200, 100)
@@ -73,6 +87,17 @@ class DirectionalAoeDecisionTests(unittest.TestCase):
         )
         bot.get_monsters_in_range = Mock(return_value=list(monsters))
         return bot
+
+    @staticmethod
+    def draw_hp_bar(
+            bot, center_x, *, top_y=44, width=12, height=2,
+            color=(71, 204, 64)):
+        """Draw one capture-card-colored enemy HP component in BGR."""
+        x0 = int(center_x - width // 2)
+        bot.img_frame[
+            int(top_y):int(top_y + height),
+            x0:int(x0 + width),
+        ] = color
 
     def test_exact_threshold_uses_aoe_on_the_crowded_side(self):
         bot = self.make_bot([
@@ -107,6 +132,151 @@ class DirectionalAoeDecisionTests(unittest.TestCase):
 
         self.assertEqual(bot.cmd_action, "attack")
         self.assertEqual(bot.cmd_move_x, "left")
+
+    def test_ladder_route_skips_all_combat_and_preserves_up(self):
+        bot = self.make_bot(
+            [make_monster(190)],
+            knockback_enabled=True,
+            hp_bar_supplement=True,
+        )
+        bot.is_on_ladder = True
+        bot.cmd_move_x = "right"
+        bot.cmd_move_y = "up"
+        bot.get_monsters_in_range = Mock(
+            side_effect=AssertionError("YOLO should not run on a ladder")
+        )
+        bot.detect_close_enemy_hp_bars = Mock(
+            side_effect=AssertionError("HP bars should not run on a ladder")
+        )
+
+        bot.update_cmd_by_mob_detection()
+
+        self.assertEqual(
+            (bot.cmd_move_x, bot.cmd_move_y, bot.cmd_action),
+            ("right", "up", "none"),
+        )
+        self.assertTrue(bot._suppress_periodic_attack)
+        self.assertEqual(bot.monsters, [])
+        bot.get_monsters_in_range.assert_not_called()
+        bot.detect_close_enemy_hp_bars.assert_not_called()
+
+    def test_initial_vertical_route_does_not_suppress_watchdog(self):
+        bot = self.make_bot([make_monster(190)])
+        bot.is_on_ladder = False
+        bot.cmd_move_y = "up"
+        bot.get_monsters_in_range = Mock(
+            side_effect=AssertionError("combat must not interrupt route Up")
+        )
+
+        bot.update_cmd_by_mob_detection()
+
+        self.assertEqual(
+            (bot.cmd_move_x, bot.cmd_move_y, bot.cmd_action),
+            ("none", "up", "none"),
+        )
+        self.assertFalse(bot._suppress_periodic_attack)
+        bot.get_monsters_in_range.assert_not_called()
+
+    def test_stationary_jump_yields_to_attackable_monster(self):
+        bot = self.make_bot([make_monster(150)])
+        bot.cfg["directional_aoe"]["enable"] = False
+        bot._stationary_jump_proximity_active = True
+        bot.cmd_action = "jump"
+
+        with patch(
+            "src.engine.MapleStoryAutoLevelUp.time.time",
+            return_value=10.0,
+        ):
+            bot.update_cmd_by_mob_detection()
+
+        self.assertEqual(bot.cmd_action, "attack")
+        self.assertEqual(bot.cmd_move_x, "left")
+
+    def test_stationary_jump_waits_while_attack_is_cooling_down(self):
+        bot = self.make_bot([make_monster(150)])
+        bot.cfg["directional_aoe"]["enable"] = False
+        bot._stationary_jump_proximity_active = True
+        bot.cmd_action = "jump"
+        bot.t_last_attack = 9.8
+
+        with patch(
+            "src.engine.MapleStoryAutoLevelUp.time.time",
+            return_value=10.0,
+        ):
+            bot.update_cmd_by_mob_detection()
+
+        self.assertEqual(
+            (bot.cmd_move_x, bot.cmd_move_y, bot.cmd_action),
+            ("none", "none", "none"),
+        )
+
+    def test_stationary_jump_two_sided_tie_uses_cached_facing(self):
+        bot = self.make_bot([make_monster(150), make_monster(250)])
+        bot.cfg["directional_aoe"]["enable"] = False
+        bot._stationary_jump_proximity_active = True
+        bot.cmd_action = "jump"
+        bot.kb.cached_facing = "right"
+
+        with patch(
+            "src.engine.MapleStoryAutoLevelUp.time.time",
+            return_value=10.0,
+        ):
+            bot.update_cmd_by_mob_detection()
+
+        self.assertEqual(bot.cmd_action, "attack")
+        self.assertEqual(bot.cmd_move_x, "right")
+
+    def test_directional_jump_yields_to_attackable_monster(self):
+        bot = self.make_bot([make_monster(150)])
+        bot.cfg["directional_aoe"]["enable"] = False
+        bot.cmd_move_x = "right"
+        bot.cmd_move_y = "none"
+        bot.cmd_action = "jump"
+
+        with patch(
+            "src.engine.MapleStoryAutoLevelUp.time.time",
+            return_value=10.0,
+        ):
+            bot.update_cmd_by_mob_detection()
+
+        self.assertEqual(bot.cmd_action, "attack")
+        self.assertEqual(bot.cmd_move_x, "left")
+
+    def test_directional_jump_waits_while_attack_is_cooling_down(self):
+        bot = self.make_bot([make_monster(150)])
+        bot.cfg["directional_aoe"]["enable"] = False
+        bot.cmd_move_x = "right"
+        bot.cmd_move_y = "none"
+        bot.cmd_action = "jump"
+        bot.t_last_attack = 9.8
+
+        with patch(
+            "src.engine.MapleStoryAutoLevelUp.time.time",
+            return_value=10.0,
+        ):
+            bot.update_cmd_by_mob_detection()
+
+        self.assertEqual(
+            (bot.cmd_move_x, bot.cmd_move_y, bot.cmd_action),
+            ("none", "none", "none"),
+        )
+
+    def test_directional_jump_two_sided_tie_uses_cached_facing(self):
+        bot = self.make_bot([make_monster(150), make_monster(250)])
+        bot.cfg["directional_aoe"]["enable"] = False
+        bot.cmd_move_x = "left"
+        bot.cmd_move_y = "none"
+        bot.cmd_action = "jump"
+        bot.kb.cached_facing = "right"
+
+        with patch(
+            "src.engine.MapleStoryAutoLevelUp.time.time",
+            return_value=10.0,
+        ):
+            bot.update_cmd_by_mob_detection()
+
+        self.assertEqual(bot.cmd_action, "attack")
+        self.assertEqual(bot.cmd_move_x, "right")
 
     def test_both_sides_qualify_and_more_monsters_wins(self):
         bot = self.make_bot([
@@ -452,6 +622,184 @@ class DirectionalAoeDecisionTests(unittest.TestCase):
 
         self.assertEqual(bot.cmd_action, "directional_aoe")
         self.assertEqual(bot.cmd_move_x, "right")
+
+    def test_hp_bar_supplement_triggers_knockback_when_yolo_is_empty(self):
+        bot = self.make_bot(
+            [],
+            knockback_enabled=True,
+            hp_bar_supplement=True,
+        )
+        self.draw_hp_bar(bot, 170)
+
+        with patch(
+            "src.engine.MapleStoryAutoLevelUp.time.time",
+            return_value=10.0,
+        ):
+            bot.update_cmd_by_mob_detection()
+
+        self.assertEqual(bot.cmd_action, "power_knockback")
+        self.assertEqual(bot.cmd_move_x, "left")
+        # HP-bar evidence is close-range-only and must never become a normal
+        # detector result used by bow targeting or AoE monster counts.
+        self.assertEqual(bot.monsters, [])
+
+    def test_far_hp_bar_is_not_promoted_to_a_normal_monster(self):
+        bot = self.make_bot(
+            [],
+            knockback_enabled=True,
+            knockback_distance=40,
+            hp_bar_supplement=True,
+        )
+        self.draw_hp_bar(bot, 150)
+
+        with patch(
+            "src.engine.MapleStoryAutoLevelUp.time.time",
+            return_value=10.0,
+        ):
+            bot.update_cmd_by_mob_detection()
+
+        self.assertEqual(bot.cmd_action, "none")
+        self.assertEqual(bot.monsters, [])
+
+    def test_hp_bar_supplement_does_not_increase_aoe_or_yolo_count(self):
+        yolo_monsters = [make_monster(260)]
+        bot = self.make_bot(
+            yolo_monsters,
+            threshold=2,
+            knockback_enabled=True,
+            hp_bar_supplement=True,
+        )
+        self.draw_hp_bar(bot, 170)
+        self.draw_hp_bar(bot, 180, top_y=50)
+
+        with patch(
+            "src.engine.MapleStoryAutoLevelUp.time.time",
+            return_value=10.0,
+        ):
+            bot.update_cmd_by_mob_detection()
+
+        # The two left HP bars only mark the left side as bow-blocked. They do
+        # not satisfy min_monsters=2, and the shootable YOLO target wins.
+        self.assertEqual(bot.cmd_action, "attack")
+        self.assertEqual(bot.cmd_move_x, "right")
+        self.assertEqual(bot.monsters, yolo_monsters)
+
+    def test_multiple_hp_bars_collapse_to_one_boolean_per_side(self):
+        bot = self.make_bot(
+            [],
+            knockback_enabled=True,
+            hp_bar_supplement=True,
+        )
+        bot.kb.cached_facing = "right"
+        self.draw_hp_bar(bot, 170, top_y=42)
+        self.draw_hp_bar(bot, 180, top_y=50)
+        self.draw_hp_bar(bot, 230, top_y=44)
+
+        with patch(
+            "src.engine.MapleStoryAutoLevelUp.time.time",
+            return_value=10.0,
+        ):
+            bot.update_cmd_by_mob_detection()
+
+        # Three independent components represent left=True/right=True, not a
+        # 2-vs-1 monster vote. The existing tie-break therefore keeps facing.
+        self.assertEqual(bot.cmd_action, "power_knockback")
+        self.assertEqual(bot.cmd_move_x, "right")
+        self.assertEqual(bot.monsters, [])
+
+    def test_matching_hp_bar_does_not_duplicate_yolo_detection(self):
+        yolo_monster = make_monster(170, width=32, height=36)
+        bot = self.make_bot(
+            [yolo_monster],
+            threshold=2,
+            knockback_enabled=True,
+            hp_bar_supplement=True,
+        )
+        self.draw_hp_bar(bot, 170)
+
+        with patch(
+            "src.engine.MapleStoryAutoLevelUp.time.time",
+            return_value=10.0,
+        ):
+            bot.update_cmd_by_mob_detection()
+
+        self.assertEqual(bot.cmd_action, "power_knockback")
+        self.assertEqual(bot.cmd_move_x, "left")
+        self.assertEqual(bot.monsters, [yolo_monster])
+
+    def test_wrong_hp_bar_geometry_does_not_trigger_knockback(self):
+        cases = (
+            {"width": 4, "height": 2},       # too narrow
+            {"width": 36, "height": 2},      # too wide / likely UI
+            {"width": 12, "height": 6},      # too tall
+            {"width": 8, "height": 4},       # insufficient aspect ratio
+        )
+        for geometry in cases:
+            with self.subTest(**geometry):
+                bot = self.make_bot(
+                    [],
+                    knockback_enabled=True,
+                    hp_bar_supplement=True,
+                )
+                self.draw_hp_bar(bot, 170, **geometry)
+
+                with patch(
+                    "src.engine.MapleStoryAutoLevelUp.time.time",
+                    return_value=10.0,
+                ):
+                    bot.update_cmd_by_mob_detection()
+
+                self.assertEqual(bot.cmd_action, "none")
+                self.assertEqual(bot.monsters, [])
+
+    def test_sparse_green_outline_fails_hp_bar_fill_rate(self):
+        bot = self.make_bot(
+            [],
+            knockback_enabled=True,
+            hp_bar_supplement=True,
+        )
+        x0, y0, width, height = 162, 44, 16, 4
+        color = (71, 204, 64)
+        bot.img_frame[y0, x0:x0 + width] = color
+        bot.img_frame[y0 + height - 1, x0:x0 + width] = color
+        bot.img_frame[y0:y0 + height, x0] = color
+        bot.img_frame[y0:y0 + height, x0 + width - 1] = color
+
+        bot.update_cmd_by_mob_detection()
+
+        self.assertEqual(bot.cmd_action, "none")
+        self.assertEqual(bot.monsters, [])
+
+    def test_non_green_thin_component_does_not_trigger_knockback(self):
+        bot = self.make_bot(
+            [],
+            knockback_enabled=True,
+            hp_bar_supplement=True,
+        )
+        self.draw_hp_bar(bot, 170, color=(0, 0, 255))
+
+        bot.update_cmd_by_mob_detection()
+
+        self.assertEqual(bot.cmd_action, "none")
+        self.assertEqual(bot.monsters, [])
+
+    def test_hp_bar_below_gameplay_ui_boundary_is_ignored(self):
+        bot = self.make_bot(
+            [],
+            knockback_enabled=True,
+            hp_bar_supplement=True,
+        )
+        # Widen the below-Hero search only for this boundary test. The game UI
+        # boundary must still win and reject this otherwise valid green bar.
+        supplement_cfg = bot.cfg["power_knockback"]["hp_bar_supplement"]
+        supplement_cfg["search_below_y"] = 80
+        bot.cfg["ui_coords"]["ui_y_start"] = 120
+        self.draw_hp_bar(bot, 170, top_y=130)
+
+        bot.update_cmd_by_mob_detection()
+
+        self.assertEqual(bot.cmd_action, "none")
+        self.assertEqual(bot.monsters, [])
 
     def test_search_roi_covers_larger_knockback_distance(self):
         bot = self.make_bot(

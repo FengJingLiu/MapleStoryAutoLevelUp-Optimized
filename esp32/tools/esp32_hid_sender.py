@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Send keyboard commands to the ESP32-S3 USB serial + BLE HID bridge."""
+"""Send keyboard and mouse commands to the ESP32-S3 BLE HID bridge."""
 
 from __future__ import annotations
 
@@ -74,6 +74,10 @@ KEYS.update(
 )
 KEYS.update({f"F{i}": 0x39 + i for i in range(1, 13)})
 
+MOUSE_BUTTONS = {"LEFT": "LEFT", "RIGHT": "RIGHT", "MIDDLE": "MIDDLE"}
+MOUSE_DELTA_LIMIT = 32767
+ABSOLUTE_MOUSE_MAX_COORDINATE = 32767
+
 
 def usage_from_text(value: str) -> int:
     """Convert a friendly key name or a hexadecimal HID usage into a byte."""
@@ -95,6 +99,36 @@ def usage_from_text(value: str) -> int:
 
 def usage_token(value: str) -> str:
     return f"0x{usage_from_text(value):02X}"
+
+
+def mouse_button_token(value: str) -> str:
+    normalized = value.strip().upper()
+    try:
+        return MOUSE_BUTTONS[normalized]
+    except KeyError as exc:
+        raise ValueError(
+            f"unknown mouse button: {value!r}; use left, right, or middle"
+        ) from exc
+
+
+def mouse_delta(value: int) -> int:
+    value = int(value)
+    if not -MOUSE_DELTA_LIMIT <= value <= MOUSE_DELTA_LIMIT:
+        raise ValueError(
+            f"mouse delta must be in the range "
+            f"-{MOUSE_DELTA_LIMIT}..{MOUSE_DELTA_LIMIT}"
+        )
+    return value
+
+
+def absolute_mouse_coordinate(value: int) -> int:
+    value = int(value)
+    if not 0 <= value <= ABSOLUTE_MOUSE_MAX_COORDINATE:
+        raise ValueError(
+            "absolute mouse coordinate must be in the range "
+            f"0..{ABSOLUTE_MOUSE_MAX_COORDINATE}"
+        )
+    return value
 
 
 class HidClient:
@@ -232,7 +266,10 @@ def show_keys() -> None:
 
 
 def interactive(client: HidClient) -> None:
-    print("Connected. Commands: tap/down/up/state/release/status/ping/help/keys/quit")
+    print(
+        "Connected. Commands: tap/down/up/state/release/move/click/click-at/"
+        "mouse-down/mouse-up/scroll/status/ping/help/keys/quit"
+    )
     while True:
         try:
             parts = shlex.split(input("hid> "))
@@ -272,6 +309,38 @@ def interactive(client: HidClient) -> None:
                 tokens = " ".join(usage_token(key) for key in parts[1:])
                 print(client.request(f"STATE {tokens}".rstrip()))
                 continue
+            if command in {"move", "mouse-move"} and len(parts) in {3, 4}:
+                dx = mouse_delta(int(parts[1]))
+                dy = mouse_delta(int(parts[2]))
+                wheel = mouse_delta(int(parts[3])) if len(parts) == 4 else 0
+                print(client.request(f"MOUSE_MOVE {dx} {dy} {wheel}"))
+                continue
+            if command in {"click", "mouse-click"} and len(parts) in {2, 3}:
+                button = mouse_button_token(parts[1])
+                duration = int(parts[2]) if len(parts) == 3 else 60
+                print(client.request(f"MOUSE_CLICK {button} {duration}"))
+                continue
+            if command in {"click-at", "mouse-click-at"} and len(parts) in {4, 5}:
+                x = absolute_mouse_coordinate(int(parts[1]))
+                y = absolute_mouse_coordinate(int(parts[2]))
+                button = mouse_button_token(parts[3])
+                duration = int(parts[4]) if len(parts) == 5 else 60
+                if not 1 <= duration <= 1000:
+                    raise ValueError("click-at duration must be in the range 1..1000")
+                print(
+                    client.request(
+                        f"MOUSE_CLICK_AT {x} {y} {button} {duration}"
+                    )
+                )
+                continue
+            if command in {"mouse-down", "mouse-up"} and len(parts) == 2:
+                action = command.replace("-", "_").upper()
+                print(client.request(f"{action} {mouse_button_token(parts[1])}"))
+                continue
+            if command == "scroll" and len(parts) == 2:
+                wheel = mouse_delta(int(parts[1]))
+                print(client.request(f"MOUSE_MOVE 0 0 {wheel}"))
+                continue
             print("usage error; type help for the server command list")
         except (OSError, RuntimeError, ValueError) as exc:
             print(f"error: {exc}", file=sys.stderr)
@@ -298,7 +367,10 @@ def resolve_serial_port(configured_port: str | None) -> str:
 
 def create_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Send keyboard commands over USB serial to the ESP32-S3 BLE HID bridge."
+        description=(
+            "Send keyboard and mouse commands over USB serial to the "
+            "ESP32-S3 BLE HID bridge."
+        )
     )
     parser.add_argument(
         "--serial-port",
@@ -338,6 +410,30 @@ def create_parser() -> argparse.ArgumentParser:
 
     state = commands.add_parser("state")
     state.add_argument("keys", nargs="*")
+
+    move = commands.add_parser("mouse-move", aliases=["move"])
+    move.add_argument("dx", type=int)
+    move.add_argument("dy", type=int)
+    move.add_argument("--wheel", type=int, default=0)
+
+    click = commands.add_parser("mouse-click", aliases=["click"])
+    click.add_argument("button", choices=["left", "right", "middle"])
+    click.add_argument("--ms", type=int, default=60)
+
+    click_at = commands.add_parser("mouse-click-at", aliases=["click-at"])
+    click_at.add_argument("x", type=int)
+    click_at.add_argument("y", type=int)
+    click_at.add_argument("button", choices=["left", "right", "middle"])
+    click_at.add_argument("--ms", type=int, default=60)
+
+    mouse_down = commands.add_parser("mouse-down")
+    mouse_down.add_argument("button", choices=["left", "right", "middle"])
+
+    mouse_up = commands.add_parser("mouse-up")
+    mouse_up.add_argument("button", choices=["left", "right", "middle"])
+
+    scroll = commands.add_parser("scroll")
+    scroll.add_argument("delta", type=int)
     return parser
 
 
@@ -372,6 +468,29 @@ def run_serial_command(
         elif args.command == "state":
             tokens = " ".join(usage_token(key) for key in args.keys)
             print(client.request(f"STATE {tokens}".rstrip()))
+        elif args.command in {"mouse-move", "move"}:
+            dx = mouse_delta(args.dx)
+            dy = mouse_delta(args.dy)
+            wheel = mouse_delta(args.wheel)
+            print(client.request(f"MOUSE_MOVE {dx} {dy} {wheel}"))
+        elif args.command in {"mouse-click", "click"}:
+            if not 1 <= args.ms <= 1000:
+                parser.error("mouse-click --ms must be in the range 1..1000")
+            button = mouse_button_token(args.button)
+            print(client.request(f"MOUSE_CLICK {button} {args.ms}"))
+        elif args.command in {"mouse-click-at", "click-at"}:
+            if not 1 <= args.ms <= 1000:
+                parser.error("mouse-click-at --ms must be in the range 1..1000")
+            x = absolute_mouse_coordinate(args.x)
+            y = absolute_mouse_coordinate(args.y)
+            button = mouse_button_token(args.button)
+            print(client.request(f"MOUSE_CLICK_AT {x} {y} {button} {args.ms}"))
+        elif args.command in {"mouse-down", "mouse-up"}:
+            action = args.command.replace("-", "_").upper()
+            print(client.request(f"{action} {mouse_button_token(args.button)}"))
+        elif args.command == "scroll":
+            delta = mouse_delta(args.delta)
+            print(client.request(f"MOUSE_MOVE 0 0 {delta}"))
         elif args.command == "down":
             print(client.request(f"DOWN {usage_token(args.key)}"))
             try:

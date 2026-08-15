@@ -23,6 +23,117 @@ esp32_hid:
   reconnect_interval: 0.5
   state_refresh_interval: 1.0 # Reassert held movement after a brief BLE reconnect.
 
+auto_relogin:
+  # Recover an already authenticated game session through the recorded
+  # Chinese Artale disconnect/login flow. Every action requires the expected
+  # page template; this never stores or types an account password.
+  enable: True
+  template_reference_size: [700, 1296] # Legacy login_button_*.png native [height, width].
+  flow_template_reference_size: [2013, 3579] # Recorded flow [height, width].
+  template_threshold: 0.03       # TM_SQDIFF_NORMED; lower scores are better.
+  confirm_frames: 2              # Consecutive matches required before each action.
+  confirm_seconds: 0.5           # The page must remain matched for at least this long.
+  cancel_confirm_misses: 2       # Distinct misses needed to cancel an unacted false positive.
+  input_retry_delay: 1.0         # Retry a definite local/HID send failure after this delay.
+  retry_cooldown: 3.0            # Minimum wait before retrying an action on the same page.
+  step_timeout: 60.0             # Fail closed if the expected next page never appears.
+  game_ready_timeout: 60.0       # Fail closed if fresh gameplay evidence never appears.
+  max_recovery_duration: 300.0   # Stop all automatic retries after this total time.
+  max_step_attempts: 5           # Maximum actions on any one confirmed page.
+  game_ready_confirm_frames: 2   # Fresh, expanded minimap player dots required before combat resumes.
+  mouse_click_duration: 0.05     # Left-click duration for local/ESP32 mouse input.
+  # Remote clicks use screenshot feedback and relative HID movement. This is
+  # independent of Magpie scaling, Windows DPI, and virtual-desktop offsets.
+  # "absolute" remains available only as an explicit legacy fallback.
+  remote_mouse_mode: visual_relative # visual_relative | absolute
+  cursor_template: "misc/auto_relogin_cursor_cn.png" # Large hand cursor for world/channel/character pages.
+  cursor_hotspot: [13, 6]        # Click hotspot inside the large template.
+  disconnect_cursor_template: "misc/auto_relogin_cursor_small_cn.png" # Compact title/disconnect cursor.
+  disconnect_cursor_hotspot: [9, 4] # Click hotspot inside the compact template.
+  cursor_min_score: 0.90         # Masked match confidence; higher is stricter.
+  cursor_uniqueness_margin: 0.02 # Reject ambiguous duplicate cursor candidates.
+  cursor_mask_erode_pixels: 1    # Ignore anti-aliased edge pixels blended with the hover background.
+  cursor_min_visible_fraction: 0.25 # Allow one-edge clipping only with enough evidence.
+  cursor_min_visible_pixels: 32
+  cursor_search_region: [0, 0, 3579, 2013]
+  cursor_local_search_radius: [450, 450] # Fast search around the previous hotspot.
+  mouse_move_gain: 0.35          # Capture-pixel error converted to each HID nudge.
+  mouse_max_delta: 64            # <=127 keeps every feedback step to one HID report.
+  mouse_target_tolerance: [18, 18] # Hotspot must be this close to the target.
+  mouse_target_confirm_frames: 2 # Fresh aligned frames required before clicking.
+  mouse_probe_delta: 8          # Inward HID probe used to prove cursor identity.
+  mouse_response_min_pixels: 2  # Probe/steering response must visibly move.
+  mouse_response_min_cosine: 0.50 # Observed motion must follow command direction.
+  mouse_uncommanded_jump_tolerance: [6, 6] # Re-probe after an unexplained jump.
+  mouse_feedback_delay: 0.20     # Wait for display/capture latency after each move.
+  mouse_feedback_frames: 1       # Also require this many fresh capture frames.
+  mouse_click_frame_max_age: 1.0 # Never click from an old processed capture.
+  mouse_pointer_timeout: 60.0
+  mouse_max_moves: 40
+  mouse_cursor_miss_limit: 5
+  mouse_page_miss_limit: 3
+  mouse_stall_limit: 4
+  mouse_target_drift: [50, 50]
+  mouse_hover_template_correlation: 0.55 # Structural guard for hovered target buttons.
+  # Safe no-click recovery for a cursor lost on the monitor to the left:
+  # move far right twice, inset from the clipped edge, then scan vertically.
+  # Large rescue deltas are split into ordinary relative reports by the ESP32.
+  mouse_cursor_rescue_search_width: 3579 # Search the full frame after every rescue move.
+  mouse_cursor_rescue_deltas:
+    - [4096, 0]
+    - [4096, 0]
+    - [-127, 0]
+    - [0, -64]
+    - [0, 128]
+    - [0, -192]
+    - [0, 256]
+    - [0, -320]
+    - [0, 384]
+    - [0, -448]
+    - [0, 512]
+  remote_confirm_key: "enter"    # Key sent on confirmed disconnect and connection pages.
+  page_templates:
+    disconnect: "misc/auto_relogin_disconnect_cn.png"
+    connect: "misc/auto_relogin_connect_cn.png"
+    world: "misc/auto_relogin_world_cn.png"
+    channel: "misc/auto_relogin_channel_cn.png"
+    character: "misc/auto_relogin_character_cn.png"
+  # Search rectangles are [x0, y0, x1, y1] in flow_template_reference_size.
+  page_search_regions:
+    disconnect: [1250, 600, 2300, 1150]
+    connect: [1700, 850, 2200, 1150]
+    world: [1800, 300, 2450, 550]
+    channel: [1200, 700, 1950, 1050]
+    character: [2300, 500, 2950, 950]
+  # Template centers in the recorded reference frame. Fixed disconnect/channel
+  # click points are translated with these anchors if the viewport shifts.
+  page_anchor_points:
+    disconnect: [1737, 857]
+    channel: [1565, 875]
+  disconnect_confirm_point: [1840, 1105]
+  # Twenty channel buttons (four columns by five rows); one is chosen randomly.
+  channel_points:
+    - [1440, 985]
+    - [1665, 985]
+    - [1900, 985]
+    - [2135, 985]
+    - [1440, 1070]
+    - [1665, 1070]
+    - [1900, 1070]
+    - [2135, 1070]
+    - [1440, 1155]
+    - [1665, 1155]
+    - [1900, 1155]
+    - [2135, 1155]
+    - [1440, 1240]
+    - [1665, 1240]
+    - [1900, 1240]
+    - [2135, 1240]
+    - [1440, 1325]
+    - [1665, 1325]
+    - [1900, 1325]
+    - [2135, 1325]
+
 key:
   # 🎮 Keyboard Mapping
   # Adjust the keys to match your in-game keybindings.
@@ -72,6 +183,22 @@ power_knockback:
   range_y: 70                 # ↕️ Total vertical detection range (pixels)
   cooldown: 0.9               # ⏱️ Minimum time between Power Knock-Back uses
   attack_recovery_delay: 0.90 # 🏹 Block every other input after the S TAP completes
+  hp_bar_supplement:
+    # YOLO can lose a monster whose sprite is covered by the Hero. In that
+    # case a nearby enemy HP bar only marks the corresponding side as blocked;
+    # it is never added to the normal monster/AoE count.
+    enable: true
+    lower_hsv: [64, 140, 70]   # OpenCV HSV lower bound (H:0-179, S/V:0-255)
+    upper_hsv: [74, 255, 255]  # OpenCV HSV upper bound
+    search_above_y: 90         # Search this far above the Hero center
+    search_below_y: 10         # Small allowance below the Hero center
+    min_width: 1               # Green fill shrinks horizontally with remaining HP
+    max_width: 50
+    min_height: 3              # Enemy HP fill height in the legacy 1296x700 frame
+    max_height: 6
+    min_area: 3
+    min_fill_rate: 0.75
+    min_aspect_ratio: 0.25     # Keep almost-empty (very narrow) HP fills detectable
 
 directional_aoe:
   # 🏹 Single-sided AoE (for example, an archer's multi-target skill)
@@ -266,9 +393,11 @@ monster_detect:
   backend: "yolo"             # Options: "yolo" or legacy "template"
   model_path: "models/yolo/mob_1024_best.pt"
   imgsz: 1024                 # Must match the new model's intended inference size
-  confidence: 0.50            # Minimum YOLO confidence
+  confidence: 0.40            # Minimum YOLO confidence
   iou: 0.70                   # YOLO NMS IoU threshold
   max_det: 100                # Maximum mob boxes per camera frame
+  min_box_width: 40           # Minimum YOLO box width at the reference resolution; 0 disables
+  min_box_height: 40          # Minimum YOLO box height at the reference resolution; 0 disables
   device: "auto"             # CUDA device 0 when available, otherwise CPU
   half: True                  # FP16 on CUDA; automatically disabled on CPU
   warmup: True                # Initialize CUDA during config load, before control starts
@@ -329,10 +458,12 @@ ui_coords:
 route:
   # 🧭 Route Following
   # The character follows a pre-defined route image (route*.png) using color-coded commands.
-  search_range: 10            # 🔍 Radius (in pixels) to search for the nearest route color around the player
+  search_range: 10            # 🔍 Route lookup radius; a nearby magenta stationary-jump marker triggers inside this distance
+  ladder_endpoint_tolerance: 2 # Vertical-route endpoint tolerance in native minimap pixels
   jump_down_cooldown: 3.0     # ⏱️ Cooldown (in seconds) for 'jump down' action to prevent continuous descent
-  jump_up_settle_delay: 0.6   # 🛑 Seconds the hero center must remain exactly on a stationary-jump center
+  jump_up_settle_delay: 0.6   # 🛑 Seconds to stop horizontal movement before a stationary jump
   jump_alignment_nudge_ms: 30 # ↔️ Duration of each left/right centering pulse
+  directional_jump_runup_ms: 180 # Minimum direction hold before a left/right jump; preserves rope-catching momentum
   # Draw an azure segment manually from the current platform toward the rope.
   # Seeing any part of that segment lets the bot predict its far endpoint as
   # the rope x, generate its own runway, and mount with a directional jump.

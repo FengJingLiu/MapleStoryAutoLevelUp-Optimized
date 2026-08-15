@@ -12,9 +12,15 @@ from src.input.Esp32HidClient import (
 class FakeSocket:
     """Small line-oriented serial protocol double used by the client tests."""
 
-    def __init__(self, status_response=None, fail_on_send=None):
+    def __init__(
+        self,
+        status_response=None,
+        fail_on_send=None,
+        drop_ack_for=None,
+    ):
         self.status_response = status_response or (
-            "OK SERIAL=1 BLE_CONNECTED=1 BLE_READY=1"
+            "OK SERIAL=1 BLE_CONNECTED=1 BLE_READY=1 "
+            "MOUSE=1 MOUSE_ABS=1"
         )
         self.commands = []
         self.connected_to = None
@@ -23,6 +29,7 @@ class FakeSocket:
         self.shutdown_calls = []
         self._responses = deque()
         self._fail_on_send = set(fail_on_send or ())
+        self._drop_ack_for = set(drop_ack_for or ())
 
     def connect(self, address):
         self.connected_to = address
@@ -48,6 +55,9 @@ class FakeSocket:
         if command in self._fail_on_send:
             self._fail_on_send.remove(command)
             raise ConnectionResetError(f"simulated disconnect during {command}")
+        if command in self._drop_ack_for:
+            self._drop_ack_for.remove(command)
+            return
         self._responses.append((self.response_for(command) + "\n").encode("ascii"))
 
     def write(self, payload):
@@ -76,6 +86,27 @@ class FakeSocket:
         if command.startswith("TAP "):
             _, usage, duration = command.split()
             return f"OK TAP {usage} {duration}ms"
+        if command.startswith("MOUSE_MOVE "):
+            _, dx, dy, wheel = command.split()
+            return f"OK MOUSE_MOVE {dx} {dy} {wheel}"
+        if command.startswith("MOUSE_CLICK "):
+            _, button, duration = command.split()
+            button_mask = {
+                "LEFT": "0x01",
+                "RIGHT": "0x02",
+                "MIDDLE": "0x04",
+            }[button]
+            return f"OK MOUSE_CLICK {button_mask} {duration}ms"
+        if command.startswith("MOUSE_CLICK_AT "):
+            _, x, y, button, duration = command.split()
+            button_mask = {
+                "LEFT": "0x01",
+                "RIGHT": "0x02",
+                "MIDDLE": "0x04",
+            }[button]
+            return (
+                f"OK MOUSE_CLICK_AT {x} {y} {button_mask} {duration}ms"
+            )
         if command == "STATE" or command.startswith("STATE "):
             return "OK STATE"
         raise AssertionError(f"unexpected command: {command!r}")
@@ -313,6 +344,288 @@ class Esp32HidClientTests(unittest.TestCase):
             ["STATUS", "RELEASE_ALL", "STATUS"],
         )
         self.assertNotIn("TAP 0x2C 75", second_socket.commands)
+
+    def test_relative_mouse_move_accepts_protocol_boundaries_and_exact_ack(self):
+        client, fake_socket, _ = self.make_client()
+        self.addCleanup(client.close)
+        fake_socket.commands.clear()
+
+        response = client.mouse_move(-32767, 32767, wheel=-32767)
+
+        self.assertEqual(response, "OK MOUSE_MOVE -32767 32767 -32767")
+        self.assertEqual(
+            fake_socket.commands,
+            ["MOUSE_MOVE -32767 32767 -32767"],
+        )
+
+    def test_relative_mouse_move_strictly_validates_every_component(self):
+        client, fake_socket, _ = self.make_client()
+        self.addCleanup(client.close)
+        fake_socket.commands.clear()
+
+        invalid_calls = (
+            lambda: client.mouse_move(-32768, 0),
+            lambda: client.mouse_move(32768, 0),
+            lambda: client.mouse_move(0, -32768),
+            lambda: client.mouse_move(0, 32768),
+            lambda: client.mouse_move(0, 0, -32768),
+            lambda: client.mouse_move(0, 0, 32768),
+            lambda: client.mouse_move(1.0, 0),
+            lambda: client.mouse_move(0, "1"),
+            lambda: client.mouse_move(0, 0, True),
+        )
+        for invoke in invalid_calls:
+            with self.subTest(invoke=invoke):
+                with self.assertRaises(ValueError):
+                    invoke()
+
+        self.assertEqual(fake_socket.commands, [])
+
+    def test_relative_mouse_click_uses_button_mask_and_exact_ack(self):
+        client, fake_socket, _ = self.make_client()
+        self.addCleanup(client.close)
+        fake_socket.commands.clear()
+
+        response = client.mouse_click(button="RIGHT", duration_ms=75)
+
+        self.assertEqual(response, "OK MOUSE_CLICK 0x02 75ms")
+        self.assertEqual(fake_socket.commands, ["MOUSE_CLICK RIGHT 75"])
+
+    def test_relative_mouse_click_strictly_validates_button_and_duration(self):
+        client, fake_socket, _ = self.make_client()
+        self.addCleanup(client.close)
+        fake_socket.commands.clear()
+
+        invalid_calls = (
+            lambda: client.mouse_click(button="side"),
+            lambda: client.mouse_click(duration_ms=0),
+            lambda: client.mouse_click(duration_ms=1001),
+            lambda: client.mouse_click(duration_ms=True),
+            lambda: client.mouse_click(duration_ms=50.0),
+            lambda: client.mouse_click(duration_ms="50"),
+        )
+        for invoke in invalid_calls:
+            with self.subTest(invoke=invoke):
+                with self.assertRaises(ValueError):
+                    invoke()
+
+        self.assertEqual(fake_socket.commands, [])
+
+    def test_lost_relative_move_ack_is_not_replayed_after_reconnect(self):
+        command = "MOUSE_MOVE 120 -40 0"
+        first_socket = FakeSocket(drop_ack_for={command})
+        second_socket = FakeSocket()
+        factory = FakeSocketFactory([first_socket, second_socket])
+        client = Esp32HidClient(
+            "esp32.test",
+            serial_factory=factory,
+            heartbeat_interval=0,
+            reconnect_interval=0,
+        )
+        self.addCleanup(client.close)
+
+        with self.assertRaises(Esp32HidTapUncertainError):
+            client.mouse_move(120, -40)
+
+        self.assertEqual(
+            first_socket.commands,
+            ["STATUS", "RELEASE_ALL", command],
+        )
+        self.assertEqual(
+            second_socket.commands,
+            ["STATUS", "RELEASE_ALL", "RELEASE_ALL"],
+        )
+        self.assertNotIn(command, second_socket.commands)
+
+    def test_lost_relative_click_ack_is_not_replayed_after_reconnect(self):
+        command = "MOUSE_CLICK LEFT 50"
+        first_socket = FakeSocket(drop_ack_for={command})
+        second_socket = FakeSocket()
+        factory = FakeSocketFactory([first_socket, second_socket])
+        client = Esp32HidClient(
+            "esp32.test",
+            serial_factory=factory,
+            heartbeat_interval=0,
+            reconnect_interval=0,
+        )
+        self.addCleanup(client.close)
+
+        with self.assertRaises(Esp32HidTapUncertainError):
+            client.mouse_click()
+
+        self.assertEqual(
+            first_socket.commands,
+            ["STATUS", "RELEASE_ALL", command],
+        )
+        self.assertEqual(
+            second_socket.commands,
+            ["STATUS", "RELEASE_ALL", "RELEASE_ALL"],
+        )
+        self.assertNotIn(command, second_socket.commands)
+
+    def test_unexpected_relative_mouse_acks_are_uncertain_and_release(self):
+        client, fake_socket, _ = self.make_client()
+        self.addCleanup(client.close)
+        fake_socket.commands.clear()
+        original_response_for = fake_socket.response_for
+
+        for action, invoke in (
+            ("MOUSE_MOVE", lambda: client.mouse_move(10, 20)),
+            ("MOUSE_CLICK", lambda: client.mouse_click()),
+        ):
+            with self.subTest(action=action):
+                def response_for(command, action=action):
+                    if command.startswith(f"{action} "):
+                        return f"OK {action} WRONG"
+                    return original_response_for(command)
+
+                fake_socket.response_for = response_for
+                with self.assertRaisesRegex(
+                    Esp32HidTapUncertainError,
+                    f"unexpected {action} response",
+                ):
+                    invoke()
+
+        self.assertEqual(
+            fake_socket.commands,
+            [
+                "MOUSE_MOVE 10 20 0",
+                "RELEASE_ALL",
+                "MOUSE_CLICK LEFT 50",
+                "RELEASE_ALL",
+            ],
+        )
+
+    def test_absolute_mouse_click_uses_normalized_point_and_exact_ack(self):
+        client, fake_socket, _ = self.make_client()
+        self.addCleanup(client.close)
+        fake_socket.commands.clear()
+
+        response = client.mouse_click_at(
+            16384, 8192, button="RIGHT", duration_ms=75
+        )
+
+        self.assertEqual(
+            response,
+            "OK MOUSE_CLICK_AT 16384 8192 0x02 75ms",
+        )
+        self.assertEqual(
+            fake_socket.commands,
+            ["MOUSE_CLICK_AT 16384 8192 RIGHT 75"],
+        )
+
+    def test_absolute_mouse_click_validates_coordinates_button_and_duration(self):
+        client, fake_socket, _ = self.make_client()
+        self.addCleanup(client.close)
+        fake_socket.commands.clear()
+
+        invalid_calls = (
+            lambda: client.mouse_click_at(-1, 0),
+            lambda: client.mouse_click_at(0, 32768),
+            lambda: client.mouse_click_at(1.5, 0),
+            lambda: client.mouse_click_at(0, 0, button="side"),
+            lambda: client.mouse_click_at(0, 0, duration_ms=0),
+            lambda: client.mouse_click_at(0, 0, duration_ms=1001),
+        )
+        for invoke in invalid_calls:
+            with self.subTest(invoke=invoke):
+                with self.assertRaises(ValueError):
+                    invoke()
+
+        self.assertEqual(fake_socket.commands, [])
+
+    def test_absolute_mouse_click_requires_advertised_firmware_capability(self):
+        client, fake_socket, _ = self.make_client(
+            status_response="OK SERIAL=1 BLE_CONNECTED=1 BLE_READY=1 MOUSE=1"
+        )
+        self.addCleanup(client.close)
+        fake_socket.commands.clear()
+
+        with self.assertRaisesRegex(RuntimeError, "MOUSE_ABS=1"):
+            client.mouse_click_at(100, 200)
+
+        self.assertEqual(fake_socket.commands, [])
+
+    def test_failed_absolute_click_is_not_replayed_after_reconnect(self):
+        command = "MOUSE_CLICK_AT 100 200 LEFT 50"
+        first_socket = FakeSocket(fail_on_send={command})
+        second_socket = FakeSocket()
+        factory = FakeSocketFactory([first_socket, second_socket])
+        client = Esp32HidClient(
+            "esp32.test",
+            serial_factory=factory,
+            heartbeat_interval=0,
+            reconnect_interval=0,
+        )
+        self.addCleanup(client.close)
+
+        with self.assertRaises(Esp32HidTapUncertainError):
+            client.mouse_click_at(100, 200)
+
+        self.assertEqual(len(factory.calls), 2)
+        self.assertEqual(
+            first_socket.commands,
+            ["STATUS", "RELEASE_ALL", command],
+        )
+        self.assertEqual(
+            second_socket.commands,
+            ["STATUS", "RELEASE_ALL", "RELEASE_ALL"],
+        )
+        self.assertNotIn(command, second_socket.commands)
+
+        self.assertIn("BLE_READY=1", client.status())
+        self.assertEqual(len(factory.calls), 2)
+        self.assertEqual(
+            second_socket.commands,
+            ["STATUS", "RELEASE_ALL", "RELEASE_ALL", "STATUS"],
+        )
+        self.assertNotIn(command, second_socket.commands)
+
+    def test_hid_failed_absolute_click_is_followed_by_release_all_only(self):
+        client, fake_socket, _ = self.make_client()
+        self.addCleanup(client.close)
+        fake_socket.commands.clear()
+        original_response_for = fake_socket.response_for
+
+        def response_for(command):
+            if command.startswith("MOUSE_CLICK_AT "):
+                return "ERR HID_SEND_FAILED"
+            return original_response_for(command)
+
+        fake_socket.response_for = response_for
+        with self.assertRaisesRegex(
+            Esp32HidTapUncertainError,
+            "HID_SEND_FAILED",
+        ):
+            client.mouse_click_at(100, 200)
+
+        self.assertEqual(
+            fake_socket.commands,
+            ["MOUSE_CLICK_AT 100 200 LEFT 50", "RELEASE_ALL"],
+        )
+
+    def test_unexpected_absolute_click_ack_is_uncertain(self):
+        client, fake_socket, _ = self.make_client()
+        self.addCleanup(client.close)
+        fake_socket.commands.clear()
+        original_response_for = fake_socket.response_for
+
+        def response_for(command):
+            if command.startswith("MOUSE_CLICK_AT "):
+                return "OK MOUSE_CLICK_AT 100 200 0x01 999ms"
+            return original_response_for(command)
+
+        fake_socket.response_for = response_for
+        with self.assertRaisesRegex(
+            Esp32HidTapUncertainError,
+            "unexpected MOUSE_CLICK_AT response",
+        ):
+            client.mouse_click_at(100, 200)
+
+        self.assertEqual(
+            fake_socket.commands,
+            ["MOUSE_CLICK_AT 100 200 LEFT 50", "RELEASE_ALL"],
+        )
 
     def test_set_state_deduplicates_keys_and_unchanged_reports(self):
         client, fake_socket, _ = self.make_client()

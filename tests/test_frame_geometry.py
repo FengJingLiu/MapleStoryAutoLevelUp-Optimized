@@ -60,10 +60,26 @@ def _config():
             "range_y": 70,
             "cooldown": 0.9,
             "attack_recovery_delay": 0.95,
+            "hp_bar_supplement": {
+                "enable": True,
+                "lower_hsv": [50, 120, 80],
+                "upper_hsv": [75, 255, 255],
+                "search_above_y": 90,
+                "search_below_y": 10,
+                "min_width": 6,
+                "max_width": 30,
+                "min_height": 1,
+                "max_height": 4,
+                "min_area": 10,
+                "min_fill_rate": 0.75,
+                "min_aspect_ratio": 3.0,
+            },
         },
         "monster_detect": {
             "search_box_margin": 50,
             "max_mob_area_trigger": 1500,
+            "min_box_width": 24,
+            "min_box_height": 20,
             "confidence": 0.5,
         },
         "character": {"width": 100, "height": 150},
@@ -181,9 +197,25 @@ def test_scales_full_frame_pixel_settings_without_mutating_source():
         "range_y": 140,
         "cooldown": 0.9,
         "attack_recovery_delay": 0.95,
+        "hp_bar_supplement": {
+            "enable": True,
+            "lower_hsv": [50, 120, 80],
+            "upper_hsv": [75, 255, 255],
+            "search_above_y": 180,
+            "search_below_y": 20,
+            "min_width": 18,
+            "max_width": 90,
+            "min_height": 2,
+            "max_height": 8,
+            "min_area": 60,
+            "min_fill_rate": 0.75,
+            "min_aspect_ratio": 3.0,
+        },
     }
     assert scaled["monster_detect"]["search_box_margin"] == 150
     assert scaled["monster_detect"]["max_mob_area_trigger"] == 9000
+    assert scaled["monster_detect"]["min_box_width"] == 72
+    assert scaled["monster_detect"]["min_box_height"] == 40
     assert scaled["character"] == {"width": 300, "height": 300}
     assert scaled["edge_teleport"]["trigger_box_width"] == 60
     assert scaled["edge_teleport"]["trigger_box_height"] == 20

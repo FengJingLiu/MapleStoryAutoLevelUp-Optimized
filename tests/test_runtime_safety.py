@@ -579,6 +579,97 @@ class AutoBotLifecycleTests(unittest.TestCase):
             ("none", "none", "jump"),
         )
 
+    def test_ladder_holds_up_when_horizontal_route_becomes_closest(self):
+        bot = self._route_color_bot()
+        bot.img_route[10, 10] = (127, 127, 127)
+
+        # Cache the pure ladder direction while approaching the rope.
+        bot.update_cmd_by_route()
+        self.assertEqual(bot.cmd_move_y, "up")
+        self.assertEqual(bot._ladder_route_move_y, "up")
+
+        # At the platform junction the vertical color can leave the local
+        # search area. A current climbing pose must keep Up held.
+        bot.img_route[:] = 0
+        bot.img_route[10, 10] = (255, 0, 0)
+        bot.is_on_ladder = True
+        bot.update_cmd_by_route()
+
+        self.assertEqual(
+            (bot.cmd_move_x, bot.cmd_move_y, bot.cmd_action),
+            ("left", "up", "none"),
+        )
+
+        # A fresh standing pose is the physical arrival signal.
+        bot.is_on_ladder = False
+        bot.update_cmd_by_route()
+        self.assertEqual(
+            (bot.cmd_move_x, bot.cmd_move_y, bot.cmd_action),
+            ("left", "none", "none"),
+        )
+        self.assertIsNone(bot._ladder_route_move_y)
+
+    def test_ladder_holds_up_across_a_local_route_lookup_miss(self):
+        bot = self._route_color_bot()
+        bot._ladder_route_move_y = "up"
+        bot.is_on_ladder = True
+        bot.img_route[:] = 0
+
+        bot.update_cmd_by_route()
+
+        self.assertEqual(
+            (bot.cmd_move_x, bot.cmd_move_y, bot.cmd_action),
+            ("none", "up", "none"),
+        )
+
+    def test_climbing_pose_keeps_up_at_route_endpoint(self):
+        bot = self._route_color_bot()
+        bot.loc_player_global = (10, 12)
+        bot.img_route[10:19, 10] = (127, 127, 127)
+        bot.img_route[12, 9] = (255, 0, 0)
+        bot.is_on_ladder = True
+        bot._ladder_route_move_y = "up"
+
+        bot.update_cmd_by_route()
+
+        self.assertEqual(
+            (bot.cmd_move_x, bot.cmd_move_y, bot.cmd_action),
+            ("left", "up", "none"),
+        )
+        self.assertTrue(bot.is_on_ladder)
+        self.assertEqual(bot._ladder_route_move_y, "up")
+
+    def test_recent_standing_pose_hands_endpoint_to_platform_route(self):
+        bot = self._route_color_bot()
+        bot.loc_player_global = (10, 12)
+        bot.img_route[10:19, 10] = (127, 127, 127)
+        bot.img_route[12, 9] = (255, 0, 0)
+        bot._ladder_route_move_y = "up"
+        bot._ladder_route_exit_confirmed_at = time.monotonic()
+
+        bot.update_cmd_by_route()
+
+        self.assertEqual(
+            (bot.cmd_move_x, bot.cmd_move_y, bot.cmd_action),
+            ("left", "none", "none"),
+        )
+        self.assertIsNone(bot._ladder_route_move_y)
+        self.assertIsNone(bot._ladder_route_exit_confirmed_at)
+
+    def test_up_route_does_not_release_before_its_endpoint(self):
+        bot = self._route_color_bot()
+        bot.loc_player_global = (10, 18)
+        bot.img_route[10:19, 10] = (127, 127, 127)
+        bot.img_route[18, 9] = (255, 0, 0)
+
+        bot.update_cmd_by_route()
+
+        self.assertEqual(
+            (bot.cmd_move_x, bot.cmd_move_y, bot.cmd_action),
+            ("none", "up", "none"),
+        )
+        self.assertEqual(bot._ladder_route_move_y, "up")
+
     def test_nearby_action_does_not_override_movement(self):
         bot = self._route_color_bot()
         bot.img_route[10, 6] = (255, 0, 255)
@@ -598,12 +689,13 @@ class AutoBotLifecycleTests(unittest.TestCase):
 
         color_code, _ = bot.get_nearest_color_code()
 
-        self.assertTrue(color_code["stationary_jump_alignment"])
+        self.assertTrue(color_code["stationary_jump_proximity"])
         self.assertEqual(color_code["target_center"], (10, 10))
         self.assertEqual(color_code["pixel"], (10, 10))
-        self.assertFalse(color_code["exact_action"])
+        self.assertEqual(color_code["distance"], 2)
+        self.assertTrue(color_code["exact_action"])
 
-    def test_stationary_jump_blob_edge_nudges_toward_center(self):
+    def test_stationary_jump_nearby_triggers_without_horizontal_nudges(self):
         bot = self._route_color_bot()
         self._draw_stationary_jump_blob(bot, center=(10, 10))
 
@@ -611,55 +703,33 @@ class AutoBotLifecycleTests(unittest.TestCase):
         bot.update_cmd_by_route()
         self.assertEqual(
             (bot.cmd_move_x, bot.cmd_move_y, bot.cmd_action),
-            ("none", "none", "jump_align_right"),
+            ("none", "none", "jump"),
         )
 
         bot.loc_player_global = (12, 10)
         bot.update_cmd_by_route()
         self.assertEqual(
             (bot.cmd_move_x, bot.cmd_move_y, bot.cmd_action),
-            ("none", "none", "jump_align_left"),
+            ("none", "none", "jump"),
         )
 
-    def test_stationary_jump_waits_at_exact_center_then_uses_aligned_jump(self):
+    def test_stationary_jump_proximity_uses_two_dimensional_distance(self):
         bot = self._route_color_bot()
         self._draw_stationary_jump_blob(bot, center=(10, 10))
-        bot.loc_player_global = (10, 10)
+        bot.loc_player_global = (7, 6)
 
-        with patch(
-            "src.engine.MapleStoryAutoLevelUp.time.monotonic",
-            side_effect=(100.0, 100.59, 100.61),
-        ):
-            bot.update_cmd_by_route()
-            self.assertEqual(bot.cmd_action, "none")
-            bot.update_cmd_by_route()
-            self.assertEqual(bot.cmd_action, "none")
-            bot.update_cmd_by_route()
-            self.assertEqual(bot.cmd_action, "jump_aligned")
+        bot.update_cmd_by_route()
 
-    def test_stationary_jump_alignment_resets_after_position_drifts(self):
+        self.assertEqual(
+            (bot.cmd_move_x, bot.cmd_move_y, bot.cmd_action),
+            ("none", "none", "jump"),
+        )
+        self.assertTrue(bot._stationary_jump_proximity_active)
+
+    def test_stationary_jump_outside_search_range_does_not_trigger(self):
         bot = self._route_color_bot()
         self._draw_stationary_jump_blob(bot, center=(10, 10))
-
-        with patch(
-            "src.engine.MapleStoryAutoLevelUp.time.monotonic",
-            side_effect=(100.0, 101.0),
-        ):
-            bot.loc_player_global = (10, 10)
-            bot.update_cmd_by_route()
-            bot.loc_player_global = (9, 10)
-            bot.update_cmd_by_route()
-            self.assertEqual(bot.cmd_action, "jump_align_right")
-            bot.loc_player_global = (10, 10)
-            bot.update_cmd_by_route()
-
-        self.assertEqual(bot.cmd_action, "none")
-        self.assertEqual(bot._stationary_jump_aligned_since, 101.0)
-
-    def test_stationary_jump_does_not_align_from_another_row(self):
-        bot = self._route_color_bot()
-        self._draw_stationary_jump_blob(bot, center=(10, 10))
-        bot.loc_player_global = (8, 9)
+        bot.loc_player_global = (0, 0)
 
         bot.update_cmd_by_route()
 
@@ -667,19 +737,22 @@ class AutoBotLifecycleTests(unittest.TestCase):
             (bot.cmd_move_x, bot.cmd_move_y, bot.cmd_action),
             ("none", "none", "none"),
         )
-        self.assertFalse(bot._stationary_jump_alignment_active)
+        self.assertFalse(bot._stationary_jump_proximity_active)
 
-    def test_stationary_jump_alignment_owns_mob_and_stuck_decisions(self):
+    def test_nearby_monster_combat_owns_stuck_watchdog(self):
         bot = self._route_color_bot()
-        bot._stationary_jump_alignment_active = True
-        bot.screen_player_location_valid = True
-        bot.cmd_action = "jump_align_right"
-        bot.loc_watch_dog = (0, 0)
+        bot.cfg["watchdog"] = {"range": 1, "timeout": 10}
+        bot._suppress_periodic_attack = True
+        bot.loc_watch_dog = bot.loc_player_global
         bot.t_watch_dog = 0.0
 
-        bot.update_cmd_by_mob_detection()
-        self.assertEqual(bot.cmd_action, "jump_align_right")
-        self.assertFalse(bot.is_player_stuck())
+        with patch(
+            "src.engine.MapleStoryAutoLevelUp.time.time",
+            return_value=100.0,
+        ):
+            self.assertFalse(bot.is_player_stuck())
+
+        self.assertEqual(bot.t_watch_dog, 100.0)
         self.assertEqual(bot.loc_watch_dog, bot.loc_player_global)
 
     def test_rope_guide_predicts_far_endpoint_before_hero_reaches_it(self):
@@ -1260,6 +1333,53 @@ class AutoBotLifecycleTests(unittest.TestCase):
         bot.last_appearance_match = None
         return bot
 
+    def test_marker_only_config_loads_player_appearance_templates(self):
+        bot = MapleStoryAutoBot.__new__(MapleStoryAutoBot)
+        bot.nametag_appearance_templates = []
+        nametag_cfg = {
+            "enable": False,
+            "name": "liu_muning",
+            "overhead_marker": {"enable": True},
+            "appearance": {
+                "enable": "auto",
+                "templates": [
+                    {
+                        "suffix": "appearance_climb",
+                        "pose": "climbing",
+                        "player_offset": (20, 38),
+                    },
+                    {
+                        "suffix": "appearance_stand_left",
+                        "pose": "standing",
+                        "player_offset": (18, 41),
+                    },
+                ],
+            },
+        }
+        template = np.full((4, 5, 3), (0, 255, 0), dtype=np.uint8)
+        template[1:3, 1:4] = (255, 255, 255)
+
+        with patch(
+            "src.engine.MapleStoryAutoLevelUp.os.path.exists",
+            return_value=True,
+        ), patch(
+            "src.engine.MapleStoryAutoLevelUp.load_image",
+            return_value=template,
+        ) as load_mock:
+            bot._load_player_appearance_templates(nametag_cfg)
+
+        self.assertEqual(
+            [item["pose"] for item in bot.nametag_appearance_templates],
+            ["climbing", "standing"],
+        )
+        self.assertEqual(
+            [call.args[0] for call in load_mock.call_args_list],
+            [
+                "nametag/liu_muning_appearance_climb.png",
+                "nametag/liu_muning_appearance_stand_left.png",
+            ],
+        )
+
     def test_id_and_medal_detect_real_capture(self):
         project_root = Path(__file__).resolve().parents[1]
         frame = cv2.imread(str(
@@ -1446,20 +1566,29 @@ class AutoBotLifecycleTests(unittest.TestCase):
 
     def test_smile_anchored_climbing_hood_enters_ladder_state(self):
         bot = self._make_appearance_bot("appearance_climb.png")
+        bot._ladder_route_exit_confirmed_at = 99.0
 
         state = bot._update_ladder_state_from_smile_pose((55, 47))
 
         self.assertTrue(state)
         self.assertTrue(bot.is_on_ladder)
+        self.assertIsNone(bot._ladder_route_exit_confirmed_at)
 
     def test_smile_anchored_standing_head_leaves_ladder_state(self):
         bot = self._make_appearance_bot("appearance_stand_left.png")
         bot.is_on_ladder = True
+        bot._ladder_route_move_y = "up"
 
-        state = bot._update_ladder_state_from_smile_pose((28, 51))
+        with patch(
+            "src.engine.MapleStoryAutoLevelUp.time.monotonic",
+            return_value=100.0,
+        ):
+            state = bot._update_ladder_state_from_smile_pose((28, 51))
 
         self.assertFalse(state)
         self.assertFalse(bot.is_on_ladder)
+        self.assertIsNone(bot._ladder_route_move_y)
+        self.assertEqual(bot._ladder_route_exit_confirmed_at, 100.0)
 
     def test_inconclusive_smile_anchored_pose_keeps_ladder_state(self):
         bot = self._make_appearance_bot("appearance_climb.png")
@@ -2443,6 +2572,28 @@ class WindowCaptureTests(unittest.TestCase):
         self.assertTrue(np.all(frame == 180))
         self.assertEqual(bot.img_capture_content.shape, (729, 1296, 3))
 
+    def test_preprocessed_frame_keeps_its_atomic_capture_timestamp(self):
+        raw = np.full((828, 1296, 3), 180, dtype=np.uint8)
+        bot = self.make_frame_bot(
+            raw,
+            window_title="TV/CAM/Device - PotPlayer",
+        )
+        bot.capture = SimpleNamespace(
+            get_frame_snapshot=Mock(return_value=(raw, 12.5)),
+            get_frame=Mock(),
+            last_frame_time=99.0,
+            window_title="TV/CAM/Device - PotPlayer",
+        )
+
+        frame = bot.get_img_frame()
+
+        self.assertIsNotNone(frame)
+        self.assertEqual(
+            bot._current_capture_frame_token,
+            ("capture", 12.5),
+        )
+        bot.capture.get_frame.assert_not_called()
+
     def test_legacy_game_size_is_still_accepted_after_title_crop(self):
         bot = self.make_frame_bot(np.zeros((752, 1282, 3), dtype=np.uint8))
 
@@ -2506,6 +2657,22 @@ class WindowCaptureTests(unittest.TestCase):
         capture.is_static_frame = False
 
         self.assertIsNone(capture.get_frame())
+
+    def test_capture_snapshot_returns_frame_and_timestamp_together(self):
+        capture = GameWindowCapturor.__new__(GameWindowCapturor)
+        capture.cfg = {"game_window": {"frame_timeout": 1.0}}
+        capture.lock = threading.Lock()
+        capture.frame = np.zeros((2, 2, 4), dtype=np.uint8)
+        capture.frame[0, 0] = (10, 20, 30, 255)
+        captured_at = time.monotonic()
+        capture.last_frame_time = captured_at
+        capture.is_closed = False
+        capture.is_static_frame = False
+
+        frame, token = capture.get_frame_snapshot()
+
+        self.assertEqual(token, captured_at)
+        self.assertEqual(tuple(frame[0, 0]), (10, 20, 30))
 
 
 if __name__ == "__main__":

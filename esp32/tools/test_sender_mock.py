@@ -42,9 +42,22 @@ class FakeSerial:
         if command == "PING":
             response = "PONG\n"
         elif command == "STATUS":
-            response = "OK SERIAL=1 BLE_CONNECTED=1 BLE_READY=1\n"
+            response = (
+                "OK SERIAL=1 BLE_CONNECTED=1 BLE_READY=1 "
+                "MOUSE=1 MOUSE_ABS=1\n"
+            )
         elif command == "RELEASE_ALL":
             response = "OK RELEASE_ALL\n"
+        elif command.startswith("MOUSE_CLICK_AT "):
+            _, x, y, button, duration = command.split()
+            button_mask = {
+                "LEFT": "0x01",
+                "RIGHT": "0x02",
+                "MIDDLE": "0x04",
+            }[button]
+            response = (
+                f"OK MOUSE_CLICK_AT {x} {y} {button_mask} {duration}ms\n"
+            )
         else:
             response = f"OK {command}\n"
         self.responses.append(response.encode("ascii"))
@@ -66,6 +79,15 @@ def main() -> int:
             assert client.request("PING") == "PONG"
             assert client.request("DOWN 0x04") == "OK DOWN 0x04"
             assert client.request("UP 0x04") == "OK UP 0x04"
+            assert client.request("MOUSE_MOVE 120 -40 0") == (
+                "OK MOUSE_MOVE 120 -40 0"
+            )
+            assert client.request("MOUSE_CLICK LEFT 60") == (
+                "OK MOUSE_CLICK LEFT 60"
+            )
+            assert client.request("MOUSE_CLICK_AT 16384 16384 LEFT 60") == (
+                "OK MOUSE_CLICK_AT 16384 16384 0x01 60ms"
+            )
 
     assert fake.commands == [
         "STATUS",
@@ -73,6 +95,9 @@ def main() -> int:
         "PING",
         "DOWN 0x04",
         "UP 0x04",
+        "MOUSE_MOVE 120 -40 0",
+        "MOUSE_CLICK LEFT 60",
+        "MOUSE_CLICK_AT 16384 16384 LEFT 60",
         "RELEASE_ALL",
     ], fake.commands
     assert fake.dtr is False
@@ -80,6 +105,9 @@ def main() -> int:
     assert sender.usage_from_text("A") == 0x04
     assert sender.usage_from_text("LEFT") == 0x50
     assert sender.usage_from_text("E1") == 0xE1
+    assert sender.mouse_button_token("left") == "LEFT"
+    assert sender.mouse_delta(-32767) == -32767
+    assert sender.absolute_mouse_coordinate(32767) == 32767
     print("sender serial mock test: PASS")
     return 0
 

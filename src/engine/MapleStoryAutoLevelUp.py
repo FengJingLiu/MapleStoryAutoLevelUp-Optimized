@@ -44,6 +44,10 @@ from src.utils.minimap_geometry import (
 )
 from src.input.CaptureFramePreprocessor import preprocess_capture_frame
 from src.input.KeyBoardController import KeyBoardController, press_key
+from src.input.Esp32HidClient import (
+    RELATIVE_MOUSE_MAX_DELTA,
+    usage_from_text,
+)
 from src.input.KeyBoardListener import KeyBoardListener
 if is_mac():
     from src.input.GameWindowCapturorForMac import GameWindowCapturor
@@ -54,6 +58,7 @@ from src.engine.Profiler import Profiler
 from src.engine.RuneSolver import RuneSolver
 from src.engine.FiniteStateMachine import FiniteStateMachine
 from src.vision.YoloMonsterDetector import YoloMonsterDetector
+from src.vision.cursor_tracker import CursorTracker
 from src.states.hunting import HuntingState
 from src.states.finding_rune import FindingRuneState
 from src.states.near_rune import NearRuneState
@@ -76,6 +81,7 @@ class MapleStoryAutoBot:
         self.monsters_info = {} # monster information
         self.yolo_monster_detector = None
         self.monsters = [] # monster detected in current frame
+        self.close_hp_bar_candidates = {"left": [], "right": []}
         self.fps = 0 # Frame per second
         self.red_dot_center_prev = None # previous other player location in minimap
         self.video_writer = None # For video recording feature
@@ -83,11 +89,9 @@ class MapleStoryAutoBot:
         self._video_record_size = None
         self.color_code = {} # For color code instruction
         self.color_code_up_down = {} # Color code only contain 'up' and 'down'
+        self._ladder_route_move_y = None
+        self._ladder_route_exit_confirmed_at = None
         self._stationary_jump_targets_by_route = []
-        self._stationary_jump_alignment_key = None
-        self._stationary_jump_aligned_since = None
-        self._stationary_jump_alignment_active = False
-        self._stationary_jump_fired_key = None
         self._rope_climb_targets_by_route = []
         self._rope_climb_state = None
         self._rope_climb_active = False
@@ -95,6 +99,7 @@ class MapleStoryAutoBot:
         self._rope_climb_failed_key = None
         self._rope_climb_completed_position = None
         self._rope_climb_failed_position = None
+        self._stationary_jump_proximity_active = False
         self._portal_sweep_active = False
         self._portal_sweep_key = None
         self._portal_sweep_region = None
@@ -107,6 +112,30 @@ class MapleStoryAutoBot:
         self._portal_sweep_last_nudge_time = 0.0
         self._portal_sweep_failed_key = None
         self._portal_sweep_failed_region = None
+        self._auto_relogin_state = "idle"
+        self._auto_relogin_pending_page = None
+        self._auto_relogin_confirmation_return_state = None
+        self._auto_relogin_expected_page = None
+        self._auto_relogin_pending_location = None
+        self._auto_relogin_confirm_count = 0
+        self._auto_relogin_confirm_miss_count = 0
+        self._auto_relogin_ready_count = 0
+        self._auto_relogin_next_action_at = 0.0
+        self._auto_relogin_last_action_at = None
+        self._auto_relogin_last_action_page = None
+        self._auto_relogin_has_attempted_input = False
+        self._auto_relogin_action_attempts = {}
+        self._auto_relogin_step_started_at = None
+        self._auto_relogin_channel_candidates = []
+        self._auto_relogin_health_was_enabled = False
+        self._auto_relogin_confirm_started_at = None
+        self._auto_relogin_last_confirm_frame_token = None
+        self._auto_relogin_last_ready_frame_token = None
+        self._auto_relogin_waiting_game_started_at = None
+        self._auto_relogin_failure_logged = False
+        self._auto_relogin_fallback_frame_counter = 0
+        self._auto_relogin_started_at = None
+        self._reset_auto_relogin_pointer_runtime()
         self.thread_auto_bot = None # thread for running autobot
         self.cmd_move_x = "none" # "left" "right"
         self.cmd_move_y = "none" # "up" "down"
@@ -147,6 +176,9 @@ class MapleStoryAutoBot:
         # Images
         self.frame = None # raw image
         self.img_frame = None # game window frame
+        # Bound atomically to ``frame`` by ``get_img_frame``. Recovery must
+        # never read the capturor's live timestamp after copying an older image.
+        self._current_capture_frame_token = None
         self.img_frame_gray = None # game window frame graysale
         self.img_frame_debug = None # game window frame for visualization
         self.img_route = None # route map
@@ -195,6 +227,15 @@ class MapleStoryAutoBot:
         self.img_create_party_enable = None
         self.img_create_party_disable = None
         self.img_login_button = None
+        self._img_login_button_source = None
+        self._last_login_template_geometry = None
+        self._auto_relogin_template_sources = {}
+        self._auto_relogin_templates = {}
+        self._auto_relogin_cursor_template_source = None
+        self._auto_relogin_cursor_tracker = None
+        self._auto_relogin_disconnect_cursor_template_source = None
+        self._auto_relogin_disconnect_cursor_tracker = None
+        self._last_auto_relogin_template_geometry = None
 
         # Database
         self.data = load_yaml("config/config_data.yaml")
@@ -426,18 +467,1817 @@ class MapleStoryAutoBot:
         """Click only when the captured window and game are on the same PC."""
         if self.remote_keyboard_target():
             logger.warning(
-                f"[{action}] Skipped local mouse click: ESP32 is paired to the "
-                "remote game computer and the current HID firmware is keyboard-only"
+                f"[{action}] Skipped generic local mouse click: ESP32 is paired "
+                "to the remote game computer"
             )
             return False
         click_in_game_window(self.capture.window_title, coord)
         return True
 
+    def _auto_relogin_config(self):
+        """Return the optional session-recovery configuration."""
+        cfg = (getattr(self, "cfg", None) or {}).get("auto_relogin", {})
+        return cfg if isinstance(cfg, dict) else {}
+
+    def _auto_relogin_remote_mouse_mode(self):
+        """Return the configured remote click strategy.
+
+        Missing configuration retains the legacy absolute path for callers
+        that construct a partial config in tests or integrations.  The shipped
+        default explicitly selects ``visual_relative``.
+        """
+        return str(
+            self._auto_relogin_config().get(
+                "remote_mouse_mode", "absolute"
+            )
+        ).strip().lower()
+
+    def _auto_relogin_number(self, name, default, minimum=0.0):
+        value = self._auto_relogin_config().get(name, default)
+        try:
+            number = float(value)
+            if not np.isfinite(number):
+                raise ValueError
+            return max(float(minimum), number)
+        except (TypeError, ValueError):
+            logger.warning(
+                f"[auto_relogin] Invalid {name}={value!r}; using {default}"
+            )
+            return max(float(minimum), float(default))
+
+    def _reset_auto_relogin_pointer_runtime(self):
+        """Clear one in-progress visual relative-pointer click session."""
+        self._auto_relogin_pointer_page = None
+        self._auto_relogin_pointer_action = None
+        self._auto_relogin_pointer_target = None
+        self._auto_relogin_pointer_frame_shape = None
+        self._auto_relogin_pointer_started_at = None
+        self._auto_relogin_pointer_last_frame_token = None
+        self._auto_relogin_pointer_last_cursor = None
+        self._auto_relogin_pointer_cursor_variant = None
+        self._auto_relogin_pointer_move_origin = None
+        self._auto_relogin_pointer_last_command = None
+        self._auto_relogin_pointer_last_move_at = None
+        self._auto_relogin_pointer_feedback_frames = 0
+        self._auto_relogin_pointer_move_count = 0
+        self._auto_relogin_pointer_cursor_misses = 0
+        self._auto_relogin_pointer_page_misses = 0
+        self._auto_relogin_pointer_aligned_count = 0
+        self._auto_relogin_pointer_stall_count = 0
+        self._auto_relogin_pointer_motion_verified = False
+        self._auto_relogin_pointer_click_failures = 0
+        self._auto_relogin_pointer_rescue_index = 0
+        self._auto_relogin_pointer_next_input_at = 0.0
+
+    def _reset_auto_relogin_runtime(self):
+        """Reset transient recovery state without changing user input gates."""
+        self._auto_relogin_state = "idle"
+        self._auto_relogin_pending_page = None
+        self._auto_relogin_confirmation_return_state = None
+        self._auto_relogin_expected_page = None
+        self._auto_relogin_pending_location = None
+        self._auto_relogin_confirm_count = 0
+        self._auto_relogin_confirm_miss_count = 0
+        self._auto_relogin_ready_count = 0
+        self._auto_relogin_next_action_at = 0.0
+        self._auto_relogin_last_action_at = None
+        self._auto_relogin_last_action_page = None
+        self._auto_relogin_has_attempted_input = False
+        self._auto_relogin_action_attempts = {}
+        self._auto_relogin_step_started_at = None
+        self._auto_relogin_channel_candidates = []
+        self._auto_relogin_health_was_enabled = False
+        self._auto_relogin_confirm_started_at = None
+        self._auto_relogin_last_confirm_frame_token = None
+        self._auto_relogin_last_ready_frame_token = None
+        self._auto_relogin_waiting_game_started_at = None
+        self._auto_relogin_failure_logged = False
+        self._auto_relogin_fallback_frame_counter = 0
+        self._auto_relogin_started_at = None
+        self._reset_auto_relogin_pointer_runtime()
+
+    def _auto_relogin_enabled(self):
+        return self._auto_relogin_config().get("enable", False) is True and \
+            not self.is_debug_mode() and \
+            not getattr(self, "is_disable_control", False) and \
+            not getattr(getattr(self, "capture", None), "is_static_frame", False)
+
+    def _auto_relogin_frame_token(self, fallback):
+        """Identify the capture source frame so cached frames do not confirm."""
+        bound_token = getattr(self, "_current_capture_frame_token", None)
+        if isinstance(bound_token, tuple) and len(bound_token) == 2 and \
+                bound_token[0] == "capture":
+            return bound_token
+
+        # Compatibility for lightweight integrations/tests that call recovery
+        # directly without going through ``get_img_frame``. A real bot always
+        # owns the bound-token attribute and never reads the mutable timestamp.
+        token = None
+        if not hasattr(self, "_current_capture_frame_token"):
+            token = getattr(
+                getattr(self, "capture", None), "last_frame_time", None
+            )
+        try:
+            token = float(token)
+        except (TypeError, ValueError):
+            token = 0.0
+        if not np.isfinite(token) or token <= 0:
+            self._auto_relogin_fallback_frame_counter = getattr(
+                self, "_auto_relogin_fallback_frame_counter", 0
+            ) + 1
+            return ("loop", self._auto_relogin_fallback_frame_counter)
+        return ("capture", token)
+
+    def _pause_gameplay_for_auto_relogin(self):
+        """Quiesce gameplay producers while preserving the recovery key path."""
+        self.cmd_move_x = "none"
+        self.cmd_move_y = "none"
+        self.cmd_action = "none"
+        self._reset_ladder_route_hold()
+        self._reset_stationary_jump_proximity()
+        self._reset_rope_climb(clear_locks=True)
+        self._reset_portal_sweep()
+        self._auto_relogin_ready_count = 0
+        self._auto_relogin_last_ready_frame_token = None
+        self._auto_relogin_waiting_game_started_at = None
+        self._auto_relogin_pending_page = None
+        self._auto_relogin_expected_page = None
+        self._auto_relogin_pending_location = None
+        self._auto_relogin_action_attempts = {}
+        self._auto_relogin_last_action_at = None
+        self._auto_relogin_last_action_page = None
+        self._auto_relogin_has_attempted_input = False
+        self._auto_relogin_step_started_at = time.monotonic()
+        self._auto_relogin_channel_candidates = []
+        self._auto_relogin_failure_logged = False
+        self._auto_relogin_started_at = time.monotonic()
+        self._reset_auto_relogin_pointer_runtime()
+
+        health_monitor = getattr(self, "health_monitor", None)
+        health_cfg = (getattr(self, "cfg", None) or {}).get(
+            "health_monitor", {}
+        )
+        self._auto_relogin_health_was_enabled = bool(
+            health_monitor is not None
+            and health_cfg.get("enable", False)
+            and getattr(health_monitor, "enabled", True)
+        )
+        if health_monitor is not None and hasattr(health_monitor, "disable"):
+            health_monitor.disable()
+
+        # Stop the independent health producer before the atomic release so a
+        # potion request cannot race in immediately after keys are cleared.
+        keyboard_controller = getattr(self, "kb", None)
+        if keyboard_controller is not None:
+            if hasattr(
+                    keyboard_controller,
+                    "suspend_automation_for_session_recovery"):
+                keyboard_controller.suspend_automation_for_session_recovery()
+            else:
+                keyboard_controller.set_command("none none none")
+                keyboard_controller.release_all_key()
+
+        logger.warning(
+            "[auto_relogin] Login screen detected; gameplay input suspended"
+        )
+
+    def _restore_health_after_auto_relogin(self):
+        health_monitor = getattr(self, "health_monitor", None)
+        should_enable = getattr(
+            self,
+            "_auto_relogin_health_was_enabled",
+            bool(
+                (getattr(self, "cfg", None) or {})
+                .get("health_monitor", {})
+                .get("enable", False)
+            ),
+        )
+        if should_enable and health_monitor is not None and \
+                hasattr(health_monitor, "enable"):
+            health_monitor.enable()
+        self._auto_relogin_health_was_enabled = False
+
+    def _resume_keyboard_after_auto_relogin(self):
+        keyboard_controller = getattr(self, "kb", None)
+        if keyboard_controller is not None and hasattr(
+                keyboard_controller,
+                "resume_automation_after_session_recovery"):
+            keyboard_controller.resume_automation_after_session_recovery()
+
+    def _cancel_auto_relogin_confirmation(self):
+        """Undo a one-frame false positive before any login action was sent."""
+        self._restore_health_after_auto_relogin()
+        self._resume_keyboard_after_auto_relogin()
+        self._reset_auto_relogin_runtime()
+
+    def _auto_relogin_control_available(self):
+        keyboard_controller = getattr(self, "kb", None)
+        return not getattr(self, "is_disable_control", False) and \
+            keyboard_controller is not None and \
+            not getattr(keyboard_controller, "is_terminated", False) and \
+            getattr(keyboard_controller, "is_enable", True)
+
+    def _auto_relogin_scale_point(self, point):
+        """Scale a point from the recorded login-flow frame to this frame."""
+        frame = getattr(self, "img_frame", None)
+        if frame is None or not isinstance(point, (list, tuple)) or \
+                len(point) != 2:
+            return None
+        reference = self._auto_relogin_config().get(
+            "flow_template_reference_size", (2013, 3579)
+        )
+        try:
+            reference_h, reference_w = map(float, reference[:2])
+            x, y = map(float, point)
+        except (TypeError, ValueError, IndexError):
+            return None
+        if min(reference_h, reference_w) <= 0:
+            return None
+        frame_h, frame_w = frame.shape[:2]
+        return (
+            int(round(x * frame_w / reference_w)),
+            int(round(y * frame_h / reference_h)),
+        )
+
+    def _auto_relogin_scale_vector(self, vector, minimum=0):
+        """Scale an [x, y] distance from the recorded flow geometry."""
+        frame = getattr(self, "img_frame", None)
+        if frame is None or not isinstance(vector, (list, tuple)) or \
+                len(vector) != 2:
+            return None
+        reference = self._auto_relogin_config().get(
+            "flow_template_reference_size", (2013, 3579)
+        )
+        try:
+            reference_h, reference_w = map(float, reference[:2])
+            value_x, value_y = map(float, vector)
+        except (TypeError, ValueError, IndexError):
+            return None
+        if min(reference_h, reference_w, value_x, value_y) < 0 or \
+                min(reference_h, reference_w) <= 0:
+            return None
+        frame_h, frame_w = frame.shape[:2]
+        return (
+            max(int(minimum), int(round(value_x * frame_w / reference_w))),
+            max(int(minimum), int(round(value_y * frame_h / reference_h))),
+        )
+
+    def _auto_relogin_scale_region(self, region):
+        if not isinstance(region, (list, tuple)) or len(region) != 4:
+            return None
+        top_left = self._auto_relogin_scale_point(region[:2])
+        bottom_right = self._auto_relogin_scale_point(region[2:])
+        if top_left is None or bottom_right is None:
+            return None
+        return (*top_left, *bottom_right)
+
+    def _match_auto_relogin_page(self, page):
+        """Return a verified template center for one known recovery page."""
+        frame = getattr(self, "img_frame", None)
+        template = getattr(self, "_auto_relogin_templates", {}).get(page)
+        regions = self._auto_relogin_config().get("page_search_regions", {})
+        region = self._auto_relogin_scale_region(regions.get(page))
+        if frame is None or template is None or region is None:
+            return None
+
+        frame_h, frame_w = frame.shape[:2]
+        x0, y0, x1, y1 = region
+        x0 = max(0, min(int(x0), frame_w))
+        x1 = max(0, min(int(x1), frame_w))
+        y0 = max(0, min(int(y0), frame_h))
+        y1 = max(0, min(int(y1), frame_h))
+        template_h, template_w = template.shape[:2]
+        if x1 - x0 < template_w or y1 - y0 < template_h:
+            return None
+
+        roi = frame[y0:y1, x0:x1]
+        location, score, _ = find_pattern_sqdiff(roi, template)
+        threshold = self._auto_relogin_number(
+            "template_threshold", 0.03, minimum=0.0
+        )
+        if score >= threshold:
+            return None
+        center = (
+            x0 + int(location[0]) + template_w // 2,
+            y0 + int(location[1]) + template_h // 2,
+        )
+        logger.debug(
+            f"[auto_relogin] Matched {page} page at {center} "
+            f"with score {score:.5f}"
+        )
+        return center
+
+    def _find_known_auto_relogin_page(self):
+        """Find the most specific page for manual/failure-state gating."""
+        # The disconnect dialog is modal and can cover any older page. After
+        # it, prefer overlays/more-specific pages over their visible parents.
+        for page in ("disconnect", "character", "channel", "world", "connect"):
+            location = self._match_auto_relogin_page(page)
+            if location is not None:
+                return page, location
+        return None, None
+
+    def _begin_auto_relogin_confirmation(
+            self, page, location, now, frame_token):
+        if getattr(self, "_auto_relogin_pending_page", None) != page:
+            current_state = getattr(self, "_auto_relogin_state", "idle")
+            if current_state != "confirming":
+                self._auto_relogin_confirmation_return_state = current_state
+            self._auto_relogin_pending_page = page
+            self._auto_relogin_pending_location = location
+            self._auto_relogin_confirm_count = 1
+            self._auto_relogin_confirm_miss_count = 0
+            self._auto_relogin_confirm_started_at = now
+            self._auto_relogin_last_confirm_frame_token = frame_token
+        else:
+            self._auto_relogin_pending_location = location
+            if frame_token != getattr(
+                    self, "_auto_relogin_last_confirm_frame_token", None):
+                prior_count = getattr(self, "_auto_relogin_confirm_count", 0)
+                self._auto_relogin_confirm_count = max(1, prior_count + 1)
+                if prior_count <= 0:
+                    self._auto_relogin_confirm_started_at = now
+                self._auto_relogin_last_confirm_frame_token = frame_token
+                self._auto_relogin_confirm_miss_count = 0
+        self._auto_relogin_state = "confirming"
+
+    def _auto_relogin_confirmation_ready(self, now):
+        required_frames = max(
+            1,
+            int(round(self._auto_relogin_number(
+                "confirm_frames", 2, minimum=1
+            ))),
+        )
+        required_seconds = self._auto_relogin_number(
+            "confirm_seconds", 0.5, minimum=0.0
+        )
+        started_at = getattr(self, "_auto_relogin_confirm_started_at", now)
+        if started_at is None:
+            return False
+        return getattr(self, "_auto_relogin_confirm_count", 0) >= \
+            required_frames and now - started_at >= required_seconds
+
+    def _send_auto_relogin_key(self):
+        key = str(
+            self._auto_relogin_config().get("remote_confirm_key", "enter")
+        ).strip()
+        if not key:
+            return False
+        keyboard_controller = self.kb
+        if hasattr(keyboard_controller, "press_session_recovery_key"):
+            return bool(keyboard_controller.press_session_recovery_key(key))
+        return bool(press_key(key))
+
+    def _send_auto_relogin_click(self, point, action):
+        if point is None or getattr(self, "is_terminated", False):
+            return False
+        if self.remote_keyboard_target():
+            keyboard_controller = self.kb
+            frame = getattr(self, "img_frame", None)
+            if frame is None or not hasattr(
+                    keyboard_controller, "click_session_recovery_point"):
+                logger.error(
+                    f"[{action}] Remote absolute mouse HID is unavailable"
+                )
+                return False
+            frame_h, frame_w = frame.shape[:2]
+            duration = self._auto_relogin_number(
+                "mouse_click_duration", 0.05, minimum=0.001
+            )
+            return bool(keyboard_controller.click_session_recovery_point(
+                int(point[0]),
+                int(point[1]),
+                frame_w,
+                frame_h,
+                button="left",
+                duration=duration,
+            ))
+
+        title_bar_height = int(
+            self.cfg.get("game_window", {}).get("title_bar_height", 0)
+        )
+        local_point = (int(point[0]), int(point[1]) + title_bar_height)
+        return bool(self.click_game_ui(local_point, action))
+
+    def _next_auto_relogin_channel_point(self):
+        candidates = getattr(self, "_auto_relogin_channel_candidates", None)
+        if not candidates:
+            configured = self._auto_relogin_config().get("channel_points", [])
+            candidates = [tuple(point) for point in configured]
+            random.shuffle(candidates)
+            self._auto_relogin_channel_candidates = candidates
+        if not candidates:
+            return None
+        return self._auto_relogin_scale_point(candidates.pop())
+
+    def _auto_relogin_anchor_adjusted_point(
+            self, page, point, page_location):
+        """Translate a recorded fixed point with its matched page anchor."""
+        if point is None or page_location is None:
+            return None
+        default_anchors = {
+            "disconnect": (1737, 857),
+            "channel": (1565, 875),
+        }
+        configured = self._auto_relogin_config().get(
+            "page_anchor_points", {}
+        )
+        if not isinstance(configured, dict):
+            return None
+        anchor = configured.get(page, default_anchors.get(page))
+        scaled_anchor = self._auto_relogin_scale_point(anchor)
+        if scaled_anchor is None:
+            return None
+        adjusted = (
+            int(point[0]) + int(page_location[0]) - int(scaled_anchor[0]),
+            int(point[1]) + int(page_location[1]) - int(scaled_anchor[1]),
+        )
+        frame = getattr(self, "img_frame", None)
+        if frame is None:
+            return None
+        frame_h, frame_w = frame.shape[:2]
+        if not 0 <= adjusted[0] < frame_w or not 0 <= adjusted[1] < frame_h:
+            return None
+        return adjusted
+
+    def _begin_auto_relogin_pointer_action(
+            self, page, target, action, now):
+        """Start one cross-frame, visual relative-pointer click session."""
+        frame = getattr(self, "img_frame", None)
+        if frame is None or target is None:
+            self._fail_auto_relogin(
+                f"{page} visual click has no current frame or target"
+            )
+            return False
+        try:
+            target = (int(target[0]), int(target[1]))
+        except (TypeError, ValueError, IndexError, OverflowError):
+            self._fail_auto_relogin(f"{page} visual click target is invalid")
+            return False
+        frame_h, frame_w = frame.shape[:2]
+        if not 0 <= target[0] < frame_w or not 0 <= target[1] < frame_h:
+            self._fail_auto_relogin(
+                f"{page} visual click target is outside the capture frame"
+            )
+            return False
+
+        self._reset_auto_relogin_pointer_runtime()
+        self._auto_relogin_pointer_page = page
+        self._auto_relogin_pointer_action = action
+        self._auto_relogin_pointer_target = target
+        self._auto_relogin_pointer_frame_shape = (frame_h, frame_w)
+        self._auto_relogin_pointer_started_at = now
+        # The confirmation frame was already consumed to start this session;
+        # never use a second processing pass over that cached image to move.
+        self._auto_relogin_pointer_last_frame_token = getattr(
+            self, "_auto_relogin_last_confirm_frame_token", None
+        )
+        self._auto_relogin_state = "aiming"
+        logger.info(
+            f"[auto_relogin] Aiming remote pointer for {page} at {target}"
+        )
+        return True
+
+    def _match_auto_relogin_hovered_target(self, page, target):
+        """Verify a cached button structurally when hover changes its colors."""
+        if page not in {"world", "character"}:
+            return None
+        frame = getattr(self, "img_frame", None)
+        template = getattr(self, "_auto_relogin_templates", {}).get(page)
+        if frame is None or template is None or target is None:
+            return None
+
+        template_h, template_w = template.shape[:2]
+        margin = self._auto_relogin_scale_vector((40, 40), minimum=1)
+        if margin is None:
+            return None
+        margin_x, margin_y = margin
+        expected_x0 = int(target[0]) - template_w // 2
+        expected_y0 = int(target[1]) - template_h // 2
+        frame_h, frame_w = frame.shape[:2]
+        x0 = max(0, expected_x0 - margin_x)
+        y0 = max(0, expected_y0 - margin_y)
+        x1 = min(frame_w, expected_x0 + template_w + margin_x)
+        y1 = min(frame_h, expected_y0 + template_h + margin_y)
+        if x1 - x0 < template_w or y1 - y0 < template_h:
+            return None
+
+        roi_gray = cv2.cvtColor(frame[y0:y1, x0:x1], cv2.COLOR_BGR2GRAY)
+        template_gray = cv2.cvtColor(template, cv2.COLOR_BGR2GRAY)
+        result = cv2.matchTemplate(
+            roi_gray, template_gray, cv2.TM_CCOEFF_NORMED
+        )
+        _, score, _, location = cv2.minMaxLoc(result)
+        threshold = self._auto_relogin_number(
+            "mouse_hover_template_correlation", 0.55, minimum=0.0
+        )
+        if not np.isfinite(score) or score < threshold:
+            return None
+        center = (
+            x0 + int(location[0]) + template_w // 2,
+            y0 + int(location[1]) + template_h // 2,
+        )
+        drift = self._auto_relogin_scale_vector(
+            self._auto_relogin_config().get(
+                "mouse_target_drift", (50, 50)
+            ),
+            minimum=1,
+        )
+        if drift is None or abs(center[0] - int(target[0])) > drift[0] or \
+                abs(center[1] - int(target[1])) > drift[1]:
+            return None
+        logger.debug(
+            f"[auto_relogin] Structurally verified hovered {page} "
+            f"target at {center} with correlation {score:.4f}"
+        )
+        return center
+
+    def _auto_relogin_pointer_page_evidence(self, page, target):
+        """Return ``(safe_target, hovered)`` for the current pointer page."""
+        classified_page, location = self._find_known_auto_relogin_page()
+        if classified_page is not None and classified_page != page:
+            return None, False
+        hovered = False
+        if classified_page is None:
+            location = self._match_auto_relogin_hovered_target(page, target)
+            hovered = location is not None
+        if location is None:
+            return None, False
+
+        # Fixed-grid pages use their anchored target, while button-template
+        # pages follow the current match center so a shifted viewport is safe.
+        if page not in {"world", "character"}:
+            return tuple(map(int, target)), False
+        drift = self._auto_relogin_scale_vector(
+            self._auto_relogin_config().get(
+                "mouse_target_drift", (50, 50)
+            ),
+            minimum=1,
+        )
+        if drift is None or \
+                abs(location[0] - int(target[0])) > drift[0] or \
+                abs(location[1] - int(target[1])) > drift[1]:
+            return None, False
+        return tuple(map(int, location)), hovered
+
+    def _auto_relogin_pointer_page_verified(self, page, target):
+        """Return a current safe click target only for the classified page."""
+        location, _ = self._auto_relogin_pointer_page_evidence(page, target)
+        return location
+
+    def _auto_relogin_cursor_over_target(self, page, cursor, target):
+        """Return whether the cursor hotspot is inside a hovered button."""
+        if page not in {"world", "character"} or cursor is None or \
+                target is None:
+            return False
+        template = getattr(self, "_auto_relogin_templates", {}).get(page)
+        if template is None or not hasattr(template, "shape") or \
+                len(template.shape) < 2:
+            return False
+        template_h, template_w = map(int, template.shape[:2])
+        if min(template_h, template_w) <= 0:
+            return False
+        left = int(target[0]) - template_w // 2
+        top = int(target[1]) - template_h // 2
+        return (
+            left <= int(cursor[0]) < left + template_w
+            and top <= int(cursor[1]) < top + template_h
+        )
+
+    def _auto_relogin_pointer_delta(self, error, tolerance):
+        """Convert capture-space error to one bounded relative HID nudge."""
+        gain = self._auto_relogin_number(
+            "mouse_move_gain", 0.35, minimum=0.001
+        )
+        maximum = min(
+            127,
+            max(
+                1,
+                int(round(self._auto_relogin_number(
+                    "mouse_max_delta", 64, minimum=1
+                ))),
+            ),
+        )
+
+        def axis_delta(axis_error, axis_tolerance):
+            if abs(axis_error) <= axis_tolerance:
+                return 0
+            magnitude = max(
+                1,
+                min(maximum, int(round(abs(axis_error) * gain))),
+            )
+            return magnitude if axis_error > 0 else -magnitude
+
+        return (
+            axis_delta(float(error[0]), float(tolerance[0])),
+            axis_delta(float(error[1]), float(tolerance[1])),
+        )
+
+    def _locate_auto_relogin_cursor(self):
+        """Return one uniquely verified cursor hotspot in capture coordinates."""
+        pointer_page = getattr(self, "_auto_relogin_pointer_page", None)
+        if pointer_page == "disconnect":
+            # The title client has been observed switching between compact and
+            # large hand cursors on the same disconnect page. Validate both;
+            # the shared strict score/uniqueness gates reject the wrong size.
+            tracker_candidates = (
+                (
+                    "compact",
+                    getattr(
+                        self,
+                        "_auto_relogin_disconnect_cursor_tracker",
+                        None,
+                    ),
+                ),
+                (
+                    "large",
+                    getattr(self, "_auto_relogin_cursor_tracker", None),
+                ),
+            )
+        elif pointer_page in {"world", "channel", "character"}:
+            tracker_candidates = ((
+                "large",
+                getattr(self, "_auto_relogin_cursor_tracker", None),
+            ),)
+        else:
+            # Connect is keyboard-only, and an unknown page must never inherit
+            # a cursor model that could authorize a click on the wrong screen.
+            return None
+        tracker_candidates = tuple(
+            (label, tracker)
+            for label, tracker in tracker_candidates
+            if tracker is not None
+        )
+        frame = getattr(self, "img_frame", None)
+        if not tracker_candidates or frame is None:
+            return None
+
+        previous = getattr(
+            self, "_auto_relogin_pointer_last_cursor", None
+        )
+        local_radius = None
+        if previous is not None:
+            local_radius = self._auto_relogin_scale_vector(
+                self._auto_relogin_config().get(
+                    "cursor_local_search_radius", (450, 450)
+                ),
+                minimum=1,
+            )
+        configured_region = self._auto_relogin_config().get(
+            "cursor_search_region"
+        )
+        search_region = self._auto_relogin_scale_region(configured_region) \
+            if configured_region is not None else None
+        # After the first rescue command, use the configured right-edge strip.
+        # The shipped remote profile deliberately makes this the full frame so
+        # a hand cursor seen anywhere during the vertical scan is not missed.
+        # Once found, normal local/global tracking resumes.
+        if previous is None and getattr(
+                self, "_auto_relogin_pointer_rescue_index", 0) > 0:
+            rescue_width = self._auto_relogin_scale_vector((
+                int(round(self._auto_relogin_number(
+                    "mouse_cursor_rescue_search_width", 1200, minimum=1
+                ))),
+                1,
+            ), minimum=1)
+            if rescue_width is not None:
+                frame_h, frame_w = frame.shape[:2]
+                rescue_region = (
+                    max(0, frame_w - rescue_width[0]),
+                    0,
+                    frame_w,
+                    frame_h,
+                )
+                if search_region is None:
+                    search_region = rescue_region
+                else:
+                    search_region = (
+                        max(search_region[0], rescue_region[0]),
+                        max(search_region[1], rescue_region[1]),
+                        min(search_region[2], rescue_region[2]),
+                        min(search_region[3], rescue_region[3]),
+                    )
+        matches = []
+        for label, tracker in tracker_candidates:
+            try:
+                match = tracker.locate(
+                    frame,
+                    previous_hotspot=previous,
+                    local_radius=local_radius,
+                    search_region=search_region,
+                )
+                # A nonlinear Windows/Magpie step can occasionally leave the
+                # conservative local window. Fall back to one globally unique
+                # match before declaring the cursor missing or nudging it.
+                if match is None and previous is not None:
+                    match = tracker.locate(
+                        frame,
+                        search_region=search_region,
+                    )
+            except (cv2.error, TypeError, ValueError) as exc:
+                logger.warning(
+                    "[auto_relogin] Cursor localization failed for "
+                    f"{label} template: {exc}"
+                )
+                continue
+            if match is not None:
+                matches.append((label, tracker, match))
+
+        if not matches:
+            return None
+        if len(matches) > 1:
+            tolerance = self._auto_relogin_scale_vector(
+                self._auto_relogin_config().get(
+                    "mouse_target_tolerance", (18, 18)
+                ),
+                minimum=1,
+            ) or (1, 1)
+            hotspots = [match.hotspot for _, _, match in matches]
+            if any(
+                    abs(hotspot[0] - hotspots[0][0]) > tolerance[0]
+                    or abs(hotspot[1] - hotspots[0][1]) > tolerance[1]
+                    for hotspot in hotspots[1:]):
+                logger.warning(
+                    "[auto_relogin] Compact and large cursor templates "
+                    f"disagreed: {hotspots}"
+                )
+                return None
+
+        def reliability(item):
+            """Prefer the match with the strongest weakest safety margin."""
+            _, tracker, candidate = item
+            min_score = getattr(tracker, "min_score", 0.90)
+            uniqueness_margin = getattr(
+                tracker, "uniqueness_margin", 0.02
+            )
+            if not isinstance(min_score, (int, float)):
+                min_score = 0.90
+            if not isinstance(uniqueness_margin, (int, float)):
+                uniqueness_margin = 0.02
+            return (
+                min(
+                    candidate.score - float(min_score),
+                    candidate.uniqueness - float(uniqueness_margin),
+                ),
+                candidate.score,
+            )
+
+        label, _, match = max(matches, key=reliability)
+        previous_variant = getattr(
+            self, "_auto_relogin_pointer_cursor_variant", None
+        )
+        if previous_variant is not None and label != previous_variant:
+            # A different template cannot inherit a prior candidate's click
+            # qualification, even when both estimate nearly the same hotspot.
+            self._auto_relogin_pointer_motion_verified = False
+            self._auto_relogin_pointer_aligned_count = 0
+            logger.info(
+                "[auto_relogin] Cursor size changed from "
+                f"{previous_variant} to {label}; motion proof reset"
+            )
+        self._auto_relogin_pointer_cursor_variant = label
+        logger.debug(
+            f"[auto_relogin] Cursor hotspot ({label}) "
+            f"{match.hotspot}, score={match.score:.4f}, "
+            f"uniqueness={match.uniqueness:.4f}"
+        )
+        return tuple(map(int, match.hotspot))
+
+    def _auto_relogin_dispatch_time(self, *, pointer=False):
+        """Return a fresh dispatch time only while every deadline is valid."""
+        dispatch_at = time.monotonic()
+        if getattr(self, "is_terminated", False) or not \
+                self._auto_relogin_control_available():
+            self._fail_auto_relogin("recovery input became unavailable")
+            return None
+
+        started_at = getattr(self, "_auto_relogin_started_at", None)
+        if started_at is not None and dispatch_at - started_at >= \
+                self._auto_relogin_number(
+                    "max_recovery_duration", 300.0, minimum=1.0
+                ):
+            self._fail_auto_relogin("the recovery time limit was exceeded")
+            return None
+        step_started_at = getattr(
+            self, "_auto_relogin_step_started_at", None
+        )
+        if step_started_at is not None and dispatch_at - step_started_at >= \
+                self._auto_relogin_number(
+                    "step_timeout", 60.0, minimum=1.0
+                ):
+            self._fail_auto_relogin(
+                "the current login page did not advance in time"
+            )
+            return None
+        if pointer:
+            pointer_started_at = getattr(
+                self, "_auto_relogin_pointer_started_at", None
+            )
+            if pointer_started_at is None or \
+                    dispatch_at - pointer_started_at >= \
+                    self._auto_relogin_number(
+                        "mouse_pointer_timeout", 20.0, minimum=1.0
+                    ):
+                self._fail_auto_relogin(
+                    "visual pointer positioning timed out"
+                )
+                return None
+        return dispatch_at
+
+    def _auto_relogin_pointer_feedback_ready(self, frame_token):
+        """Accept only capture frames acquired after the last HID movement."""
+        moved_at = getattr(
+            self, "_auto_relogin_pointer_last_move_at", None
+        )
+        if moved_at is None:
+            return True
+        try:
+            captured_at = float(frame_token[1])
+        except (TypeError, ValueError, IndexError):
+            return False
+        if not np.isfinite(captured_at) or captured_at <= moved_at:
+            return False
+        self._auto_relogin_pointer_feedback_frames = getattr(
+            self, "_auto_relogin_pointer_feedback_frames", 0
+        ) + 1
+        required_frames = max(
+            1,
+            int(round(self._auto_relogin_number(
+                "mouse_feedback_frames", 1, minimum=1
+            ))),
+        )
+        required_delay = self._auto_relogin_number(
+            "mouse_feedback_delay", 0.20, minimum=0.0
+        )
+        return self._auto_relogin_pointer_feedback_frames >= \
+            required_frames and captured_at - moved_at >= required_delay
+
+    def _auto_relogin_pointer_response(self, origin, cursor, command):
+        """Return observed motion and whether it proves cursor identity."""
+        observed = (
+            int(cursor[0]) - int(origin[0]),
+            int(cursor[1]) - int(origin[1]),
+        )
+        observed_norm = float(np.hypot(*observed))
+        command_norm = float(np.hypot(*command))
+        minimum = self._auto_relogin_number(
+            "mouse_response_min_pixels", 2.0, minimum=1.0
+        )
+        if observed_norm < minimum or command_norm <= 0:
+            return observed, False
+        cosine = (
+            observed[0] * command[0] + observed[1] * command[1]
+        ) / (observed_norm * command_norm)
+        required_cosine = min(
+            1.0,
+            self._auto_relogin_number(
+                "mouse_response_min_cosine", 0.50, minimum=0.001
+            ),
+        )
+        return observed, bool(
+            np.isfinite(cosine) and cosine >= required_cosine
+        )
+
+    def _auto_relogin_pointer_probe_delta(self, cursor):
+        """Choose a small inward movement that can identify the real cursor."""
+        frame = getattr(self, "img_frame", None)
+        if frame is None:
+            return None
+        amount = min(
+            127,
+            max(
+                2,
+                int(round(self._auto_relogin_number(
+                    "mouse_probe_delta", 8, minimum=2
+                ))),
+            ),
+        )
+        frame_h, frame_w = frame.shape[:2]
+        if frame_w >= frame_h or frame_h <= amount * 2:
+            return (amount if cursor[0] < frame_w // 2 else -amount, 0)
+        return (0, amount if cursor[1] < frame_h // 2 else -amount)
+
+    def _send_auto_relogin_pointer_move(self, cursor, delta, reason):
+        """Send one bounded relative move and bind its actual dispatch time."""
+        if cursor is None or delta is None or tuple(delta) == (0, 0):
+            return False
+        keyboard_controller = getattr(self, "kb", None)
+        if keyboard_controller is None or not hasattr(
+                keyboard_controller, "move_session_recovery_mouse"):
+            self._fail_auto_relogin(
+                "remote relative mouse movement is unavailable"
+            )
+            return False
+        if self._auto_relogin_dispatch_time(pointer=True) is None:
+            return False
+        sent = bool(keyboard_controller.move_session_recovery_mouse(*delta))
+        dispatched_at = time.monotonic()
+        if not sent:
+            self._auto_relogin_pointer_next_input_at = dispatched_at + \
+                self._auto_relogin_number("input_retry_delay", 1.0)
+            return False
+
+        self._auto_relogin_pointer_move_origin = tuple(map(int, cursor))
+        self._auto_relogin_pointer_last_command = tuple(map(int, delta))
+        self._auto_relogin_pointer_last_move_at = dispatched_at
+        self._auto_relogin_pointer_feedback_frames = 0
+        self._auto_relogin_pointer_move_count = getattr(
+            self, "_auto_relogin_pointer_move_count", 0
+        ) + 1
+        logger.debug(
+            f"[auto_relogin] {reason}: cursor {cursor}, relative move {delta}"
+        )
+        return True
+
+    def _auto_relogin_cursor_rescue_deltas(self):
+        """Return the configured no-click, multi-monitor rescue path."""
+        configured = self._auto_relogin_config().get(
+            "mouse_cursor_rescue_deltas",
+            (
+                (4096, 0),
+                (4096, 0),
+                (-127, 0),
+                (0, -64),
+                (0, 128),
+                (0, -192),
+                (0, 256),
+                (0, -320),
+                (0, 384),
+                (0, -448),
+                (0, 512),
+            ),
+        )
+        return configured if isinstance(configured, (list, tuple)) else ()
+
+    def _auto_relogin_cursor_rescue_available(self):
+        configured = self._auto_relogin_cursor_rescue_deltas()
+        index = getattr(self, "_auto_relogin_pointer_rescue_index", 0)
+        return index < len(configured)
+
+    def _send_auto_relogin_cursor_rescue(self, now):
+        """Home an unseen pointer onto the main display without clicking."""
+        configured = self._auto_relogin_cursor_rescue_deltas()
+        index = getattr(self, "_auto_relogin_pointer_rescue_index", 0)
+        if index >= len(configured):
+            return False
+        try:
+            dx, dy = configured[index]
+            dx, dy = int(dx), int(dy)
+        except (TypeError, ValueError, IndexError, OverflowError):
+            return False
+        dx = max(
+            -RELATIVE_MOUSE_MAX_DELTA,
+            min(RELATIVE_MOUSE_MAX_DELTA, dx),
+        )
+        dy = max(
+            -RELATIVE_MOUSE_MAX_DELTA,
+            min(RELATIVE_MOUSE_MAX_DELTA, dy),
+        )
+        if dx == 0 and dy == 0:
+            return False
+        keyboard_controller = getattr(self, "kb", None)
+        if keyboard_controller is None or not hasattr(
+                keyboard_controller, "move_session_recovery_mouse"):
+            return False
+        if self._auto_relogin_dispatch_time(pointer=True) is None:
+            return False
+        sent = bool(keyboard_controller.move_session_recovery_mouse(dx, dy))
+        dispatched_at = time.monotonic()
+        # A rescue acts on an unseen pointer, so no previously verified cursor
+        # identity can survive it. The next visible candidate must be probed.
+        self._auto_relogin_pointer_motion_verified = False
+        self._auto_relogin_pointer_aligned_count = 0
+        if not sent:
+            self._auto_relogin_pointer_next_input_at = dispatched_at + \
+                self._auto_relogin_number("input_retry_delay", 1.0)
+            return False
+        self._auto_relogin_pointer_rescue_index = index + 1
+        self._auto_relogin_pointer_last_command = (dx, dy)
+        self._auto_relogin_pointer_move_origin = None
+        self._auto_relogin_pointer_last_move_at = dispatched_at
+        self._auto_relogin_pointer_feedback_frames = 0
+        self._auto_relogin_pointer_move_count = getattr(
+            self, "_auto_relogin_pointer_move_count", 0
+        ) + 1
+        logger.info(
+            f"[auto_relogin] Cursor was not visible; sent safe rescue "
+            f"movement {(dx, dy)} "
+            f"({index + 1}/{len(configured)})"
+        )
+        return True
+
+    def _advance_auto_relogin_pointer_action(self, now, frame_token):
+        """Advance one fresh-frame step of visual relative mouse aiming."""
+        if not isinstance(frame_token, tuple) or not frame_token or \
+                frame_token[0] != "capture":
+            self._fail_auto_relogin(
+                "visual pointer control has no fresh capture-frame token"
+            )
+            return False
+        if frame_token == getattr(
+                self, "_auto_relogin_pointer_last_frame_token", None):
+            return False
+        self._auto_relogin_pointer_last_frame_token = frame_token
+
+        page = getattr(self, "_auto_relogin_pointer_page", None)
+        target = getattr(self, "_auto_relogin_pointer_target", None)
+        started_at = getattr(
+            self, "_auto_relogin_pointer_started_at", None
+        )
+        frame = getattr(self, "img_frame", None)
+        if page is None or target is None or started_at is None or frame is None:
+            self._fail_auto_relogin("visual pointer state is incomplete")
+            return False
+        if tuple(frame.shape[:2]) != getattr(
+                self, "_auto_relogin_pointer_frame_shape", None):
+            self._fail_auto_relogin(
+                "capture geometry changed during visual pointer control"
+            )
+            return False
+        if now - started_at >= self._auto_relogin_number(
+                "mouse_pointer_timeout", 20.0, minimum=1.0):
+            self._fail_auto_relogin("visual pointer positioning timed out")
+            return False
+
+        verified_target, target_hovered = \
+            self._auto_relogin_pointer_page_evidence(
+            page, target
+        )
+        if verified_target is None:
+            classified_page, _ = self._find_known_auto_relogin_page()
+            next_page = {
+                "disconnect": "connect",
+                "world": "channel",
+                "channel": "character",
+            }.get(page)
+            if getattr(
+                    self, "_auto_relogin_has_attempted_input", False
+                    ) and getattr(
+                        self, "_auto_relogin_last_action_page", None
+                    ) == page and classified_page == next_page:
+                # The one-shot click may have executed even if its serial ACK
+                # was lost. A classified successor is the only safe proof.
+                return self._complete_auto_relogin_page_action(
+                    page, time.monotonic(), next_page
+                )
+            if page == "character" and getattr(
+                    self, "_auto_relogin_has_attempted_input", False
+                    ) and self._auto_relogin_current_gameplay_evidence() \
+                    is not None:
+                return self._complete_auto_relogin_page_action(
+                    page, time.monotonic(), None
+                )
+            if classified_page is not None:
+                self._fail_auto_relogin(
+                    f"classified {classified_page} while aiming for {page}"
+                )
+                return False
+            self._auto_relogin_pointer_page_misses = getattr(
+                self, "_auto_relogin_pointer_page_misses", 0
+            ) + 1
+            self._auto_relogin_pointer_aligned_count = 0
+            miss_limit = max(
+                1,
+                int(round(self._auto_relogin_number(
+                    "mouse_page_miss_limit", 3, minimum=1
+                ))),
+            )
+            if self._auto_relogin_pointer_page_misses >= miss_limit:
+                self._fail_auto_relogin(
+                    f"{page} page disappeared while positioning the pointer"
+                )
+            return False
+        self._auto_relogin_pointer_page_misses = 0
+        verified_target = tuple(map(int, verified_target))
+        if verified_target != tuple(map(int, target)):
+            self._auto_relogin_pointer_target = verified_target
+            self._auto_relogin_pointer_aligned_count = 0
+            target = verified_target
+
+        feedback_ready = self._auto_relogin_pointer_feedback_ready(frame_token)
+        if not feedback_ready:
+            return False
+
+        cursor = self._locate_auto_relogin_cursor()
+        if cursor is None:
+            self._auto_relogin_pointer_motion_verified = False
+            self._auto_relogin_pointer_cursor_misses = getattr(
+                self, "_auto_relogin_pointer_cursor_misses", 0
+            ) + 1
+            self._auto_relogin_pointer_aligned_count = 0
+            miss_limit = max(
+                1,
+                int(round(self._auto_relogin_number(
+                    "mouse_cursor_miss_limit", 5, minimum=1
+                ))),
+            )
+            if now >= getattr(
+                    self, "_auto_relogin_pointer_next_input_at", 0.0):
+                if self._send_auto_relogin_cursor_rescue(now):
+                    # The scripted right-edge homing/vertical scan must be
+                    # allowed to finish even when the ordinary miss limit is
+                    # smaller than the rescue path.  Once the path is
+                    # exhausted, misses are bounded again below.
+                    self._auto_relogin_pointer_cursor_misses = 0
+                    return False
+            if self._auto_relogin_cursor_rescue_available():
+                return False
+            if self._auto_relogin_pointer_cursor_misses >= miss_limit:
+                self._fail_auto_relogin(
+                    "the mouse cursor could not be located reliably"
+                )
+            return False
+        self._auto_relogin_pointer_cursor_misses = 0
+
+        move_origin = getattr(
+            self, "_auto_relogin_pointer_move_origin", None
+        )
+        last_command = getattr(
+            self, "_auto_relogin_pointer_last_command", None
+        )
+        if move_origin is not None and last_command is not None:
+            observed, response_valid = self._auto_relogin_pointer_response(
+                move_origin, cursor, last_command
+            )
+            if response_valid:
+                self._auto_relogin_pointer_stall_count = 0
+                self._auto_relogin_pointer_motion_verified = True
+            else:
+                self._auto_relogin_pointer_stall_count = getattr(
+                    self, "_auto_relogin_pointer_stall_count", 0
+                ) + 1
+                self._auto_relogin_pointer_motion_verified = False
+                self._auto_relogin_pointer_aligned_count = 0
+                logger.warning(
+                    "[auto_relogin] Cursor candidate did not follow relative "
+                    f"move {last_command}; observed {observed}"
+                )
+            stall_limit = max(
+                1,
+                int(round(self._auto_relogin_number(
+                    "mouse_stall_limit", 4, minimum=1
+                ))),
+            )
+            if self._auto_relogin_pointer_stall_count >= stall_limit:
+                self._fail_auto_relogin(
+                    "visible cursor motion did not match relative HID commands"
+                )
+                return False
+        elif last_command is None:
+            previous_cursor = getattr(
+                self, "_auto_relogin_pointer_last_cursor", None
+            )
+            jump_tolerance = self._auto_relogin_scale_vector(
+                self._auto_relogin_config().get(
+                    "mouse_uncommanded_jump_tolerance", (6, 6)
+                ),
+                minimum=1,
+            )
+            if previous_cursor is not None and (
+                    jump_tolerance is None
+                    or abs(int(cursor[0]) - int(previous_cursor[0]))
+                    > jump_tolerance[0]
+                    or abs(int(cursor[1]) - int(previous_cursor[1]))
+                    > jump_tolerance[1]
+                    ):
+                self._auto_relogin_pointer_motion_verified = False
+                self._auto_relogin_pointer_aligned_count = 0
+                logger.warning(
+                    "[auto_relogin] Cursor candidate jumped without a HID "
+                    "move; identity probe required again"
+                )
+
+        self._auto_relogin_pointer_last_move_at = None
+        self._auto_relogin_pointer_feedback_frames = 0
+        self._auto_relogin_pointer_move_origin = None
+        self._auto_relogin_pointer_last_command = None
+        self._auto_relogin_pointer_last_cursor = cursor
+
+        tolerance = self._auto_relogin_scale_vector(
+            self._auto_relogin_config().get(
+                "mouse_target_tolerance", (18, 18)
+            ),
+            minimum=1,
+        )
+        if tolerance is None:
+            self._fail_auto_relogin("mouse target tolerance is invalid")
+            return False
+        error = (
+            int(target[0]) - int(cursor[0]),
+            int(target[1]) - int(cursor[1]),
+        )
+        center_aligned = abs(error[0]) <= tolerance[0] and \
+            abs(error[1]) <= tolerance[1]
+        hover_aligned = target_hovered and \
+            self._auto_relogin_cursor_over_target(page, cursor, target)
+        aligned = center_aligned or hover_aligned
+        max_moves = max(
+            1,
+            int(round(self._auto_relogin_number(
+                "mouse_max_moves", 40, minimum=1
+            ))),
+        )
+
+        if aligned:
+            if not getattr(
+                    self, "_auto_relogin_pointer_motion_verified", False):
+                # Never click a template candidate until the same candidate has
+                # visibly followed a known relative HID command.
+                self._auto_relogin_pointer_aligned_count = 0
+                if getattr(
+                        self, "_auto_relogin_pointer_move_count", 0
+                        ) >= max_moves:
+                    self._fail_auto_relogin(
+                        "visual pointer movement limit was exceeded"
+                    )
+                    return False
+                if time.monotonic() < getattr(
+                        self, "_auto_relogin_pointer_next_input_at", 0.0):
+                    return False
+                probe = self._auto_relogin_pointer_probe_delta(cursor)
+                return self._send_auto_relogin_pointer_move(
+                    cursor, probe, "cursor identity probe"
+                )
+
+            self._auto_relogin_pointer_aligned_count = getattr(
+                self, "_auto_relogin_pointer_aligned_count", 0
+            ) + 1
+            required = max(
+                1,
+                int(round(self._auto_relogin_number(
+                    "mouse_target_confirm_frames", 2, minimum=1
+                ))),
+            )
+            if self._auto_relogin_pointer_aligned_count < required:
+                return False
+            final_target, final_hovered = \
+                self._auto_relogin_pointer_page_evidence(
+                page, target
+            )
+            if final_target is None:
+                self._auto_relogin_pointer_aligned_count = 0
+                return False
+            final_target = tuple(map(int, final_target))
+            if final_target != tuple(map(int, target)):
+                self._auto_relogin_pointer_target = final_target
+                self._auto_relogin_pointer_aligned_count = 0
+                return False
+            final_error = (
+                int(final_target[0]) - int(cursor[0]),
+                int(final_target[1]) - int(cursor[1]),
+            )
+            final_ready = (
+                abs(final_error[0]) <= tolerance[0]
+                and abs(final_error[1]) <= tolerance[1]
+            ) or (
+                final_hovered
+                and self._auto_relogin_cursor_over_target(
+                    page, cursor, final_target
+                )
+            )
+            if not final_ready:
+                self._auto_relogin_pointer_aligned_count = 0
+                return False
+            keyboard_controller = getattr(self, "kb", None)
+            if keyboard_controller is None or not hasattr(
+                    keyboard_controller, "click_session_recovery_mouse"):
+                self._fail_auto_relogin(
+                    "remote current-position mouse click is unavailable"
+                )
+                return False
+            if time.monotonic() < getattr(
+                    self, "_auto_relogin_pointer_next_input_at", 0.0):
+                return False
+
+            next_page = {
+                "disconnect": "connect",
+                "world": "channel",
+                "channel": "character",
+            }.get(page)
+            duration = self._auto_relogin_number(
+                "mouse_click_duration", 0.05, minimum=0.001
+            )
+            dispatch_at = self._auto_relogin_dispatch_time(pointer=True)
+            if dispatch_at is None:
+                return False
+            try:
+                captured_at = float(frame_token[1])
+            except (TypeError, ValueError, IndexError):
+                captured_at = 0.0
+            max_frame_age = self._auto_relogin_number(
+                "mouse_click_frame_max_age", 1.0, minimum=0.05
+            )
+            if not np.isfinite(captured_at) or captured_at <= 0 or \
+                    captured_at > dispatch_at or \
+                    dispatch_at - captured_at > max_frame_age:
+                self._auto_relogin_pointer_aligned_count = 0
+                return False
+
+            # Mark the one-shot as consumed before dispatch. If the ACK is
+            # lost, only a classified successor may prove it executed; the
+            # same click is never blindly replayed.
+            self._auto_relogin_has_attempted_input = True
+            self._auto_relogin_last_action_page = page
+            self._auto_relogin_expected_page = next_page
+            sent = bool(keyboard_controller.click_session_recovery_mouse(
+                button="left", duration=duration
+            ))
+            completed_at = time.monotonic()
+            if not sent:
+                self._fail_auto_relogin(
+                    f"{page} click acknowledgement was uncertain"
+                )
+                return False
+            return self._complete_auto_relogin_page_action(
+                page, completed_at, next_page
+            )
+
+        self._auto_relogin_pointer_aligned_count = 0
+        if getattr(self, "_auto_relogin_pointer_move_count", 0) >= max_moves:
+            self._fail_auto_relogin(
+                "visual pointer movement limit was exceeded"
+            )
+            return False
+        if time.monotonic() < getattr(
+                self, "_auto_relogin_pointer_next_input_at", 0.0):
+            return False
+        delta = self._auto_relogin_pointer_delta(error, tolerance)
+        return self._send_auto_relogin_pointer_move(
+            cursor,
+            delta,
+            f"target {target}, error {error}",
+        )
+
+    def _complete_auto_relogin_page_action(self, page, now, next_page):
+        """Record one consumed page action and wait for its successor."""
+        attempts = getattr(self, "_auto_relogin_action_attempts", {})
+        attempts[page] = attempts.get(page, 0) + 1
+        self._auto_relogin_action_attempts = attempts
+        self._auto_relogin_last_action_page = page
+        self._auto_relogin_last_action_at = now
+        self._auto_relogin_next_action_at = now + \
+            self._auto_relogin_number("retry_cooldown", 3.0)
+        self._auto_relogin_pending_page = None
+        self._auto_relogin_confirmation_return_state = None
+        self._auto_relogin_pending_location = None
+        self._auto_relogin_confirm_count = 0
+        self._auto_relogin_confirm_miss_count = 0
+        self._auto_relogin_confirm_started_at = None
+        self._auto_relogin_last_confirm_frame_token = None
+        self._auto_relogin_step_started_at = now
+        self._reset_auto_relogin_pointer_runtime()
+
+        if page == "character":
+            self._auto_relogin_state = "waiting_game"
+            self._auto_relogin_expected_page = None
+            self._auto_relogin_waiting_game_started_at = now
+            self._auto_relogin_ready_count = 0
+            self._auto_relogin_last_ready_frame_token = None
+            logger.info(
+                "[auto_relogin] Start Game clicked; waiting for gameplay evidence"
+            )
+        else:
+            self._auto_relogin_state = "waiting_page"
+            self._auto_relogin_expected_page = next_page
+            logger.info(
+                f"[auto_relogin] {page} action sent; waiting for {next_page} page"
+            )
+        return True
+
+    def _execute_auto_relogin_page_action(self, page, location, now):
+        """Act only on a visually confirmed page, then wait for its successor."""
+        if not self._auto_relogin_control_available():
+            logger.warning(
+                "[auto_relogin] Recovery input skipped while control is paused"
+            )
+            return False
+        if now < getattr(self, "_auto_relogin_next_action_at", 0.0):
+            return False
+
+        attempts = getattr(self, "_auto_relogin_action_attempts", {})
+        max_attempts = max(
+            1,
+            int(round(self._auto_relogin_number(
+                "max_step_attempts", 5, minimum=1
+            ))),
+        )
+        if attempts.get(page, 0) >= max_attempts:
+            self._fail_auto_relogin(f"{page} page attempts were exhausted")
+            return False
+
+        next_page = {
+            "disconnect": "connect",
+            "connect": "world",
+            "world": "channel",
+            "channel": "character",
+        }.get(page)
+        point = None
+        action = None
+        if page in {"disconnect", "connect"}:
+            # Both the disconnect confirmation dialog and the account
+            # connection page accept the currently focused action with Enter.
+            # Keeping these pages keyboard-only also avoids unnecessary cursor
+            # recovery on multi-monitor/DPI-scaled remote machines.
+            pass
+        elif page == "world":
+            point = location
+            action = "auto_relogin_select_world"
+        elif page == "channel":
+            point = self._next_auto_relogin_channel_point()
+            point = self._auto_relogin_anchor_adjusted_point(
+                page, point, location
+            )
+            action = "auto_relogin_select_channel"
+        elif page == "character":
+            point = location
+            action = "auto_relogin_start_game"
+        else:
+            return False
+
+        if page not in {"disconnect", "connect"} and \
+                self.remote_keyboard_target() and \
+                self._auto_relogin_remote_mouse_mode() == "visual_relative":
+            return self._begin_auto_relogin_pointer_action(
+                page, point, action, now
+            )
+
+        # A serial timeout can mean the HID command executed but its ACK was
+        # lost. Remember dispatch before calling the transport so a page change
+        # can never be mistaken for a harmless one-frame false positive.
+        if self._auto_relogin_dispatch_time(pointer=False) is None:
+            return False
+        self._auto_relogin_has_attempted_input = True
+        sent = self._send_auto_relogin_key() \
+            if page in {"disconnect", "connect"} else \
+            self._send_auto_relogin_click(point, action)
+        completed_at = time.monotonic()
+
+        if not sent:
+            # Preserve both possible outcomes of an uncertain transport result:
+            # retry this same visually confirmed page if it remains, or accept
+            # only its configured successor if the command actually executed.
+            self._auto_relogin_last_action_page = page
+            self._auto_relogin_expected_page = next_page
+            self._auto_relogin_next_action_at = completed_at + \
+                self._auto_relogin_number("input_retry_delay", 1.0)
+            logger.warning(f"[auto_relogin] {page} action was not sent")
+            return False
+        return self._complete_auto_relogin_page_action(
+            page, completed_at, next_page
+        )
+
+    def _fail_auto_relogin(self, reason):
+        """Fail closed after bounded retries while allowing manual recovery."""
+        self._auto_relogin_state = "failed"
+        self._reset_auto_relogin_pointer_runtime()
+        self._auto_relogin_ready_count = 0
+        self._auto_relogin_last_ready_frame_token = None
+        if not getattr(self, "_auto_relogin_failure_logged", False):
+            logger.error(
+                f"[auto_relogin] Automatic recovery stopped: {reason}. "
+                "Gameplay input remains suspended; recover manually or "
+                "restart the bot."
+            )
+            self._auto_relogin_failure_logged = True
+
+    def _reset_health_monitor_after_auto_relogin(self):
+        """Discard stale health/watchdog state before its worker is resumed."""
+        health_monitor = getattr(self, "health_monitor", None)
+        now = time.time()
+        if health_monitor is not None:
+            health_monitor.hp_percent = 100
+            health_monitor.mp_percent = 100
+            health_monitor.exp_percent = 100
+            health_monitor.t_hp_watch_dog = now
+            health_monitor.t_last_hp_reduce = now
+        keyboard_controller = getattr(self, "kb", None)
+        if keyboard_controller is not None:
+            keyboard_controller.is_need_force_heal = False
+
+    def _auto_relogin_current_gameplay_evidence(self):
+        """Return a current player dot if the game already finished loading."""
+        frame = getattr(self, "img_frame", None)
+        if frame is None:
+            return None
+        detected_result = get_minimap_loc_size(frame)
+        if not self._auto_relogin_minimap_structure_valid(detected_result):
+            return None
+
+        x, y, width, height = map(int, detected_result)
+        x += 1
+        y += 1
+        width -= 2
+        height -= 2
+        if width <= 0 or height <= 0:
+            return None
+        minimap = frame[y:y+height, x:x+width]
+        if minimap.size == 0:
+            return None
+
+        minimap_cfg = self.cfg.get("minimap", {})
+        player_color = minimap_cfg.get("player_color")
+        if player_color is None:
+            return None
+        return get_player_location_on_minimap(
+            minimap,
+            minimap_player_color=player_color,
+            color_tolerance=minimap_cfg.get("player_color_tolerance", 0),
+            min_component_area=minimap_cfg.get("player_min_component_area", 4),
+        )
+
+    def _check_auto_relogin_screen(self):
+        """Advance the screenshot-confirmed five-page recovery flow.
+
+        Returning ``True`` means recovery owns the frame, so gameplay systems
+        must remain stopped. Only ``waiting_game`` yields unknown frames to the
+        regular minimap detector; the second gate still blocks gameplay until
+        fresh player evidence has been confirmed on consecutive frames.
+        """
+        if not self._auto_relogin_enabled():
+            return False
+        if getattr(self, "is_terminated", False):
+            return True
+
+        state = getattr(self, "_auto_relogin_state", "idle")
+        now = time.monotonic()
+        frame_token = self._auto_relogin_frame_token(now)
+
+        if state == "idle":
+            page, location = self._find_known_auto_relogin_page()
+            if page is None or location is None:
+                return False
+            self._pause_gameplay_for_auto_relogin()
+            self._begin_auto_relogin_confirmation(
+                page, location, now, frame_token
+            )
+            return True
+
+        if state == "failed":
+            # Automatic input stays stopped after a bounded failure. Known
+            # login pages remain owned by recovery, while an unknown frame is
+            # allowed through so manual recovery can prove gameplay readiness.
+            page, _ = self._find_known_auto_relogin_page()
+            return page is not None
+
+        started_at = getattr(self, "_auto_relogin_started_at", None)
+        if started_at is not None and now - started_at >= \
+                self._auto_relogin_number(
+                    "max_recovery_duration", 300.0, minimum=1.0
+                ):
+            self._fail_auto_relogin("the recovery time limit was exceeded")
+            return True
+
+        if state in {"waiting_page", "confirming", "aiming"}:
+            step_started_at = getattr(
+                self, "_auto_relogin_step_started_at", None
+            )
+            if step_started_at is not None and now - step_started_at >= \
+                    self._auto_relogin_number(
+                        "step_timeout", 60.0, minimum=1.0
+                ):
+                self._fail_auto_relogin(
+                    "the current login page did not advance in time"
+                )
+                return True
+
+        if state == "aiming":
+            self._advance_auto_relogin_pointer_action(now, frame_token)
+            return True
+
+        if state == "waiting_game":
+            page, location = self._find_known_auto_relogin_page()
+            if page is None:
+                game_started_at = getattr(
+                    self, "_auto_relogin_waiting_game_started_at", now
+                )
+                if game_started_at is None:
+                    game_started_at = now
+                    self._auto_relogin_waiting_game_started_at = now
+                if now - game_started_at >= self._auto_relogin_number(
+                        "game_ready_timeout", 60.0, minimum=1.0):
+                    self._fail_auto_relogin(
+                        "gameplay evidence timed out after Start Game"
+                    )
+                    return True
+                return False
+            self._begin_auto_relogin_confirmation(
+                page, location, now, frame_token
+            )
+            state = "confirming"
+
+        elif state == "waiting_page":
+            page, location = self._find_known_auto_relogin_page()
+            allowed_pages = {
+                getattr(self, "_auto_relogin_expected_page", None),
+                getattr(self, "_auto_relogin_last_action_page", None),
+                "disconnect",
+            }
+            allowed_pages.discard(None)
+            if page is not None and page not in allowed_pages:
+                self._fail_auto_relogin(
+                    f"unexpected {page} page while waiting for "
+                    f"{getattr(self, '_auto_relogin_expected_page', None)}"
+                )
+                return True
+
+            if page is None:
+                # Only a Start Game dispatch may transition directly to play.
+                # Earlier blank/loading pages must never bypass the remaining
+                # visually confirmed login steps on a minimap false positive.
+                start_game_attempted = getattr(
+                    self, "_auto_relogin_last_action_page", None
+                ) == "character"
+                if start_game_attempted and \
+                        self._auto_relogin_current_gameplay_evidence() is not None:
+                    self._auto_relogin_state = "waiting_game"
+                    self._auto_relogin_waiting_game_started_at = now
+                    self._auto_relogin_ready_count = 0
+                    self._auto_relogin_last_ready_frame_token = None
+                    logger.info(
+                        "[auto_relogin] Gameplay appeared during a page "
+                        "transition; waiting for consecutive-frame evidence"
+                    )
+                    return False
+                return True
+
+            self._begin_auto_relogin_confirmation(
+                page, location, now, frame_token
+            )
+            state = "confirming"
+
+        if state != "confirming":
+            self._fail_auto_relogin(f"unexpected recovery state {state!r}")
+            return True
+
+        page = getattr(self, "_auto_relogin_pending_page", None)
+        classified_page, classified_location = \
+            self._find_known_auto_relogin_page()
+        location = classified_location if classified_page == page else None
+        if classified_page is not None and classified_page != page:
+            expected_page = getattr(
+                self, "_auto_relogin_expected_page", None
+            )
+            if getattr(
+                    self, "_auto_relogin_has_attempted_input", False
+                    ) and getattr(
+                        self, "_auto_relogin_last_action_page", None
+                    ) == page and classified_page == expected_page:
+                self._complete_auto_relogin_page_action(
+                    page, now, expected_page
+                )
+                return True
+            self._fail_auto_relogin(
+                f"classified {classified_page} while confirming {page}"
+            )
+            return True
+        if location is None:
+            if frame_token != getattr(
+                    self, "_auto_relogin_last_confirm_frame_token", None):
+                self._auto_relogin_confirm_miss_count = getattr(
+                    self, "_auto_relogin_confirm_miss_count", 0
+                ) + 1
+                # Confirmation frames must be consecutive. A recovered match
+                # starts both the frame count and dwell timer from scratch.
+                self._auto_relogin_confirm_count = 0
+                self._auto_relogin_confirm_started_at = None
+                self._auto_relogin_last_confirm_frame_token = frame_token
+            allowed_misses = max(
+                1,
+                int(round(self._auto_relogin_number(
+                    "cancel_confirm_misses", 2, minimum=1
+                ))),
+            )
+            if getattr(
+                    self, "_auto_relogin_confirm_miss_count", 0
+                    ) < allowed_misses:
+                return True
+
+            return_state = getattr(
+                self, "_auto_relogin_confirmation_return_state", "waiting_page"
+            )
+            self._auto_relogin_pending_page = None
+            self._auto_relogin_pending_location = None
+            self._auto_relogin_confirmation_return_state = None
+            self._auto_relogin_confirm_count = 0
+            self._auto_relogin_confirm_miss_count = 0
+            self._auto_relogin_confirm_started_at = None
+            self._auto_relogin_last_confirm_frame_token = None
+            if return_state == "idle" and not getattr(
+                    self, "_auto_relogin_has_attempted_input", False):
+                self._cancel_auto_relogin_confirmation()
+                return False
+            if return_state == "waiting_game":
+                self._auto_relogin_state = "waiting_game"
+                return False
+            self._auto_relogin_state = "waiting_page"
+            return True
+
+        self._begin_auto_relogin_confirmation(
+            page, location, now, frame_token
+        )
+        if not self._auto_relogin_confirmation_ready(now):
+            return True
+
+        self._execute_auto_relogin_page_action(
+            page,
+            getattr(self, "_auto_relogin_pending_location", location),
+            now,
+        )
+        return True
+
+    def _gate_auto_relogin_until_game_ready(self, player_location):
+        """Keep gameplay stopped until consecutive fresh player dots appear."""
+        if getattr(self, "_auto_relogin_state", "idle") not in {
+                "waiting_game", "failed"}:
+            return False
+
+        if player_location is None:
+            self._auto_relogin_ready_count = 0
+            self._auto_relogin_last_ready_frame_token = None
+            return True
+
+        frame_token = self._auto_relogin_frame_token(time.monotonic())
+        if frame_token == getattr(
+                self, "_auto_relogin_last_ready_frame_token", None):
+            return True
+        self._auto_relogin_last_ready_frame_token = frame_token
+        self._auto_relogin_ready_count = \
+            getattr(self, "_auto_relogin_ready_count", 0) + 1
+        required_frames = max(
+            1,
+            int(round(self._auto_relogin_number(
+                "game_ready_confirm_frames", 2, minimum=1
+            ))),
+        )
+        if self._auto_relogin_ready_count < required_frames:
+            return True
+
+        mode = self.cfg.get("bot", {}).get("mode", "normal")
+        resume_state = {
+            "normal": "hunting",
+            "patrol": "patrol",
+            "aux": "aux",
+        }.get(mode, "hunting")
+        self.fsm.set_init_state(resume_state)
+
+        now = time.time()
+        self.t_last_attack = now
+        self.t_watch_dog = now
+        self.t_last_minimap_update = now
+        self.red_dot_center_prev = None
+        self.is_first_frame = True
+        self.screen_player_location_valid = False
+        self._reset_health_monitor_after_auto_relogin()
+        self._restore_health_after_auto_relogin()
+        self._reset_auto_relogin_runtime()
+        self._resume_keyboard_after_auto_relogin()
+        logger.info(
+            f"[auto_relogin] Gameplay restored; resumed {resume_state} state"
+        )
+        # Start gameplay on the next completely fresh frame rather than using
+        # screen/player fields that were collected during the recovery gate.
+        return True
+
+    def _auto_relogin_minimap_structure_valid(self, detected_result):
+        """Confirm the detected minimap occupies the saved/expected region."""
+        if detected_result is None:
+            return False
+        if getattr(self, "minimap_geometry", None) is None:
+            return True
+
+        expected_image = getattr(self, "img_minimap_screen", None)
+        if expected_image is None or expected_image.size == 0:
+            return False
+        expected_x, expected_y = map(int, self.loc_minimap)
+        expected_h, expected_w = expected_image.shape[:2]
+
+        detected_x, detected_y, detected_w, detected_h = map(
+            int, detected_result
+        )
+        # The legacy detector includes the one-pixel white border while saved
+        # geometry stores the border-free raster used by route matching.
+        detected_x += 1
+        detected_y += 1
+        detected_w -= 2
+        detected_h -= 2
+        if min(detected_w, detected_h) <= 0:
+            return False
+
+        tolerance_x = max(4, int(round(expected_w * 0.10)))
+        tolerance_y = max(4, int(round(expected_h * 0.10)))
+        return (
+            abs(detected_x - expected_x) <= tolerance_x
+            and abs(detected_y - expected_y) <= tolerance_y
+            and abs(detected_w - expected_w) <= tolerance_x
+            and abs(detected_h - expected_h) <= tolerance_y
+        )
+
     def suspend_input_for_capture_loss(self):
         """Fail closed once when the capture stream becomes stale."""
         if self.kb is None or getattr(self, "_input_suspended_for_capture", False):
             return False
-        self._reset_stationary_jump_alignment()
+        self._reset_ladder_route_hold()
+        self._reset_stationary_jump_proximity()
         self._reset_rope_climb(clear_locks=True)
         self._reset_portal_sweep()
         self.kb.set_command("none none none")
@@ -485,6 +2325,365 @@ class MapleStoryAutoBot:
                 f"{monster_backend}"
             )
             return -1
+
+        auto_relogin_cfg = cfg.get("auto_relogin")
+        if auto_relogin_cfg is not None:
+            if not isinstance(auto_relogin_cfg, dict):
+                logger.error("[load_config] auto_relogin must be a mapping")
+                return -1
+            if not isinstance(
+                    auto_relogin_cfg.get("enable", False), bool):
+                logger.error(
+                    "[load_config] auto_relogin.enable must be true or false"
+                )
+                return -1
+            numeric_fields = {
+                "confirm_frames": (1.0, True),
+                "confirm_seconds": (0.0, False),
+                "cancel_confirm_misses": (1.0, True),
+                "input_retry_delay": (0.0, False),
+                "retry_cooldown": (0.0, False),
+                "step_timeout": (1.0, False),
+                "game_ready_timeout": (1.0, False),
+                "max_recovery_duration": (1.0, False),
+                "max_step_attempts": (1.0, True),
+                "game_ready_confirm_frames": (1.0, True),
+                "mouse_click_duration": (0.001, False),
+                "cursor_min_score": (0.0, False),
+                "cursor_uniqueness_margin": (0.0, False),
+                "cursor_mask_erode_pixels": (0.0, True),
+                "cursor_min_visible_fraction": (0.001, False),
+                "cursor_min_visible_pixels": (1.0, True),
+                "mouse_move_gain": (0.001, False),
+                "mouse_max_delta": (1.0, True),
+                "mouse_target_confirm_frames": (1.0, True),
+                "mouse_probe_delta": (2.0, True),
+                "mouse_response_min_pixels": (1.0, False),
+                "mouse_response_min_cosine": (0.001, False),
+                "mouse_feedback_delay": (0.0, False),
+                "mouse_feedback_frames": (1.0, True),
+                "mouse_click_frame_max_age": (0.05, False),
+                "mouse_pointer_timeout": (1.0, False),
+                "mouse_max_moves": (1.0, True),
+                "mouse_cursor_miss_limit": (1.0, True),
+                "mouse_cursor_rescue_search_width": (1.0, True),
+                "mouse_page_miss_limit": (1.0, True),
+                "mouse_stall_limit": (1.0, True),
+                "mouse_hover_template_correlation": (0.0, False),
+                "template_threshold": (0.0, False),
+            }
+            for field_name, (minimum, integer_only) in numeric_fields.items():
+                if field_name not in auto_relogin_cfg:
+                    continue
+                value = auto_relogin_cfg[field_name]
+                if isinstance(value, bool) or not isinstance(
+                        value, (int, float)) or not np.isfinite(value) or \
+                        value < minimum or (
+                            integer_only and float(value) != int(value)
+                        ):
+                    kind = "integer" if integer_only else "number"
+                    logger.error(
+                        f"[load_config] auto_relogin.{field_name} must be a "
+                        f"finite {kind} >= {minimum:g}"
+                    )
+                    return -1
+            threshold = auto_relogin_cfg.get("template_threshold", 0.03)
+            if isinstance(threshold, bool) or not isinstance(
+                    threshold, (int, float)) or not np.isfinite(threshold) or \
+                    not 0.0 < float(threshold) <= 1.0:
+                logger.error(
+                    "[load_config] auto_relogin.template_threshold must be "
+                    "a finite number in (0, 1]"
+                )
+                return -1
+
+            remote_mouse_mode = str(auto_relogin_cfg.get(
+                "remote_mouse_mode", "absolute"
+            )).strip().lower()
+            if remote_mouse_mode not in {"absolute", "visual_relative"}:
+                logger.error(
+                    "[load_config] auto_relogin.remote_mouse_mode must be "
+                    "absolute or visual_relative"
+                )
+                return -1
+            bounded_unit_fields = (
+                "cursor_min_score",
+                "cursor_uniqueness_margin",
+                "cursor_min_visible_fraction",
+                "mouse_hover_template_correlation",
+                "mouse_response_min_cosine",
+            )
+            for field_name in bounded_unit_fields:
+                if field_name not in auto_relogin_cfg:
+                    continue
+                value = float(auto_relogin_cfg[field_name])
+                lower_ok = value > 0.0
+                if not lower_ok or value > 1.0:
+                    logger.error(
+                        f"[load_config] auto_relogin.{field_name} must be "
+                        "in the range 0..1"
+                    )
+                    return -1
+            if int(auto_relogin_cfg.get("mouse_max_delta", 64)) > 127:
+                logger.error(
+                    "[load_config] auto_relogin.mouse_max_delta must be <= 127"
+                )
+                return -1
+            if int(auto_relogin_cfg.get("mouse_probe_delta", 8)) > 127:
+                logger.error(
+                    "[load_config] auto_relogin.mouse_probe_delta must be <= 127"
+                )
+                return -1
+
+            for reference_name, default_reference in (
+                    ("template_reference_size", (700, 1296)),
+                    ("flow_template_reference_size", (2013, 3579))):
+                reference = auto_relogin_cfg.get(
+                    reference_name, default_reference
+                )
+                if not isinstance(reference, (list, tuple)) or \
+                        len(reference) != 2 or any(
+                            isinstance(value, bool)
+                            or not isinstance(value, int)
+                            or value < 1
+                            for value in reference
+                        ):
+                    logger.error(
+                        f"[load_config] auto_relogin.{reference_name} must be "
+                        "[positive height, positive width]"
+                    )
+                    return -1
+
+            required_pages = {
+                "disconnect", "connect", "world", "channel", "character"
+            }
+            flow_reference = auto_relogin_cfg.get(
+                "flow_template_reference_size", (2013, 3579)
+            )
+            reference_h, reference_w = flow_reference
+
+            def valid_flow_point(value):
+                return isinstance(value, (list, tuple)) and len(value) == 2 \
+                    and all(
+                        not isinstance(coord, bool)
+                        and isinstance(coord, int)
+                        for coord in value
+                    ) and 0 <= value[0] < reference_w \
+                    and 0 <= value[1] < reference_h
+
+            page_templates = auto_relogin_cfg.get("page_templates")
+            page_regions = auto_relogin_cfg.get("page_search_regions")
+            if auto_relogin_cfg.get("enable", False):
+                if not isinstance(page_templates, dict) or any(
+                        not isinstance(page_templates.get(page), str)
+                        or not page_templates[page].strip()
+                        for page in required_pages):
+                    logger.error(
+                        "[load_config] auto_relogin.page_templates must define "
+                        "non-empty paths for all five recovery pages"
+                    )
+                    return -1
+                if not isinstance(page_regions, dict):
+                    logger.error(
+                        "[load_config] auto_relogin.page_search_regions must "
+                        "be a mapping"
+                    )
+                    return -1
+                for page in required_pages:
+                    region = page_regions.get(page)
+                    if not isinstance(region, (list, tuple)) or \
+                            len(region) != 4 or any(
+                                isinstance(coord, bool)
+                                or not isinstance(coord, int)
+                                for coord in region
+                            ) or not (
+                                0 <= region[0] < region[2] <= reference_w
+                                and 0 <= region[1] < region[3] <= reference_h
+                            ):
+                        logger.error(
+                            "[load_config] auto_relogin.page_search_regions."
+                            f"{page} must be [x0, y0, x1, y1] inside the "
+                            "flow reference frame"
+                        )
+                        return -1
+                confirm_point = auto_relogin_cfg.get(
+                    "disconnect_confirm_point"
+                )
+                if not valid_flow_point(confirm_point):
+                    logger.error(
+                        "[load_config] auto_relogin.disconnect_confirm_point "
+                        "must be [x, y] inside the flow reference frame"
+                    )
+                    return -1
+                channel_points = auto_relogin_cfg.get("channel_points")
+                if not isinstance(channel_points, (list, tuple)) or \
+                        not channel_points or any(
+                            not valid_flow_point(point)
+                            for point in channel_points
+                        ):
+                    logger.error(
+                        "[load_config] auto_relogin.channel_points must be a "
+                        "non-empty list of [x, y] points inside the flow frame"
+                    )
+                    return -1
+                page_anchors = auto_relogin_cfg.get("page_anchor_points")
+                if not isinstance(page_anchors, dict) or any(
+                        not valid_flow_point(page_anchors.get(page))
+                        for page in ("disconnect", "channel")
+                        ):
+                    logger.error(
+                        "[load_config] auto_relogin.page_anchor_points must "
+                        "define valid disconnect and channel [x, y] anchors"
+                    )
+                    return -1
+                if remote_mouse_mode == "visual_relative":
+                    cursor_template = auto_relogin_cfg.get(
+                        "cursor_template"
+                    )
+                    if not isinstance(cursor_template, str) or not \
+                            cursor_template.strip():
+                        logger.error(
+                            "[load_config] auto_relogin.cursor_template must "
+                            "be a non-empty path in visual_relative mode"
+                        )
+                        return -1
+
+                    def valid_pair(value, *, allow_zero=False):
+                        minimum = 0 if allow_zero else 1
+                        return isinstance(value, (list, tuple)) and \
+                            len(value) == 2 and all(
+                                not isinstance(coord, bool)
+                                and isinstance(coord, int)
+                                and coord >= minimum
+                                for coord in value
+                            )
+
+                    for field_name, default_value in (
+                            ("cursor_hotspot", (13, 6)),
+                            (
+                                "disconnect_cursor_hotspot",
+                                (9, 4),
+                            )):
+                        if not valid_pair(
+                                auto_relogin_cfg.get(
+                                    field_name, default_value
+                                ),
+                                allow_zero=True):
+                            logger.error(
+                                f"[load_config] auto_relogin.{field_name} "
+                                "must be [non-negative x, non-negative y]"
+                            )
+                            return -1
+                    disconnect_cursor_template = auto_relogin_cfg.get(
+                        "disconnect_cursor_template"
+                    )
+                    if not isinstance(disconnect_cursor_template, str) or \
+                            not disconnect_cursor_template.strip():
+                        logger.error(
+                            "[load_config] auto_relogin."
+                            "disconnect_cursor_template must be a non-empty "
+                            "path in visual_relative mode"
+                        )
+                        return -1
+                    for field_name, default_value in (
+                            ("cursor_local_search_radius", (450, 450)),
+                            ("mouse_target_tolerance", (18, 18)),
+                            ("mouse_target_drift", (50, 50)),
+                            ("mouse_uncommanded_jump_tolerance", (6, 6))):
+                        if not valid_pair(auto_relogin_cfg.get(
+                                field_name, default_value)):
+                            logger.error(
+                                f"[load_config] auto_relogin.{field_name} "
+                                "must be [positive x, positive y]"
+                            )
+                            return -1
+                    cursor_region = auto_relogin_cfg.get(
+                        "cursor_search_region"
+                    )
+                    if cursor_region is not None and (
+                            not isinstance(cursor_region, (list, tuple))
+                            or len(cursor_region) != 4
+                            or any(
+                                isinstance(coord, bool)
+                                or not isinstance(coord, int)
+                                for coord in cursor_region
+                            )
+                            or not (
+                                0 <= cursor_region[0] < cursor_region[2]
+                                <= reference_w
+                                and 0 <= cursor_region[1] < cursor_region[3]
+                                <= reference_h
+                            )):
+                        logger.error(
+                            "[load_config] auto_relogin.cursor_search_region "
+                            "must be [x0, y0, x1, y1] inside the flow frame"
+                        )
+                        return -1
+                    rescue_deltas = auto_relogin_cfg.get(
+                        "mouse_cursor_rescue_deltas",
+                        (
+                            (4096, 0),
+                            (4096, 0),
+                            (-127, 0),
+                            (0, -64),
+                            (0, 128),
+                            (0, -192),
+                            (0, 256),
+                            (0, -320),
+                            (0, 384),
+                            (0, -448),
+                            (0, 512),
+                        ),
+                    )
+                    if not isinstance(rescue_deltas, (list, tuple)) or \
+                            not rescue_deltas or any(
+                                not isinstance(delta, (list, tuple))
+                                or len(delta) != 2
+                                or any(
+                                    isinstance(coord, bool)
+                                    or not isinstance(coord, int)
+                                    or not -RELATIVE_MOUSE_MAX_DELTA <= coord
+                                    <= RELATIVE_MOUSE_MAX_DELTA
+                                    for coord in delta
+                                )
+                                or tuple(delta) == (0, 0)
+                                for delta in rescue_deltas
+                            ):
+                        logger.error(
+                            "[load_config] auto_relogin."
+                            "mouse_cursor_rescue_deltas must contain non-zero "
+                            "[dx, dy] pairs in "
+                            f"-{RELATIVE_MOUSE_MAX_DELTA}.."
+                            f"{RELATIVE_MOUSE_MAX_DELTA}"
+                        )
+                        return -1
+            remote_confirm_key = auto_relogin_cfg.get(
+                "remote_confirm_key", "enter"
+            )
+            if not isinstance(remote_confirm_key, str) or not \
+                    remote_confirm_key.strip():
+                logger.error(
+                    "[load_config] auto_relogin.remote_confirm_key must be "
+                    "a non-empty key name"
+                )
+                return -1
+            try:
+                usage_from_text(remote_confirm_key.strip())
+            except ValueError as exc:
+                logger.error(
+                    "[load_config] Invalid auto_relogin.remote_confirm_key "
+                    f"{remote_confirm_key!r}: {exc}"
+                )
+                return -1
+        for field_name in ("min_box_width", "min_box_height"):
+            value = monster_cfg.get(field_name, 0)
+            if isinstance(value, bool) or not isinstance(value, (int, float)) \
+                    or value < 0:
+                logger.error(
+                    f"[load_config] monster_detect.{field_name} must be a "
+                    "non-negative number"
+                )
+                return -1
 
         directional_aoe_cfg = cfg.get("directional_aoe", {})
         directional_aoe_enabled = directional_aoe_cfg.get("enable", False)
@@ -550,6 +2749,95 @@ class MapleStoryAutoBot:
                         "a non-negative number"
                     )
                     return -1
+            hp_bar_cfg = power_knockback_cfg.get("hp_bar_supplement", {})
+            hp_bar_enabled = hp_bar_cfg.get("enable", False)
+            if not isinstance(hp_bar_enabled, bool):
+                logger.error(
+                    "[load_config] power_knockback.hp_bar_supplement.enable "
+                    "must be boolean"
+                )
+                return -1
+            if hp_bar_enabled:
+                hsv_bounds = {}
+                for field_name in ("lower_hsv", "upper_hsv"):
+                    value = hp_bar_cfg.get(field_name)
+                    if not isinstance(value, (list, tuple)) or len(value) != 3 \
+                            or any(
+                                isinstance(channel, bool)
+                                or not isinstance(channel, (int, float))
+                                for channel in value
+                            ):
+                        logger.error(
+                            "[load_config] power_knockback.hp_bar_supplement."
+                            f"{field_name} must be three numeric OpenCV HSV "
+                            "channels"
+                        )
+                        return -1
+                    hsv_bounds[field_name] = tuple(map(float, value))
+                for bound_name, bound in hsv_bounds.items():
+                    if not (0 <= bound[0] <= 179) or any(
+                            not 0 <= channel <= 255 for channel in bound[1:]):
+                        logger.error(
+                            "[load_config] power_knockback.hp_bar_supplement."
+                            f"{bound_name} must use OpenCV HSV ranges "
+                            "H=0..179 and S/V=0..255"
+                        )
+                        return -1
+                if any(
+                        low > high
+                        for low, high in zip(
+                            hsv_bounds["lower_hsv"],
+                            hsv_bounds["upper_hsv"],
+                        )):
+                    logger.error(
+                        "[load_config] power_knockback.hp_bar_supplement."
+                        "lower_hsv must not exceed upper_hsv"
+                    )
+                    return -1
+                for field_name in (
+                        "search_above_y", "min_width", "max_width",
+                        "min_height", "max_height", "min_area"):
+                    value = hp_bar_cfg.get(field_name)
+                    if isinstance(value, bool) or not isinstance(value, int) \
+                            or value <= 0:
+                        logger.error(
+                            "[load_config] power_knockback.hp_bar_supplement."
+                            f"{field_name} must be a positive integer"
+                        )
+                        return -1
+                search_below_y = hp_bar_cfg.get("search_below_y")
+                if isinstance(search_below_y, bool) or not isinstance(
+                        search_below_y, int) or search_below_y < 0:
+                    logger.error(
+                        "[load_config] power_knockback.hp_bar_supplement."
+                        "search_below_y must be a non-negative integer"
+                    )
+                    return -1
+                if hp_bar_cfg["min_width"] > hp_bar_cfg["max_width"] or \
+                        hp_bar_cfg["min_height"] > hp_bar_cfg["max_height"]:
+                    logger.error(
+                        "[load_config] power_knockback.hp_bar_supplement "
+                        "minimum dimensions must not exceed maximum dimensions"
+                    )
+                    return -1
+                min_fill_rate = hp_bar_cfg.get("min_fill_rate")
+                if isinstance(min_fill_rate, bool) or not isinstance(
+                        min_fill_rate, (int, float)) or not (
+                            0 < min_fill_rate <= 1):
+                    logger.error(
+                        "[load_config] power_knockback.hp_bar_supplement."
+                        "min_fill_rate must be in (0, 1]"
+                    )
+                    return -1
+                min_aspect_ratio = hp_bar_cfg.get("min_aspect_ratio")
+                if isinstance(min_aspect_ratio, bool) or not isinstance(
+                        min_aspect_ratio, (int, float)) or \
+                        min_aspect_ratio < 0:
+                    logger.error(
+                        "[load_config] power_knockback.hp_bar_supplement."
+                        "min_aspect_ratio must be a non-negative number"
+                    )
+                    return -1
             knockback_key = cfg.get("key", {}).get("power_knockback", "")
             if not isinstance(knockback_key, str) or not knockback_key.strip():
                 logger.error(
@@ -566,10 +2854,13 @@ class MapleStoryAutoBot:
         self.img_routes = []
         self._stationary_jump_targets_by_route = []
         self._rope_climb_targets_by_route = []
-        self._reset_stationary_jump_alignment()
+        self._reset_ladder_route_hold()
+        self._ladder_route_exit_confirmed_at = None
+        self._reset_stationary_jump_proximity()
         self._reset_rope_climb(clear_locks=True)
         self._reset_portal_sweep()
         self.monsters_info = {}
+        self.close_hp_bar_candidates = {"left": [], "right": []}
         self.minimap_geometry = None
         self._native_minimap_size = None
         self._last_native_minimap_error = None
@@ -602,6 +2893,7 @@ class MapleStoryAutoBot:
         self.pending_appearance_location = None
         self.pending_appearance_count = 0
         self.last_appearance_match = None
+        self._reset_auto_relogin_runtime()
 
         if mode == "debug":
             logger.info(
@@ -609,26 +2901,30 @@ class MapleStoryAutoBot:
                 "health, buff, login, and channel workflows are disabled"
             )
         if cfg.get("esp32_hid", {}).get("remote_target", False):
-            # This capture-card setup controls computer B with a keyboard-only
-            # HID descriptor. Mouse-driven channel flows cannot be completed
-            # from computer A and must not repeatedly pause the combat loop.
+            # Session recovery has a dedicated foreground-gated remote mouse
+            # path. Legacy multi-window workflows still depend on local window
+            # coordinates and therefore remain unavailable.
+            relogin_mouse_mode = str(cfg.get("auto_relogin", {}).get(
+                "remote_mouse_mode", "absolute"
+            )).strip().lower()
             logger.info(
-                "[load_config] Remote keyboard-only mode: all mouse-dependent "
-                "workflows are disabled"
+                "[load_config] Remote HID mode: legacy local-mouse workflows "
+                "are disabled; auto_relogin mouse mode="
+                f"{relogin_mouse_mode}"
             )
             for section_name in ("channel_change", "scheduled_channel_switching"):
                 section = cfg.get(section_name, {})
                 if section.get("enable", False):
                     logger.warning(
                         f"[load_config] Disabled {section_name}.enable: "
-                        "remote channel changes require mouse HID"
+                        "that workflow still requires local window mouse input"
                     )
                     section["enable"] = False
 
             if cfg.get("watchdog", {}).get("last_attack_timeout_action") == "change_channel":
                 logger.warning(
                     "[load_config] Watchdog channel changes are unavailable in "
-                    "keyboard-only capture-card mode"
+                    "remote capture-card mode"
                 )
 
         # Parse color code in config
@@ -783,50 +3079,11 @@ class MapleStoryAutoBot:
                         f"NameTag pet template not found: {pet_path}; "
                         "pet-assisted matching is disabled"
                     )
-            appearance_cfg = cfg["nametag"].get("appearance", {})
-            if appearance_cfg.get("enable", False):
-                for template_index, template_cfg in enumerate(
-                        appearance_cfg.get("templates", [])):
-                    template_name = template_cfg.get("name", "").strip()
-                    if not template_name:
-                        suffix = template_cfg.get("suffix", "").strip()
-                        if suffix:
-                            template_name = (
-                                f"{cfg['nametag']['name']}_{suffix}"
-                            )
-                    if not template_name:
-                        continue
-                    appearance_path = f"nametag/{template_name}.png"
-                    if not os.path.exists(appearance_path):
-                        logger.warning(
-                            "NameTag appearance template not found: "
-                            f"{appearance_path}"
-                        )
-                        continue
-                    image = load_image(appearance_path)
-                    offset = template_cfg.get("player_offset", (0, 0))
-                    self.nametag_appearance_templates.append({
-                        "name": template_name,
-                        "pose": template_cfg.get("pose", "standing"),
-                        "image": image,
-                        "source_image": image.copy(),
-                        "config_index": template_index,
-                        "gray": cv2.cvtColor(image, cv2.COLOR_BGR2GRAY),
-                        "mask": get_mask(image, (0, 255, 0)),
-                        "player_offset": (
-                            int(offset[0]), int(offset[1])
-                        ),
-                    })
-                if self.nametag_appearance_templates:
-                    logger.info(
-                        "Loaded player appearance templates: "
-                        f"{[item['name'] for item in self.nametag_appearance_templates]}"
-                    )
-                else:
-                    logger.warning(
-                        "Player appearance detection is enabled but no "
-                        "templates could be loaded"
-                    )
+
+        # Smile-only Hero detection still needs the nearby climbing/standing
+        # templates to decide whether a vertical route must remain held. Keep
+        # pose loading independent from the disabled legacy name-tag locator.
+        self._load_player_appearance_templates(cfg["nametag"])
 
         marker_cfg = cfg["nametag"].get("overhead_marker", {})
         if marker_cfg.get("enable", False):
@@ -869,6 +3126,125 @@ class MapleStoryAutoBot:
         self.img_create_party_enable  = load_image(f"misc/party_button_create_enable_{lang}.png")
         self.img_create_party_disable = load_image(f"misc/party_button_create_disable_{lang}.png")
         self.img_login_button = load_image(f"misc/login_button_{lang}.png")
+        self._img_login_button_source = self.img_login_button.copy()
+        self._last_login_template_geometry = None
+        self._auto_relogin_template_sources = {}
+        self._auto_relogin_templates = {}
+        self._auto_relogin_cursor_template_source = None
+        self._auto_relogin_cursor_tracker = None
+        self._auto_relogin_disconnect_cursor_template_source = None
+        self._auto_relogin_disconnect_cursor_tracker = None
+        self._last_auto_relogin_template_geometry = None
+        if cfg.get("auto_relogin", {}).get("enable", False):
+            for page, template_path in cfg["auto_relogin"][
+                    "page_templates"].items():
+                if page not in {
+                        "disconnect", "connect", "world", "channel",
+                        "character"}:
+                    continue
+                try:
+                    template = load_image(template_path)
+                except (FileNotFoundError, OSError, ValueError) as exc:
+                    logger.error(
+                        "[load_config] Unable to load auto-relogin template "
+                        f"for {page}: {exc}"
+                    )
+                    return -1
+                self._auto_relogin_template_sources[page] = template.copy()
+                self._auto_relogin_templates[page] = template.copy()
+
+            if str(cfg["auto_relogin"].get(
+                    "remote_mouse_mode", "absolute"
+                    )).strip().lower() == "visual_relative":
+                cursor_path = cfg["auto_relogin"].get("cursor_template", "")
+                cursor_template = cv2.imread(
+                    str(cursor_path), cv2.IMREAD_UNCHANGED
+                )
+                if cursor_template is None:
+                    logger.error(
+                        "[load_config] Unable to load auto-relogin cursor "
+                        f"template: {cursor_path}"
+                    )
+                    return -1
+                if cursor_template.ndim != 3 or \
+                        cursor_template.shape[2] != 4:
+                    logger.error(
+                        "[load_config] Auto-relogin cursor template must be "
+                        f"RGBA/BGRA with transparency: {cursor_path}"
+                    )
+                    return -1
+                try:
+                    CursorTracker(
+                        cursor_template,
+                        hotspot=tuple(cfg["auto_relogin"].get(
+                            "cursor_hotspot", (13, 6)
+                        )),
+                        min_score=float(cfg["auto_relogin"].get(
+                            "cursor_min_score", 0.90
+                        )),
+                        uniqueness_margin=float(cfg["auto_relogin"].get(
+                            "cursor_uniqueness_margin", 0.02
+                        )),
+                        mask_erode_pixels=int(cfg["auto_relogin"].get(
+                            "cursor_mask_erode_pixels", 1
+                        )),
+                    )
+                except (TypeError, ValueError, IndexError) as exc:
+                    logger.error(
+                        "[load_config] Invalid auto-relogin cursor template "
+                        f"or hotspot: {exc}"
+                    )
+                    return -1
+                self._auto_relogin_cursor_template_source = \
+                    cursor_template.copy()
+
+                disconnect_cursor_path = cfg["auto_relogin"][
+                    "disconnect_cursor_template"
+                ]
+                disconnect_cursor_template = cv2.imread(
+                    str(disconnect_cursor_path), cv2.IMREAD_UNCHANGED
+                )
+                if disconnect_cursor_template is None:
+                    logger.error(
+                        "[load_config] Unable to load auto-relogin "
+                        "disconnect cursor template: "
+                        f"{disconnect_cursor_path}"
+                    )
+                    return -1
+                if disconnect_cursor_template.ndim != 3 or \
+                        disconnect_cursor_template.shape[2] != 4:
+                    logger.error(
+                        "[load_config] Auto-relogin disconnect cursor "
+                        "template must be RGBA/BGRA with transparency: "
+                        f"{disconnect_cursor_path}"
+                    )
+                    return -1
+                try:
+                    CursorTracker(
+                        disconnect_cursor_template,
+                        hotspot=tuple(cfg["auto_relogin"].get(
+                            "disconnect_cursor_hotspot", (9, 4)
+                        )),
+                        min_score=float(cfg["auto_relogin"].get(
+                                "cursor_min_score", 0.90
+                        )),
+                        uniqueness_margin=float(
+                            cfg["auto_relogin"].get(
+                                "cursor_uniqueness_margin", 0.02
+                            )
+                        ),
+                        mask_erode_pixels=int(cfg["auto_relogin"].get(
+                            "cursor_mask_erode_pixels", 1
+                        )),
+                    )
+                except (TypeError, ValueError, IndexError) as exc:
+                    logger.error(
+                        "[load_config] Invalid auto-relogin disconnect "
+                        f"cursor template or hotspot: {exc}"
+                    )
+                    return -1
+                self._auto_relogin_disconnect_cursor_template_source = \
+                    disconnect_cursor_template.copy()
 
         # Normalized pixel coordinate configuration
         cfg['rune_warning_cn']['top_left'] = normalize_pixel_coordinate(
@@ -907,6 +3283,62 @@ class MapleStoryAutoBot:
         self._last_ui_viz_emit_time = 0.0
 
         return 0 # load successfully
+
+    def _load_player_appearance_templates(self, nametag_cfg):
+        """Load pose templates for either marker-only or name-tag detection."""
+        appearance_cfg = nametag_cfg.get("appearance", {})
+        appearance_mode = appearance_cfg.get("enable", False)
+        appearance_enabled = appearance_mode is True or (
+            appearance_mode == "auto"
+            and (
+                nametag_cfg.get("enable", False)
+                or nametag_cfg.get("overhead_marker", {}).get(
+                    "enable", False
+                )
+            )
+        )
+        if not appearance_enabled:
+            return
+
+        for template_index, template_cfg in enumerate(
+                appearance_cfg.get("templates", [])):
+            template_name = template_cfg.get("name", "").strip()
+            if not template_name:
+                suffix = template_cfg.get("suffix", "").strip()
+                if suffix:
+                    template_name = f"{nametag_cfg['name']}_{suffix}"
+            if not template_name:
+                continue
+            appearance_path = f"nametag/{template_name}.png"
+            if not os.path.exists(appearance_path):
+                logger.warning(
+                    "NameTag appearance template not found: "
+                    f"{appearance_path}"
+                )
+                continue
+            image = load_image(appearance_path)
+            offset = template_cfg.get("player_offset", (0, 0))
+            self.nametag_appearance_templates.append({
+                "name": template_name,
+                "pose": template_cfg.get("pose", "standing"),
+                "image": image,
+                "source_image": image.copy(),
+                "config_index": template_index,
+                "gray": cv2.cvtColor(image, cv2.COLOR_BGR2GRAY),
+                "mask": get_mask(image, (0, 255, 0)),
+                "player_offset": (int(offset[0]), int(offset[1])),
+            })
+
+        if self.nametag_appearance_templates:
+            logger.info(
+                "Loaded player appearance templates: "
+                f"{[item['name'] for item in self.nametag_appearance_templates]}"
+            )
+        else:
+            logger.warning(
+                "Player appearance detection is enabled but no templates "
+                "could be loaded"
+            )
 
     @staticmethod
     def _resize_green_screen_template(image, output_size):
@@ -1090,6 +3522,234 @@ class MapleStoryAutoBot:
             f"{(reference_h, reference_w)} to {(output_h, output_w)}"
         )
 
+    def _refresh_login_button_template(self, output_size):
+        """Scale the login template with the runtime game-frame geometry."""
+        source = getattr(self, "_img_login_button_source", None)
+        if source is None:
+            current = getattr(self, "img_login_button", None)
+            if current is None:
+                return
+            source = current.copy()
+            self._img_login_button_source = source
+
+        base_cfg = getattr(self, "_base_cfg", None) or self.cfg
+        reference = base_cfg.get("auto_relogin", {}).get(
+            "template_reference_size", (700, 1296)
+        )
+        try:
+            reference_h, reference_w = map(int, reference[:2])
+            output_h, output_w = map(int, output_size[:2])
+        except (TypeError, ValueError, IndexError) as exc:
+            raise ValueError(
+                "auto_relogin.template_reference_size must be [height, width]"
+            ) from exc
+        if min(reference_h, reference_w, output_h, output_w) <= 0:
+            raise ValueError(
+                "Login template reference and output sizes must be positive"
+            )
+
+        geometry_key = (
+            reference_h, reference_w, output_h, output_w,
+        )
+        if geometry_key == getattr(
+                self, "_last_login_template_geometry", None):
+            return
+
+        target_width = max(
+            1, int(round(source.shape[1] * output_w / reference_w))
+        )
+        target_height = max(
+            1, int(round(source.shape[0] * output_h / reference_h))
+        )
+        if (target_height, target_width) == source.shape[:2]:
+            self.img_login_button = source.copy()
+        else:
+            downscaling = target_height < source.shape[0] or \
+                target_width < source.shape[1]
+            self.img_login_button = cv2.resize(
+                source,
+                (target_width, target_height),
+                interpolation=(
+                    cv2.INTER_AREA if downscaling else cv2.INTER_CUBIC
+                ),
+            )
+        self._last_login_template_geometry = geometry_key
+        logger.info(
+            "[capture] Scaled login template from "
+            f"{source.shape[:2]} to {self.img_login_button.shape[:2]}"
+        )
+
+    def _refresh_auto_relogin_templates(self, output_size):
+        """Scale the recorded page and cursor templates to the current frame."""
+        sources = getattr(self, "_auto_relogin_template_sources", {})
+        cursor_source = getattr(
+            self, "_auto_relogin_cursor_template_source", None
+        )
+        disconnect_cursor_source = getattr(
+            self,
+            "_auto_relogin_disconnect_cursor_template_source",
+            None,
+        )
+        if not sources and cursor_source is None and \
+                disconnect_cursor_source is None:
+            return
+
+        base_cfg = getattr(self, "_base_cfg", None) or self.cfg
+        auto_relogin_cfg = base_cfg.get("auto_relogin", {})
+        reference = auto_relogin_cfg.get(
+            "flow_template_reference_size", (2013, 3579)
+        )
+        try:
+            reference_h, reference_w = map(int, reference[:2])
+            output_h, output_w = map(int, output_size[:2])
+        except (TypeError, ValueError, IndexError) as exc:
+            raise ValueError(
+                "auto_relogin.flow_template_reference_size must be "
+                "[height, width]"
+            ) from exc
+        if min(reference_h, reference_w, output_h, output_w) <= 0:
+            raise ValueError(
+                "Auto-relogin template reference and output sizes must be "
+                "positive"
+            )
+
+        geometry_key = (
+            reference_h, reference_w, output_h, output_w,
+        )
+        if geometry_key == getattr(
+                self, "_last_auto_relogin_template_geometry", None):
+            return
+
+        scaled_templates = {}
+        for page, source in sources.items():
+            target_width = max(
+                1, int(round(source.shape[1] * output_w / reference_w))
+            )
+            target_height = max(
+                1, int(round(source.shape[0] * output_h / reference_h))
+            )
+            if (target_height, target_width) == source.shape[:2]:
+                scaled = source.copy()
+            else:
+                downscaling = target_height < source.shape[0] or \
+                    target_width < source.shape[1]
+                scaled = cv2.resize(
+                    source,
+                    (target_width, target_height),
+                    interpolation=(
+                        cv2.INTER_AREA if downscaling else cv2.INTER_CUBIC
+                    ),
+                )
+            scaled_templates[page] = scaled
+
+        self._auto_relogin_templates = scaled_templates
+
+        def build_cursor_tracker(source, hotspot):
+            """Scale one RGBA cursor source and its reference hotspot."""
+            target_width = max(
+                1,
+                int(round(source.shape[1] * output_w / reference_w)),
+            )
+            target_height = max(
+                1,
+                int(round(source.shape[0] * output_h / reference_h)),
+            )
+            if (target_height, target_width) == source.shape[:2]:
+                scaled_cursor = source.copy()
+            elif source.ndim == 3 and source.shape[2] == 4:
+                downscaling = target_height < source.shape[0] or \
+                    target_width < source.shape[1]
+                scaled_color = cv2.resize(
+                    source[:, :, :3],
+                    (target_width, target_height),
+                    interpolation=(
+                        cv2.INTER_AREA if downscaling else cv2.INTER_CUBIC
+                    ),
+                )
+                scaled_alpha = cv2.resize(
+                    source[:, :, 3],
+                    (target_width, target_height),
+                    interpolation=cv2.INTER_NEAREST,
+                )
+                scaled_cursor = np.dstack((scaled_color, scaled_alpha))
+            else:
+                scaled_cursor = cv2.resize(
+                    source,
+                    (target_width, target_height),
+                    interpolation=(
+                        cv2.INTER_AREA
+                        if target_height < source.shape[0]
+                        or target_width < source.shape[1]
+                        else cv2.INTER_CUBIC
+                    ),
+                )
+
+            hotspot_x = max(
+                0,
+                min(
+                    target_width - 1,
+                    int(round(float(hotspot[0]) * output_w / reference_w)),
+                ),
+            )
+            hotspot_y = max(
+                0,
+                min(
+                    target_height - 1,
+                    int(round(float(hotspot[1]) * output_h / reference_h)),
+                ),
+            )
+            return CursorTracker(
+                scaled_cursor,
+                hotspot=(hotspot_x, hotspot_y),
+                min_score=float(auto_relogin_cfg.get(
+                    "cursor_min_score", 0.90
+                )),
+                uniqueness_margin=float(auto_relogin_cfg.get(
+                    "cursor_uniqueness_margin", 0.02
+                )),
+                min_visible_fraction=float(auto_relogin_cfg.get(
+                    "cursor_min_visible_fraction", 0.25
+                )),
+                min_visible_pixels=max(
+                    1,
+                    int(round(
+                        auto_relogin_cfg.get(
+                            "cursor_min_visible_pixels", 32
+                        )
+                        * output_w / reference_w
+                        * output_h / reference_h
+                    )),
+                ),
+                mask_erode_pixels=max(
+                    0,
+                    int(round(auto_relogin_cfg.get(
+                        "cursor_mask_erode_pixels", 1
+                    ))),
+                ),
+            )
+
+        self._auto_relogin_cursor_tracker = None
+        self._auto_relogin_disconnect_cursor_tracker = None
+        if cursor_source is not None:
+            self._auto_relogin_cursor_tracker = build_cursor_tracker(
+                cursor_source,
+                auto_relogin_cfg.get("cursor_hotspot", (13, 6)),
+            )
+        if disconnect_cursor_source is not None:
+            self._auto_relogin_disconnect_cursor_tracker = \
+                build_cursor_tracker(
+                    disconnect_cursor_source,
+                    auto_relogin_cfg.get(
+                        "disconnect_cursor_hotspot", (9, 4)
+                    ),
+                )
+
+        self._last_auto_relogin_template_geometry = geometry_key
+        logger.info(
+            "[capture] Scaled auto-relogin page/cursor templates from "
+            f"{(reference_h, reference_w)} to {(output_h, output_w)}"
+        )
+
     def _refresh_runtime_frame_config(self, output_size):
         """Regenerate native screen-space config from one unscaled baseline."""
         output_size = tuple(map(int, output_size[:2]))
@@ -1114,6 +3774,8 @@ class MapleStoryAutoBot:
                 component.cfg = self.cfg
 
         self._refresh_nametag_templates(output_size)
+        self._refresh_login_button_template(output_size)
+        self._refresh_auto_relogin_templates(output_size)
         logger.info(
             "[capture] Runtime pixel config ready for "
             f"output_size={output_size}"
@@ -1178,9 +3840,10 @@ class MapleStoryAutoBot:
             self.t_last_power_knockback = time.time()
             self.t_last_minimap_update = time.time()
             self.t_to_change_channel = time.time()
-            self._reset_stationary_jump_alignment()
+            self._reset_stationary_jump_proximity()
             self._reset_rope_climb(clear_locks=True)
             self._reset_portal_sweep()
+            self._reset_auto_relogin_runtime()
 
             # Set init state
             if self.args.init_state != "":
@@ -1225,6 +3888,7 @@ class MapleStoryAutoBot:
         '''
         Terminate thread except main thread
         '''
+        self._reset_ladder_route_hold()
         self.terminate_threads()
 
     def enable_viz(self):
@@ -1643,6 +4307,17 @@ class MapleStoryAutoBot:
 
         previous_state = bool(getattr(self, "is_on_ladder", False))
         self.is_on_ladder = new_state
+        if new_state:
+            self._ladder_route_exit_confirmed_at = None
+        elif previous_state:
+            # Route geometry may be a couple of minimap pixels away from the
+            # physical platform. Only a fresh climbing -> standing transition
+            # may authorize handing control from Up/Down to that platform.
+            self._ladder_route_exit_confirmed_at = time.monotonic()
+        if not new_state:
+            # A fresh standing pose means the character has physically left
+            # the rope/ladder, so platform movement may take over again.
+            self._reset_ladder_route_hold()
         if previous_state != new_state:
             logger.info(
                 "[ladder] Smile-anchored tiger pose changed state to "
@@ -2753,7 +5428,7 @@ class MapleStoryAutoBot:
         return self._find_stationary_jump_targets(self.img_route)
 
     def _get_nearby_stationary_jump_target(self):
-        """Return a same-row compact jump target inside route search range."""
+        """Return the nearest compact jump target inside route search range."""
         x0, y0 = self.loc_player_global
         search_range = max(0, int(self.cfg["route"]["search_range"]))
         candidates = []
@@ -2761,66 +5436,99 @@ class MapleStoryAutoBot:
             target_x, target_y = target["center"]
             dx = target_x - x0
             dy = target_y - y0
-            # Horizontal input cannot correct a vertical mismatch. Requiring
-            # the exact target row also prevents attraction to another floor.
-            if dy != 0 or abs(dx) > search_range:
+            distance = abs(dx) + abs(dy)
+            if distance > search_range:
                 continue
-            candidates.append((abs(dx), target_y, target_x, target))
+            candidates.append((distance, target_y, target_x, target))
 
         if not candidates:
             return None
         return min(candidates, key=lambda item: item[:3])[3]
 
-    def _reset_stationary_jump_alignment(self):
-        self._stationary_jump_alignment_key = None
-        self._stationary_jump_aligned_since = None
-        self._stationary_jump_alignment_active = False
-        self._stationary_jump_fired_key = None
+    def _reset_ladder_route_hold(self):
+        """Forget the pure Up/Down route direction held for a ladder."""
+        self._ladder_route_move_y = None
 
-    def _update_cmd_for_stationary_jump_alignment(self, route_action):
-        """Nudge onto a jump center, visually settle there, then jump once."""
-        target = tuple(route_action["target_center"])
-        alignment_key = (int(self.idx_routes), target)
-        if alignment_key != getattr(
-                self, "_stationary_jump_alignment_key", None):
-            self._stationary_jump_alignment_key = alignment_key
-            self._stationary_jump_aligned_since = None
-            self._stationary_jump_fired_key = None
+    @staticmethod
+    def _get_pure_ladder_route_direction(color_code_up_down):
+        """Return Up/Down only for a movement-only ladder route color."""
+        if not color_code_up_down:
+            return None
+        parts = str(color_code_up_down.get("command", "")).split()
+        if len(parts) != 3 or parts[0] != "none" or parts[2] != "none":
+            return None
+        return parts[1] if parts[1] in {"up", "down"} else None
 
-        self._stationary_jump_alignment_active = True
-        player = tuple(map(int, self.loc_player_global))
-        player_x, player_y = player
-        target_x, target_y = target
+    def _apply_ladder_route_hold(
+            self, color_code_up_down=None, *, allow_restore=True):
+        """Keep the selected vertical direction until a standing pose arrives.
 
-        if player != target:
-            self._stationary_jump_aligned_since = None
-            self._stationary_jump_fired_key = None
-            if player_y == target_y:
-                self.cmd_action = (
-                    "jump_align_right"
-                    if player_x < target_x
-                    else "jump_align_left"
-                )
-            return
-
-        now = time.monotonic()
-        if self._stationary_jump_aligned_since is None:
-            # This frame releases the final correction. Future frames must
-            # continue to observe the exact center before Jump is permitted.
-            self._stationary_jump_aligned_since = now
-            return
-
-        settle_delay = max(
-            0.0,
-            float(self.cfg["route"].get("jump_up_settle_delay", 0.6)),
+        Route lookup is intentionally local and can miss a vertical pixel for
+        one frame near a platform junction. Cache only the dedicated pure
+        Up/Down route colors; never infer a ladder hold from jump, teleport,
+        portal, goal, or stop actions.
+        """
+        detected_direction = self._get_pure_ladder_route_direction(
+            color_code_up_down
         )
-        if now - self._stationary_jump_aligned_since < settle_delay:
+        is_on_ladder = bool(getattr(self, "is_on_ladder", False))
+
+        if not is_on_ladder:
+            # Remember the approach command so the first climbing frame can
+            # retain it even when the local route lookup moves to a junction.
+            self._ladder_route_move_y = detected_direction
             return
 
-        # Keep emitting the same source action while the player remains at the
-        # center. KeyBoardController edge-triggering consumes it only once.
-        self._stationary_jump_fired_key = alignment_key
-        self.cmd_action = "jump_aligned"
+        latched_direction = getattr(self, "_ladder_route_move_y", None)
+        if latched_direction not in {"up", "down"}:
+            latched_direction = detected_direction
+            self._ladder_route_move_y = latched_direction
+
+        if allow_restore and latched_direction in {"up", "down"}:
+            self.cmd_move_y = latched_direction
+
+    def _is_ladder_route_destination_reached(self, color_code_up_down):
+        """Return whether Hero reached the directed vertical segment endpoint."""
+        direction = self._get_pure_ladder_route_direction(
+            color_code_up_down
+        )
+        if direction is None or self.img_route is None:
+            return False
+
+        component = self._get_route_color_component(
+            self.img_route,
+            color_code_up_down["pixel"],
+            color_code_up_down["color"],
+        )
+        if component is None:
+            return False
+
+        left, top, right, bottom = component["bbox"]
+        component_width = right - left + 1
+        component_height = bottom - top + 1
+        if component_height <= component_width:
+            # A short horizontal smear of an Up/Down color is not a ladder.
+            return False
+
+        tolerance = max(
+            0,
+            int(self.cfg["route"].get("ladder_endpoint_tolerance", 2)),
+        )
+        player_y = int(self.loc_player_global[1])
+        if direction == "up":
+            return player_y <= top + tolerance
+        return player_y >= bottom - tolerance
+
+    def _has_recent_ladder_route_exit_confirmation(self):
+        """Return True briefly after a visual climbing -> standing change."""
+        confirmed_at = getattr(
+            self, "_ladder_route_exit_confirmed_at", None
+        )
+        return confirmed_at is not None and \
+            time.monotonic() - confirmed_at <= 0.5
+
+    def _reset_stationary_jump_proximity(self):
+        self._stationary_jump_proximity_active = False
 
     @staticmethod
     def _is_rope_climb_route_command(command):
@@ -3611,6 +6319,9 @@ class MapleStoryAutoBot:
         region = route_action.get("portal_region")
         if region is None:
             return False
+        # Portal activation has its own bounded Up/search transaction and must
+        # never inherit a prior ladder direction after the minimap jump.
+        self._reset_ladder_route_hold()
         sweep_key = (int(self.idx_routes), tuple(region["bbox"]))
         if sweep_key != getattr(self, "_portal_sweep_key", None):
             self._reset_portal_sweep()
@@ -3640,7 +6351,7 @@ class MapleStoryAutoBot:
 
         This function:
         - Acquires a hand-drawn climb guide before reaching its rope endpoint.
-        - Aligns compact stationary-jump blobs by their explicit center.
+        - Triggers compact stationary-jump blobs inside ``search_range``.
         - Requires the player's center pixel to overlap other point actions
           such as directional jump, teleport, goal, and stop.
         - Scans the search box for movement-only route colors.
@@ -3697,13 +6408,16 @@ class MapleStoryAutoBot:
         )
         if stationary_jump_target is not None:
             target_center = stationary_jump_target["center"]
+            target_distance = (
+                abs(target_center[0] - x0) + abs(target_center[1] - y0)
+            )
             nearest = {
                 "pixel": target_center,
                 "color": stationary_jump_target["color"],
                 "command": stationary_jump_target["command"],
-                "distance": abs(target_center[0] - x0),
-                "exact_action": False,
-                "stationary_jump_alignment": True,
+                "distance": target_distance,
+                "exact_action": True,
+                "stationary_jump_proximity": True,
                 "target_center": target_center,
             }
             min_dist = nearest["distance"]
@@ -3881,6 +6595,171 @@ class MapleStoryAutoBot:
             raise RuntimeError(f"Unsupported attack mode: {attack_type}")
 
         return (x0, y0, x1, y1)
+
+    def detect_close_enemy_hp_bars(self):
+        """Return at most one nearby enemy-HP-bar witness per Hero side.
+
+        This deliberately does not synthesize a normal monster detection.
+        Green fill width changes with remaining HP, so only its presence and
+        side relative to the Hero are trustworthy enough for the archer's
+        close-range block/Power Knock-Back decision.
+        """
+        sides = {"left": [], "right": []}
+        knockback_cfg = self.cfg.get("power_knockback", {})
+        hp_bar_cfg = knockback_cfg.get("hp_bar_supplement", {})
+        if not hp_bar_cfg.get("enable", False):
+            return sides
+
+        frame = getattr(self, "img_frame", None)
+        if frame is None or frame.size == 0:
+            return sides
+
+        frame_h, frame_w = frame.shape[:2]
+        player_x, player_y = map(int, self.loc_player)
+        max_distance_x = max(
+            0, int(round(knockback_cfg.get("trigger_distance_x", 0)))
+        )
+        search_above_y = max(
+            0, int(round(hp_bar_cfg.get("search_above_y", 0)))
+        )
+        search_below_y = max(
+            0, int(round(hp_bar_cfg.get("search_below_y", 0)))
+        )
+        min_width = max(1, int(round(hp_bar_cfg.get("min_width", 1))))
+        max_width = max(
+            min_width, int(round(hp_bar_cfg.get("max_width", min_width)))
+        )
+        min_height = max(1, int(round(hp_bar_cfg.get("min_height", 1))))
+        max_height = max(
+            min_height, int(round(hp_bar_cfg.get("max_height", min_height)))
+        )
+        min_area = max(0, int(round(hp_bar_cfg.get("min_area", 0))))
+        min_fill_rate = max(
+            0.0, min(1.0, float(hp_bar_cfg.get("min_fill_rate", 0.0)))
+        )
+        min_aspect_ratio = max(
+            0.0, float(hp_bar_cfg.get("min_aspect_ratio", 0.0))
+        )
+
+        # Keep whole components inside the crop, then apply the actual
+        # bar-to-Hero distance below. This avoids clipping a bar at the
+        # trigger boundary and moving its measured center inward.
+        x_margin = max_width
+        y_margin = max_height
+        x0 = max(0, player_x - max_distance_x - x_margin)
+        x1 = min(frame_w, player_x + max_distance_x + x_margin + 1)
+        y0 = max(0, player_y - search_above_y - y_margin)
+        ui_y_start = int(
+            self.cfg.get("ui_coords", {}).get("ui_y_start", frame_h)
+        )
+        y1 = min(
+            frame_h,
+            max(0, ui_y_start),
+            player_y + search_below_y + y_margin + 1,
+        )
+        if x1 <= x0 or y1 <= y0:
+            return sides
+
+        roi_hsv = cv2.cvtColor(frame[y0:y1, x0:x1], cv2.COLOR_BGR2HSV)
+        lower_hsv = np.asarray(
+            hp_bar_cfg.get("lower_hsv", (64, 140, 70)), dtype=np.uint8
+        )
+        upper_hsv = np.asarray(
+            hp_bar_cfg.get("upper_hsv", (74, 255, 255)), dtype=np.uint8
+        )
+        mask = cv2.inRange(roi_hsv, lower_hsv, upper_hsv)
+        count, _, stats, _ = cv2.connectedComponentsWithStats(
+            mask, connectivity=8
+        )
+
+        candidates = {"left": [], "right": []}
+        for index in range(1, count):
+            local_x = int(stats[index, cv2.CC_STAT_LEFT])
+            local_y = int(stats[index, cv2.CC_STAT_TOP])
+            width = int(stats[index, cv2.CC_STAT_WIDTH])
+            height = int(stats[index, cv2.CC_STAT_HEIGHT])
+            area = int(stats[index, cv2.CC_STAT_AREA])
+            if not (min_width <= width <= max_width) or \
+                    not (min_height <= height <= max_height) or \
+                    area < min_area:
+                continue
+            fill_rate = area / float(width * height)
+            aspect_ratio = width / float(height)
+            if fill_rate < min_fill_rate or \
+                    aspect_ratio < min_aspect_ratio:
+                continue
+
+            bar_x = x0 + local_x
+            bar_y = y0 + local_y
+            bar_center_x = int(round(bar_x + width / 2.0))
+            bar_center_y = int(round(bar_y + height / 2.0))
+            bar_right = bar_x + width - 1
+            if player_x < bar_x:
+                horizontal_distance = bar_x - player_x
+            elif player_x > bar_right:
+                horizontal_distance = player_x - bar_right
+            else:
+                horizontal_distance = 0
+            if horizontal_distance > max_distance_x or not (
+                    player_y - search_above_y
+                    <= bar_center_y
+                    <= player_y + search_below_y):
+                continue
+
+            if bar_center_x < player_x:
+                side = "left"
+            elif bar_center_x > player_x:
+                side = "right"
+            else:
+                keyboard_controller = getattr(self, "kb", None)
+                side = getattr(keyboard_controller, "cached_facing", None)
+                if side not in {"left", "right"}:
+                    side = getattr(self, "cmd_move_x", None)
+                if side not in {"left", "right"}:
+                    side = "left"
+
+            witness = {
+                "name": "Enemy HP Bar",
+                # This is a boolean side witness, not a body coordinate. Keep
+                # both sides symmetric so two visible bars use the normal
+                # cached-facing tie-break instead of comparing fill centers.
+                "position": (
+                    player_x - 1 if side == "left" else player_x + 1,
+                    player_y,
+                ),
+                "size": (1, 1),
+                "score": 0.0,
+                "source": "close_hp_bar",
+                "close_range_only": True,
+                "bar_position": (bar_x, bar_y),
+                "bar_size": (height, width),
+            }
+            candidates[side].append(witness)
+
+            if getattr(self, "img_frame_debug", None) is not None:
+                self._draw_debug_rectangle(
+                    (bar_x, bar_y),
+                    (height, width),
+                    (0, 165, 255),
+                    f"Close HP Bar ({side})",
+                    thickness=1,
+                    text_height=0.45,
+                )
+
+        # This signal is boolean by design. Multiple bars on one side must not
+        # alter AoE counts or outvote a bar on the opposite side.
+        for side in sides:
+            ordered = sorted(
+                candidates[side],
+                key=lambda item: abs(
+                    (
+                        item["bar_position"][0]
+                        + item["bar_size"][1] / 2.0
+                    ) - player_x
+                ),
+            )
+            sides[side] = ordered[:1]
+        return sides
 
     def get_power_knockback_monsters(self, is_left=True):
         """Return same-height monsters inside the close-range threshold.
@@ -4122,9 +7001,29 @@ class MapleStoryAutoBot:
             roi=(x0, y0, x1, y1),
             confidence=confidence,
         )
+        monsters = self.filter_yolo_detections_by_box_size(monsters)
         monsters = self.filter_pet_yolo_detections(monsters)
         self.draw_monster_detections(monsters, (x0, y0), (x1, y1))
         return monsters
+
+    def filter_yolo_detections_by_box_size(self, monsters):
+        """Discard detections smaller than either configured box dimension."""
+        if not monsters:
+            return monsters
+
+        monster_cfg = self.cfg.get("monster_detect", {})
+        min_width = max(0.0, float(monster_cfg.get("min_box_width", 0)))
+        min_height = max(0.0, float(monster_cfg.get("min_box_height", 0)))
+        if min_width == 0 and min_height == 0:
+            return monsters
+
+        kept = []
+        for monster in monsters:
+            height, width = monster["size"]
+            if width < min_width or height < min_height:
+                continue
+            kept.append(monster)
+        return kept
 
     def filter_pet_yolo_detections(self, monsters):
         """Remove a YOLO mob only when this pet's name is directly below it.
@@ -4670,8 +7569,18 @@ class MapleStoryAutoBot:
         '''
         get_img_frame
         '''
-        # Get window game raw frame
-        self.frame = self.capture.get_frame()
+        # Get image and timestamp as one atomic snapshot. Clear the old binding
+        # first so failed capture/preprocessing cannot reuse stale freshness.
+        self._current_capture_frame_token = None
+        get_snapshot = getattr(self.capture, "get_frame_snapshot", None)
+        if callable(get_snapshot):
+            self.frame, capture_frame_time = get_snapshot()
+        else:
+            # Compatibility adapter for custom capture implementations.
+            self.frame = self.capture.get_frame()
+            capture_frame_time = getattr(
+                self.capture, "last_frame_time", None
+            )
         if self.frame is None:
             logger.warning("Failed to capture game frame.")
             return
@@ -4693,6 +7602,14 @@ class MapleStoryAutoBot:
             return
 
         self._last_capture_error = None
+        try:
+            capture_frame_time = float(capture_frame_time)
+        except (TypeError, ValueError):
+            capture_frame_time = 0.0
+        if np.isfinite(capture_frame_time) and capture_frame_time > 0:
+            self._current_capture_frame_token = (
+                "capture", capture_frame_time
+            )
         self._refresh_runtime_frame_config(geometry["output_size"])
         geometry_key = tuple(geometry.items())
         if geometry_key != getattr(self, "_last_capture_geometry", None):
@@ -4770,10 +7687,11 @@ class MapleStoryAutoBot:
             bool: True if the player is stuck, False otherwise.
         """
         if getattr(self, "_rope_climb_active", False) or \
-                getattr(self, "_stationary_jump_alignment_active", False) or \
-                getattr(self, "_portal_sweep_active", False):
-            # Route-owned feedback loops may intentionally spend longer than
-            # the normal stuck timeout positioning, retrying, or holding Up.
+                getattr(self, "_portal_sweep_active", False) or \
+                getattr(self, "_suppress_periodic_attack", False):
+            # Route-owned feedback loops and active combat decisions may
+            # intentionally spend longer than the normal stuck timeout. Do
+            # not replace their positioning, Up/search, or attack commands.
             self.loc_watch_dog = self.loc_player_global
             self.t_watch_dog = time.time()
             return False
@@ -5353,9 +8271,21 @@ class MapleStoryAutoBot:
         '''
         get_login_button_location
         '''
+        if getattr(self, "img_frame", None) is None or \
+                getattr(self, "img_login_button", None) is None:
+            return None
+
         # Extract the region where the login button should appear
         x0, y0 = self.cfg["ui_coords"]["login_button_top_left"]
         x1, y1 = self.cfg["ui_coords"]["login_button_bottom_right"]
+        frame_h, frame_w = self.img_frame.shape[:2]
+        x0 = max(0, min(int(x0), frame_w))
+        x1 = max(0, min(int(x1), frame_w))
+        y0 = max(0, min(int(y0), frame_h))
+        y1 = max(0, min(int(y1), frame_h))
+        template_h, template_w = self.img_login_button.shape[:2]
+        if x1 - x0 < template_w or y1 - y0 < template_h:
+            return None
         img_roi = self.img_frame[y0:y1, x0:x1]
 
         # Draw rectange on debug image
@@ -5371,7 +8301,10 @@ class MapleStoryAutoBot:
                         img_roi, self.img_login_button)
         if score < self.cfg["ui_coords"]["login_button_thres"]:
             h, w = self.img_login_button.shape[:2]
-            logger.info(f"[get_login_button_location] Found login button with score({score})")
+            logger.debug(
+                "[get_login_button_location] Found login button with "
+                f"score({score})"
+            )
             return (x0 + loc[0] + w // 2,
                     y0 + loc[1] + h // 2 + self.cfg['game_window']['title_bar_height'])
         else:
@@ -5383,8 +8316,8 @@ class MapleStoryAutoBot:
         self.cmd_move_x = "none"
         self.cmd_move_y = "none"
         self.cmd_action = "none"
-        self._stationary_jump_alignment_active = False
         self._clear_rope_climb_locks_if_departed()
+        self._stationary_jump_proximity_active = False
         self._clear_failed_portal_if_departed()
 
         # A generated rope run-up remains active after the Hero leaves the
@@ -5431,37 +8364,58 @@ class MapleStoryAutoBot:
                     break
             else:
                 # No route describes this location. Keep a deterministic
-                # route selected and all keys released; the normal stuck
-                # watchdog can then perform its recovery action safely.
+                # route selected. While the climbing pose is still current,
+                # retain its latched Up/Down command across this lookup miss.
                 self.idx_routes = original_idx
                 self.img_route = self.img_routes[original_idx]
-                self._reset_stationary_jump_alignment()
+                self._reset_stationary_jump_proximity()
                 if self.is_show_debug_window:
                     self.img_route_debug = cv2.cvtColor(
                         self.img_route, cv2.COLOR_RGB2BGR
                     )
+                self._apply_ladder_route_hold()
                 return
 
         if color_code and color_code.get("rope_climb", False):
-            self._reset_stationary_jump_alignment()
+            self._reset_stationary_jump_proximity()
             self._reset_portal_sweep()
             self._start_rope_climb(color_code)
             return
 
         if color_code and color_code.get("portal_sweep", False):
-            self._reset_stationary_jump_alignment()
+            self._reset_stationary_jump_proximity()
             self._start_portal_sweep(color_code)
             return
 
         if color_code and color_code.get(
-                "stationary_jump_alignment", False):
-            # This sub-state owns the whole frame. Attacks, ladder
-            # complementation, edge teleports, and random stuck recovery must
-            # not overwrite a one-pixel correction or the final aligned jump.
-            self._update_cmd_for_stationary_jump_alignment(color_code)
+                "stationary_jump_proximity", False):
+            # Entering the configured proximity is sufficient. Do not chase
+            # the marker with alternating one-pixel left/right corrections.
+            self._stationary_jump_proximity_active = True
+            self.cmd_move_x, self.cmd_move_y, self.cmd_action = \
+                color_code["command"].split()
             return
 
-        self._reset_stationary_jump_alignment()
+        self._reset_stationary_jump_proximity()
+
+        vertical_destination_reached = bool(
+            color_code
+            and color_code_up_down
+            and self._has_recent_ladder_route_exit_confirmation()
+            and self._is_ladder_route_destination_reached(
+                color_code_up_down
+            )
+        )
+        if vertical_destination_reached:
+            # The visual standing transition is the physical arrival signal;
+            # route geometry only selects the adjacent platform afterwards.
+            logger.info(
+                "[ladder] Standing pose confirmed at route endpoint; "
+                "platform route resumed"
+            )
+            self._reset_ladder_route_hold()
+            self._ladder_route_exit_confirmed_at = None
+            color_code_up_down = None
 
         # Use color_code and color_code_up_down to complement each other
         # To prevent character stuck at the end of ladder, we use two color color pixels
@@ -5488,6 +8442,17 @@ class MapleStoryAutoBot:
         elif color_code_up_down:
             self.cmd_move_x, self.cmd_move_y, self.cmd_action = color_code_up_down["command"].split()
 
+        # A horizontal route becomes closest near the top of a ladder. Do not
+        # let that proximity release Up/Down while the visual pose still says
+        # the character is climbing. Exact point actions keep their existing
+        # ownership because reaching their center is itself an arrival signal.
+        self._apply_ladder_route_hold(
+            color_code_up_down,
+            allow_restore=not bool(
+                color_code and color_code.get("exact_action", False)
+            ),
+        )
+
         # teleport away from edge to avoid falling off cliff
         if self.is_near_edge() and \
             time.time() - self.t_last_teleport > self.cfg["teleport"]["cooldown"]:
@@ -5506,14 +8471,56 @@ class MapleStoryAutoBot:
 
     def update_cmd_by_mob_detection(self):
         self._suppress_periodic_attack = False
+        self.close_hp_bar_candidates = {"left": [], "right": []}
         combat_actions = {"attack", "directional_aoe", "power_knockback"}
+        stationary_jump_pending = bool(
+            getattr(self, "_stationary_jump_proximity_active", False)
+            and self.cmd_action == "jump"
+        )
+        directional_jump_pending = bool(
+            self.cmd_action == "jump"
+            and self.cmd_move_x in {"left", "right"}
+            and self.cmd_move_y in {"none", "stop"}
+        )
+        route_jump_pending = (
+            stationary_jump_pending or directional_jump_pending
+        )
         if getattr(self, "_rope_climb_active", False) or \
-                getattr(self, "_stationary_jump_alignment_active", False) or \
                 getattr(self, "_portal_sweep_active", False):
-            # Route-owned climb/alignment/portal transactions cannot be
-            # overwritten by combat while their visual feedback loop runs.
+            # Rope mounting/climbing and portal activation own their visual
+            # feedback loops until minimap displacement confirms completion.
             self._suppress_periodic_attack = True
             return
+
+        if getattr(self, "is_on_ladder", False):
+            # Preserve the route's vertical input exactly like the legacy
+            # controller: no normal attack, directional AoE, or close-range
+            # knockback may interrupt a rope/ladder command. Suppressing the
+            # frame also prevents patrol attacks and stuck recovery from
+            # replacing Up/Down later in the state pipeline.
+            self.monsters = []
+            if self.cmd_action in combat_actions:
+                self.cmd_action = "none"
+            self._suppress_periodic_attack = True
+            return
+
+        if getattr(self, "cmd_move_y", "none") in {"up", "down"}:
+            # Before the climbing pose is confirmed, keep the legacy behavior
+            # of not attacking during a vertical route command. Do not suppress
+            # the watchdog here: an incorrect nearby Up/Down candidate must be
+            # allowed to time out and recover instead of owning input forever.
+            self.monsters = []
+            if self.cmd_action in combat_actions:
+                self.cmd_action = "none"
+            return
+
+        def hold_route_jump_for_combat():
+            """Release a pending route jump while a nearby monster has priority."""
+            if not route_jump_pending:
+                return
+            self.cmd_move_x = "none"
+            self.cmd_move_y = "none"
+            self.cmd_action = "none"
 
         # Never build an attack decision around an expired screen location.
         if not getattr(self, "screen_player_location_valid", False):
@@ -5567,16 +8574,24 @@ class MapleStoryAutoBot:
 
         # Get monsters in the search box
         self.monsters = self.get_monsters_in_range((x0, y0), (x1, y1))
+        if power_knockback_enabled:
+            self.close_hp_bar_candidates = self.detect_close_enemy_hp_bars()
 
-        # Check if no mob to attack
-        if len(self.monsters) == 0:
+        # HP bars are close-range side witnesses only. They may keep the
+        # directional decision alive when YOLO loses an overlapped monster,
+        # but they never become entries in self.monsters.
+        if len(self.monsters) == 0 and not any(
+                self.close_hp_bar_candidates.values()):
             return
 
         # Update attack command
         if attack_mode == "aoe_skill":
+            self._suppress_periodic_attack = True
             if time.time() - self.t_last_attack > cooldown:
                 self.cmd_action = "attack"
                 self.t_last_attack = time.time()
+            else:
+                hold_route_jump_for_combat()
 
         elif attack_mode == "directional":
             keyboard_controller = getattr(self, "kb", None)
@@ -5598,8 +8613,10 @@ class MapleStoryAutoBot:
                 close_monsters_right = self.get_power_knockback_monsters(
                     is_left=False,
                 )
-            left_blocked = bool(close_monsters_left)
-            right_blocked = bool(close_monsters_right)
+            hp_bar_left = self.close_hp_bar_candidates["left"]
+            hp_bar_right = self.close_hp_bar_candidates["right"]
+            left_blocked = bool(close_monsters_left or hp_bar_left)
+            right_blocked = bool(close_monsters_right or hp_bar_right)
             if left_blocked or right_blocked:
                 # Patrol's blind periodic attack must not overwrite the
                 # close-range decision and fire a bow into a blocked side.
@@ -5640,6 +8657,8 @@ class MapleStoryAutoBot:
                         self.t_last_attack = now
                     elif self.cmd_action in combat_actions:
                         self.cmd_action = "none"
+                    else:
+                        hold_route_jump_for_combat()
                     # Reaching the threshold owns the attack decision. If the
                     # AoE is cooling down, wait instead of falling back to a
                     # normal attack.
@@ -5658,6 +8677,15 @@ class MapleStoryAutoBot:
             )
             # Determine attack direction
             attack_direction = self.get_attack_direction(monster_left, monster_right)
+            if attack_direction is None and route_jump_pending:
+                # At a route-jump marker, an equally close monster on each
+                # side must still win. Reuse the deterministic direction
+                # tie-breaker (nearest, then cached facing) instead of jumping.
+                attack_direction = self.get_directional_aoe_direction(
+                    [monster_left] if monster_left is not None else [],
+                    [monster_right] if monster_right is not None else [],
+                    1,
+                )
             if attack_direction is not None:
                 self._suppress_periodic_attack = True
                 now = time.time()
@@ -5668,15 +8696,18 @@ class MapleStoryAutoBot:
                     self.cmd_move_x = attack_direction
                 elif self.cmd_action in combat_actions:
                     self.cmd_action = "none"
+                else:
+                    hold_route_jump_for_combat()
                 # A valid bow target always wins over close monsters on the
                 # opposite side, even while the normal attack is cooling down.
                 return
 
-            if power_knockback_enabled and (
-                    close_monsters_left or close_monsters_right):
+            if power_knockback_enabled and (left_blocked or right_blocked):
+                knockback_left = close_monsters_left or hp_bar_left
+                knockback_right = close_monsters_right or hp_bar_right
                 knockback_direction = self.get_directional_aoe_direction(
-                    close_monsters_left,
-                    close_monsters_right,
+                    knockback_left,
+                    knockback_right,
                     1,
                 )
                 now = time.time()
@@ -5690,6 +8721,8 @@ class MapleStoryAutoBot:
                     self.t_last_attack = now
                 elif self.cmd_action in combat_actions:
                     self.cmd_action = "none"
+                else:
+                    hold_route_jump_for_combat()
                 return
 
     def update_cmd_by_random(self):
@@ -5706,6 +8739,7 @@ class MapleStoryAutoBot:
         if self.cmd_action == "goal":
             # Switch to next route map
             self._reset_rope_climb(clear_locks=True)
+            self._reset_ladder_route_hold()
             self.idx_routes = (self.idx_routes+1)%len(self.img_routes)
             logger.debug(f"Change to new route:{self.idx_routes}")
 
@@ -5735,6 +8769,16 @@ class MapleStoryAutoBot:
             return -1 # Wait for game window to be ready
         else:
             self.img_frame = img_frame
+
+        # If recovery was already active, its dedicated keyboard gate prevents
+        # ordinary gameplay input, so a newly restored capture can be reopened
+        # immediately. On the first login frame, defer reopening until after
+        # classification; otherwise a worker thread can emit a queued Buff in
+        # the brief gap before session recovery suspends normal automation.
+        recovery_was_active = getattr(
+            self, "_auto_relogin_state", "idle"
+        ) != "idle"
+        if recovery_was_active:
             self.resume_input_after_capture()
 
         # Grayscale game window
@@ -5743,6 +8787,19 @@ class MapleStoryAutoBot:
         # Image for debug viz
         if self.is_show_debug_window:
             self.img_frame_debug = self.img_frame.copy()
+
+        # Session recovery is a global safety guard, not a gameplay FSM state.
+        # It must preempt route, health, watchdog, and combat behavior even
+        # when a saved minimap rectangle can still be cropped from a login page.
+        if self._check_auto_relogin_screen():
+            # A newly detected login page has now closed the normal-input gate;
+            # reopening capture availability enables only explicit recovery
+            # Enter/mouse commands.
+            self.resume_input_after_capture()
+            self.profiler.mark("Auto Relogin")
+            return -1
+
+        self.resume_input_after_capture()
 
         # Get current route image
         if self.cfg["bot"]["mode"] == "normal":
@@ -5762,25 +8819,12 @@ class MapleStoryAutoBot:
         if saved_geometry_status is False:
             return -1
         minimap_updated = saved_geometry_status is True
+        detected_minimap_result = None
 
         if saved_geometry_status is None:
             minimap_result = get_minimap_loc_size(self.img_frame)
-            if minimap_result is None:
-                if not self.is_debug_mode() and \
-                    not self.remote_keyboard_target() and \
-                    time.time() - self.t_last_minimap_update > 30:
-                    # Unable to get minimap for 30 seconds -> assume it's login screen
-                    loc_login_button = self.get_login_button_location()
-                    if loc_login_button:
-                        logger.info("Found login button on screen. Proceed to login.")
-                        self.click_game_ui(loc_login_button, "auto_login")
-                        time.sleep(3)
-                        self.click_game_ui(
-                            self.cfg["ui_coords"]["select_character"],
-                            "auto_login",
-                        )
-                        time.sleep(2)
-            else:
+            detected_minimap_result = minimap_result
+            if minimap_result is not None:
                 x, y, w, h = minimap_result
                 # Shrink the detected white border by one pixel on every side.
                 x += 1
@@ -5918,6 +8962,28 @@ class MapleStoryAutoBot:
             self.loc_player_minimap = copy_minimap_native_location(
                 loc_player_minimap_source
             )
+
+        # A fixed crop alone is not proof that the game is back. Require a
+        # player dot from the current minimap raster on consecutive frames,
+        # and keep every gameplay producer gated until that proof is fresh.
+        relogin_state = getattr(self, "_auto_relogin_state", "idle")
+        if relogin_state in {"waiting_game", "failed"} and \
+                detected_minimap_result is None:
+            detected_minimap_result = get_minimap_loc_size(self.img_frame)
+        minimap_structure_confirmed = (
+            relogin_state not in {"waiting_game", "failed"}
+            or self._auto_relogin_minimap_structure_valid(
+                detected_minimap_result
+            )
+        )
+        game_ready_location = (
+            loc_player_minimap_source
+            if minimap_updated and minimap_structure_confirmed
+            else None
+        )
+        if self._gate_auto_relogin_until_game_ready(game_ready_location):
+            self.profiler.mark("Auto Relogin Game Ready")
+            return -1
 
         # Get other player location on minimap
         loc_other_players = get_all_other_player_locations_on_minimap(

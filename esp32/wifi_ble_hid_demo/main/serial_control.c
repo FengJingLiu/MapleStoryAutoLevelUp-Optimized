@@ -21,6 +21,8 @@
 #define SERIAL_LINE_CAPACITY 160
 #define SERIAL_CHUNK_CAPACITY 96
 #define DEFAULT_TAP_MS 60
+#define MOUSE_MAX_COMMAND_DELTA 32767
+#define ABSOLUTE_MOUSE_MAX_COORDINATE 32767
 
 typedef enum {
     COMMAND_REJECTED = 0,
@@ -91,6 +93,47 @@ static bool parse_decimal(const char *token, uint32_t *value)
     return true;
 }
 
+static bool parse_mouse_delta(const char *token, int32_t *value)
+{
+    if (token == NULL || *token == '\0') {
+        return false;
+    }
+
+    char *end = NULL;
+    errno = 0;
+    long parsed = strtol(token, &end, 10);
+    if (errno != 0 || end == token || *end != '\0' ||
+        parsed < -MOUSE_MAX_COMMAND_DELTA ||
+        parsed > MOUSE_MAX_COMMAND_DELTA) {
+        return false;
+    }
+    *value = (int32_t)parsed;
+    return true;
+}
+
+static bool parse_mouse_button(char *token, uint8_t *button)
+{
+    if (token == NULL || *token == '\0') {
+        return false;
+    }
+    for (char *p = token; *p != '\0'; ++p) {
+        *p = (char)toupper((unsigned char)*p);
+    }
+    if (strcmp(token, "LEFT") == 0 || strcmp(token, "1") == 0) {
+        *button = 0x01;
+        return true;
+    }
+    if (strcmp(token, "RIGHT") == 0 || strcmp(token, "2") == 0) {
+        *button = 0x02;
+        return true;
+    }
+    if (strcmp(token, "MIDDLE") == 0 || strcmp(token, "3") == 0) {
+        *button = 0x04;
+        return true;
+    }
+    return false;
+}
+
 static bool no_extra_token(char **save)
 {
     return strtok_r(NULL, " \t", save) == NULL;
@@ -114,6 +157,7 @@ static command_result_t handle_command(char *line)
             (void)send_all("ERR BAD_ARGUMENTS\n");
             return COMMAND_REJECTED;
         }
+        (void)ble_mouse_retry_pending_release();
         (void)send_all("PONG\n");
         return COMMAND_ACCEPTED;
     }
@@ -123,9 +167,11 @@ static command_result_t handle_command(char *line)
             (void)send_all("ERR BAD_ARGUMENTS\n");
             return COMMAND_REJECTED;
         }
+        (void)ble_mouse_retry_pending_release();
         char response[96];
         snprintf(response, sizeof(response),
-                 "OK SERIAL=1 BLE_CONNECTED=%d BLE_READY=%d\n",
+                 "OK SERIAL=1 BLE_CONNECTED=%d BLE_READY=%d "
+                 "MOUSE=1 MOUSE_ABS=1\n",
                  ble_keyboard_connected(), ble_keyboard_ready());
         (void)send_all(response);
         return COMMAND_ACCEPTED;
@@ -137,7 +183,8 @@ static command_result_t handle_command(char *line)
             return COMMAND_REJECTED;
         }
         (void)send_all(
-            "OK COMMANDS=PING,STATUS,DOWN,UP,TAP,STATE,RELEASE_ALL,HELP\n");
+            "OK COMMANDS=PING,STATUS,DOWN,UP,TAP,STATE,RELEASE_ALL,"
+            "MOUSE_MOVE,MOUSE_DOWN,MOUSE_UP,MOUSE_CLICK,MOUSE_CLICK_AT,HELP\n");
         return COMMAND_ACCEPTED;
     }
 
@@ -202,6 +249,126 @@ static command_result_t handle_command(char *line)
         char response[48];
         snprintf(response, sizeof(response), "OK TAP 0x%02X %" PRIu32 "ms\n",
                  usage, duration_ms);
+        (void)send_all(response);
+        return COMMAND_ACCEPTED;
+    }
+
+    if (strcmp(command, "MOUSE_MOVE") == 0) {
+        char *dx_token = strtok_r(NULL, " \t", &save);
+        char *dy_token = strtok_r(NULL, " \t", &save);
+        char *wheel_token = strtok_r(NULL, " \t", &save);
+        int32_t dx;
+        int32_t dy;
+        int32_t wheel = 0;
+        bool valid = parse_mouse_delta(dx_token, &dx) &&
+                     parse_mouse_delta(dy_token, &dy);
+        if (wheel_token != NULL) {
+            valid = valid && parse_mouse_delta(wheel_token, &wheel);
+        }
+        if (!valid || !no_extra_token(&save)) {
+            (void)send_all("ERR BAD_MOUSE_MOVE_ARGUMENTS\n");
+            return COMMAND_REJECTED;
+        }
+
+        esp_err_t err = ble_mouse_move(dx, dy, wheel);
+        if (err != ESP_OK) {
+            (void)send_error_for_hid_result(err);
+            return COMMAND_REJECTED;
+        }
+        char response[80];
+        snprintf(response, sizeof(response),
+                 "OK MOUSE_MOVE %" PRId32 " %" PRId32 " %" PRId32 "\n",
+                 dx, dy, wheel);
+        (void)send_all(response);
+        return COMMAND_ACCEPTED;
+    }
+
+    if (strcmp(command, "MOUSE_DOWN") == 0 ||
+        strcmp(command, "MOUSE_UP") == 0) {
+        char *button_token = strtok_r(NULL, " \t", &save);
+        uint8_t button;
+        if (!parse_mouse_button(button_token, &button) ||
+            !no_extra_token(&save)) {
+            (void)send_all("ERR BAD_MOUSE_BUTTON\n");
+            return COMMAND_REJECTED;
+        }
+
+        esp_err_t err = strcmp(command, "MOUSE_DOWN") == 0
+                            ? ble_mouse_button_down(button)
+                            : ble_mouse_button_up(button);
+        if (err != ESP_OK) {
+            (void)send_error_for_hid_result(err);
+            return COMMAND_REJECTED;
+        }
+        char response[40];
+        snprintf(response, sizeof(response), "OK %s 0x%02X\n",
+                 command, button);
+        (void)send_all(response);
+        return COMMAND_ACCEPTED;
+    }
+
+    if (strcmp(command, "MOUSE_CLICK") == 0) {
+        char *button_token = strtok_r(NULL, " \t", &save);
+        char *duration_token = strtok_r(NULL, " \t", &save);
+        uint8_t button;
+        uint32_t duration_ms = DEFAULT_TAP_MS;
+        bool valid = parse_mouse_button(button_token, &button);
+        if (duration_token != NULL) {
+            valid = valid && parse_decimal(duration_token, &duration_ms);
+        }
+        if (!valid || !no_extra_token(&save) || duration_ms == 0 ||
+            duration_ms > CONFIG_HID_MAX_TAP_MS) {
+            (void)send_all("ERR BAD_MOUSE_CLICK_ARGUMENTS\n");
+            return COMMAND_REJECTED;
+        }
+
+        esp_err_t err = ble_mouse_click(button, duration_ms);
+        if (err != ESP_OK) {
+            (void)send_error_for_hid_result(err);
+            return COMMAND_REJECTED;
+        }
+        char response[56];
+        snprintf(response, sizeof(response),
+                 "OK MOUSE_CLICK 0x%02X %" PRIu32 "ms\n",
+                 button, duration_ms);
+        (void)send_all(response);
+        return COMMAND_ACCEPTED;
+    }
+
+    if (strcmp(command, "MOUSE_CLICK_AT") == 0) {
+        char *x_token = strtok_r(NULL, " \t", &save);
+        char *y_token = strtok_r(NULL, " \t", &save);
+        char *button_token = strtok_r(NULL, " \t", &save);
+        char *duration_token = strtok_r(NULL, " \t", &save);
+        uint32_t x;
+        uint32_t y;
+        uint8_t button;
+        uint32_t duration_ms = DEFAULT_TAP_MS;
+        bool valid = parse_decimal(x_token, &x) &&
+                     parse_decimal(y_token, &y) &&
+                     x <= ABSOLUTE_MOUSE_MAX_COORDINATE &&
+                     y <= ABSOLUTE_MOUSE_MAX_COORDINATE &&
+                     parse_mouse_button(button_token, &button);
+        if (duration_token != NULL) {
+            valid = valid && parse_decimal(duration_token, &duration_ms);
+        }
+        if (!valid || !no_extra_token(&save) || duration_ms == 0 ||
+            duration_ms > CONFIG_HID_MAX_TAP_MS) {
+            (void)send_all("ERR BAD_MOUSE_CLICK_AT_ARGUMENTS\n");
+            return COMMAND_REJECTED;
+        }
+
+        esp_err_t err = ble_mouse_click_at(
+            (uint16_t)x, (uint16_t)y, button, duration_ms);
+        if (err != ESP_OK) {
+            (void)send_error_for_hid_result(err);
+            return COMMAND_REJECTED;
+        }
+        char response[96];
+        snprintf(response, sizeof(response),
+                 "OK MOUSE_CLICK_AT %" PRIu32 " %" PRIu32
+                 " 0x%02X %" PRIu32 "ms\n",
+                 x, y, button, duration_ms);
         (void)send_all(response);
         return COMMAND_ACCEPTED;
     }

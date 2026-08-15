@@ -1,5 +1,5 @@
 bot:
-  map: east_rocky_mountain_6
+  map: east_rocky_mountain_5_bottom
 buff_skill:
   keys:
   - ins

@@ -1,8 +1,8 @@
 bot:
-  map: east_rocky_mountain_6
+  map: east_rocky_mountain_5_bottom
 buff_skill:
   keys:
-  - ins
+  - insert
 directional_aoe:
   range_x: 400
 directional_attack:

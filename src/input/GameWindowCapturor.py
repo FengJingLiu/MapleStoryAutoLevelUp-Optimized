@@ -104,9 +104,12 @@ class GameWindowCapturor:
         logger.warning("[GameWindowCapturor] closed.")
         cv2.destroyAllWindows()
 
-    def get_frame(self):
+    def get_frame_snapshot(self):
         '''
-        Safely get latest game window frame.
+        Atomically get the latest frame and its capture timestamp.
+
+        Keeping the image and timestamp under the same lock prevents callers
+        from pairing an older image with a newer ``last_frame_time`` value.
         '''
         with self.lock:
             frame_timeout = float(
@@ -117,8 +120,18 @@ class GameWindowCapturor:
                 and self.last_frame_time > 0
                 and time.monotonic() - self.last_frame_time > frame_timeout
             ):
-                return None
-            return cv2.cvtColor(self.frame, cv2.COLOR_BGRA2BGR)
+                return None, None
+            return (
+                cv2.cvtColor(self.frame, cv2.COLOR_BGRA2BGR),
+                self.last_frame_time,
+            )
+
+    def get_frame(self):
+        '''
+        Safely get latest game window frame.
+        '''
+        frame, _ = self.get_frame_snapshot()
+        return frame
 
     def stop(self):
         '''

@@ -27,7 +27,6 @@ eng_to_cn:
   henesys_east_field: 射手村東部平原
   swamp_land_1: 沼澤地1
   east_rocky_mountain_5: 東部岩石山脈5
-  east_rocky_mountain_4: 東部岩石山脈4
   east_rocky_mountain_5_bottom: 東部岩石山脈5(底部)
   east_rocky_mountain_6: 東部岩石山脈6
   # monster
@@ -91,6 +90,4 @@ map_mobs_mapping:
   henesys_east_field: [pig, ribbon_pig]
   swamp_land_1: [wild_boar, fire_boar, zombie_mushroom]
   east_rocky_mountain_5: [cold_eye, wind_single_eye_beast, blue_perfume]
-  east_rocky_mountain_4: [cold_eye, wind_single_eye_beast, blue_perfume]
   east_rocky_mountain_5_bottom: [cold_eye, wind_single_eye_beast, blue_perfume]
-  east_rocky_mountain_6: [cold_eye, wind_single_eye_beast, blue_perfume]

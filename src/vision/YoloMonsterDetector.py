@@ -55,7 +55,7 @@ class YoloMonsterDetector:
         model_path,
         *,
         imgsz=1024,
-        confidence=0.5,
+        confidence=0.4,
         iou=0.7,
         max_det=100,
         device="auto",
@@ -147,7 +147,7 @@ class YoloMonsterDetector:
         return (
             str(model_path),
             int(config.get("imgsz", 1024)),
-            float(config.get("confidence", 0.5)),
+            float(config.get("confidence", 0.4)),
             float(config.get("iou", 0.7)),
             int(config.get("max_det", 100)),
             str(device),
@@ -160,7 +160,7 @@ class YoloMonsterDetector:
         return cls(
             config["model_path"],
             imgsz=config.get("imgsz", 1024),
-            confidence=config.get("confidence", 0.5),
+            confidence=config.get("confidence", 0.4),
             iou=config.get("iou", 0.7),
             max_det=config.get("max_det", 100),
             device=config.get("device", "auto"),

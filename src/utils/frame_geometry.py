@@ -169,7 +169,35 @@ def scale_runtime_pixel_config(
         scale_x,
     )
     _scale_scalar(result, ("power_knockback", "range_y"), scale_y)
+    for field_name in ("search_above_y", "search_below_y"):
+        _scale_scalar(
+            result,
+            ("power_knockback", "hp_bar_supplement", field_name),
+            scale_y,
+        )
+    for field_name in ("min_width", "max_width"):
+        _scale_scalar(
+            result,
+            ("power_knockback", "hp_bar_supplement", field_name),
+            scale_x,
+        )
+    for field_name in ("min_height", "max_height"):
+        _scale_scalar(
+            result,
+            ("power_knockback", "hp_bar_supplement", field_name),
+            scale_y,
+        )
+    _scale_scalar(
+        result,
+        ("power_knockback", "hp_bar_supplement", "min_area"),
+        scale_area,
+    )
     _scale_scalar(result, ("monster_detect", "search_box_margin"), scale_radius)
+    # YOLO returns boxes in the source-frame coordinate system. Keep the
+    # configured minimum box dimensions physically stable when native capture
+    # changes the source resolution.
+    _scale_scalar(result, ("monster_detect", "min_box_width"), scale_x)
+    _scale_scalar(result, ("monster_detect", "min_box_height"), scale_y)
     # This threshold is an intersection area in full-frame pixels, so it must
     # scale by both axes to retain the same physical overlap requirement.
     _scale_scalar(

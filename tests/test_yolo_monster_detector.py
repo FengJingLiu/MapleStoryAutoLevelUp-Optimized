@@ -92,6 +92,7 @@ class YoloMonsterDetectorTests(unittest.TestCase):
 
         self.assertEqual([item["position"] for item in detections], [(50, 20)])
         self.assertIs(model.predict_calls[0]["source"], frame)
+        self.assertEqual(model.predict_calls[0]["conf"], 0.4)
 
     def test_warmup_uses_runtime_shape_and_only_runs_once(self):
         detector, model = self.build_detector()
@@ -247,6 +248,44 @@ class YoloMonsterEngineIntegrationTests(unittest.TestCase):
             (30, 10, 90, 70),
         )
 
+    def test_yolo_box_size_filter_removes_too_narrow_or_short_boxes(self):
+        bot = MapleStoryAutoBot.__new__(MapleStoryAutoBot)
+        bot.cfg = {
+            "monster_detect": {
+                "min_box_width": 20,
+                "min_box_height": 15,
+            }
+        }
+        exact_threshold = {
+            "name": "mob",
+            "position": (0, 0),
+            "size": (15, 20),
+        }
+        large = {
+            "name": "mob",
+            "position": (30, 0),
+            "size": (30, 40),
+        }
+        too_narrow = {
+            "name": "mob",
+            "position": (60, 0),
+            "size": (30, 19),
+        }
+        too_short = {
+            "name": "mob",
+            "position": (90, 0),
+            "size": (14, 40),
+        }
+
+        filtered = bot.filter_yolo_detections_by_box_size([
+            exact_threshold,
+            large,
+            too_narrow,
+            too_short,
+        ])
+
+        self.assertEqual(filtered, [exact_threshold, large])
+
     def test_yolo_box_area_replaces_template_area_for_attack_overlap(self):
         bot = MapleStoryAutoBot.__new__(MapleStoryAutoBot)
         bot.cfg = {
@@ -339,7 +378,7 @@ class YoloMonsterEngineIntegrationTests(unittest.TestCase):
             ),
             model_path="model.pt",
             imgsz=1024,
-            confidence=0.5,
+            confidence=0.4,
             device="cpu",
             class_name="mob",
             warmup=Mock(return_value=0.0),

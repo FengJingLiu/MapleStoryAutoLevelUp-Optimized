@@ -1,4 +1,4 @@
-"""Thread-safe USB serial client for the ESP32 to BLE HID keyboard bridge."""
+"""Thread-safe USB serial client for the ESP32 BLE keyboard/mouse bridge."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ from serial.tools import list_ports
 
 
 class Esp32HidTapUncertainError(ConnectionError):
-    """A TAP may have reached the HID host, so it must not be replayed."""
+    """A one-shot TAP/click may have executed, so it must not be replayed."""
 
 
 KEY_USAGES: dict[str, int] = {}
@@ -113,6 +113,60 @@ SYMBOL_USAGES = {
     ".": 0x37,
     "/": 0x38,
 }
+
+MOUSE_BUTTONS = {
+    "left": ("LEFT", 0x01),
+    "right": ("RIGHT", 0x02),
+    "middle": ("MIDDLE", 0x04),
+}
+RELATIVE_MOUSE_MAX_DELTA = 32767
+ABSOLUTE_MOUSE_MAX_COORDINATE = 32767
+
+
+def mouse_button_from_text(value: str) -> tuple[str, int]:
+    """Return the firmware token and bit mask for a supported mouse button."""
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError("mouse button must be a non-empty string")
+    try:
+        return MOUSE_BUTTONS[value.strip().lower()]
+    except KeyError as exc:
+        raise ValueError(
+            f"unsupported mouse button: {value!r}; use left, right, or middle"
+        ) from exc
+
+
+def absolute_mouse_coordinate(value, name: str) -> int:
+    """Validate one normalized absolute HID coordinate."""
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"{name} must be an integer")
+    if not 0 <= value <= ABSOLUTE_MOUSE_MAX_COORDINATE:
+        raise ValueError(
+            f"{name} must be in the range 0..{ABSOLUTE_MOUSE_MAX_COORDINATE}"
+        )
+    return value
+
+
+def relative_mouse_delta(value, name: str) -> int:
+    """Validate one signed relative HID movement command component."""
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"{name} must be an integer")
+    if not -RELATIVE_MOUSE_MAX_DELTA <= value <= RELATIVE_MOUSE_MAX_DELTA:
+        raise ValueError(
+            f"{name} must be in the range "
+            f"-{RELATIVE_MOUSE_MAX_DELTA}..{RELATIVE_MOUSE_MAX_DELTA}"
+        )
+    return value
+
+
+def mouse_click_duration(value) -> int:
+    """Validate a mouse click duration accepted by the firmware."""
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError("ESP32 HID mouse click duration must be an integer")
+    if not 1 <= value <= 1000:
+        raise ValueError(
+            "ESP32 HID mouse click duration must be in the range 1..1000 ms"
+        )
+    return value
 
 
 def usage_from_text(value: str) -> int:
@@ -242,6 +296,7 @@ class Esp32HidClient:
         self._last_status = 0.0
         self._last_state_write = 0.0
         self._last_connect_attempt = 0.0
+        self._supports_absolute_mouse = False
         self._heartbeat_thread: threading.Thread | None = None
 
         with self._io_lock:
@@ -298,6 +353,11 @@ class Esp32HidClient:
                 return None
             return self._state_generation
 
+    @property
+    def supports_absolute_mouse(self) -> bool:
+        with self._io_lock:
+            return self._supports_absolute_mouse
+
     def _make_serial(self):
         selected_port = resolve_serial_port(
             self.configured_serial_port, self._port_lister
@@ -335,6 +395,7 @@ class Esp32HidClient:
         transport, self._serial = self._serial, None
         self._mark_state_discontinuous_locked(dirty=True)
         self._last_status = 0.0
+        self._supports_absolute_mouse = False
         self._close_serial(transport)
 
     @staticmethod
@@ -359,6 +420,7 @@ class Esp32HidClient:
         self._last_io = time.monotonic()
         if command == "STATUS":
             self._last_status = self._last_io
+            self._supports_absolute_mouse = "MOUSE_ABS=1" in response
         if response.startswith("ERR "):
             if response in {"ERR BLE_NOT_READY", "ERR HID_SEND_FAILED"}:
                 # Both responses mean the firmware has cleared (or cannot
@@ -464,6 +526,99 @@ class Esp32HidClient:
                     self._disconnect_locked()
                     raise Esp32HidTapUncertainError(str(exc)) from exc
                 raise
+
+    def _release_all_after_uncertain_action_locked(self) -> None:
+        """Best-effort idempotent cleanup without replaying a one-shot action."""
+        try:
+            response = self._request_locked("RELEASE_ALL", retry_safe=True)
+            if response != "OK RELEASE_ALL":
+                raise RuntimeError(
+                    f"unexpected RELEASE_ALL response: {response!r}"
+                )
+            self._mark_state_discontinuous_locked(dirty=False)
+        except (OSError, RuntimeError, ConnectionError):
+            # Force the next heartbeat/request through the connection handshake,
+            # which itself requires a successful RELEASE_ALL before proceeding.
+            self._disconnect_locked()
+
+    def _mouse_one_shot_locked(self, command: str, expected: str) -> str:
+        """Send one non-replayable mouse action and verify its exact ACK."""
+        action = command.split(maxsplit=1)[0]
+        try:
+            response = self._request_locked(command, retry_safe=False)
+            if response != expected:
+                raise Esp32HidTapUncertainError(
+                    f"unexpected {action} response: {response!r}"
+                )
+            return response
+        except Esp32HidTapUncertainError:
+            self._release_all_after_uncertain_action_locked()
+            raise
+        except RuntimeError as exc:
+            if str(exc) in {"ERR BLE_NOT_READY", "ERR HID_SEND_FAILED"}:
+                uncertain = Esp32HidTapUncertainError(str(exc))
+            elif not str(exc).startswith("ERR "):
+                self._disconnect_locked()
+                uncertain = Esp32HidTapUncertainError(str(exc))
+            else:
+                # A well-formed firmware ERR response confirms rejection, so
+                # the one-shot action did not execute and is not uncertain.
+                raise
+            self._release_all_after_uncertain_action_locked()
+            raise uncertain from exc
+
+    def mouse_move(self, dx: int, dy: int, wheel: int = 0) -> str:
+        """Move the mouse relatively exactly once without replay on ACK loss."""
+        dx = relative_mouse_delta(dx, "relative mouse dx")
+        dy = relative_mouse_delta(dy, "relative mouse dy")
+        wheel = relative_mouse_delta(wheel, "relative mouse wheel")
+        command = f"MOUSE_MOVE {dx} {dy} {wheel}"
+        expected = f"OK MOUSE_MOVE {dx} {dy} {wheel}"
+        with self._io_lock:
+            return self._mouse_one_shot_locked(command, expected)
+
+    def mouse_click(
+        self,
+        button: str = "left",
+        duration_ms: int = 50,
+    ) -> str:
+        """Click at the current pointer position exactly once."""
+        button_token, button_mask = mouse_button_from_text(button)
+        duration_ms = mouse_click_duration(duration_ms)
+        command = f"MOUSE_CLICK {button_token} {duration_ms}"
+        expected = f"OK MOUSE_CLICK 0x{button_mask:02X} {duration_ms}ms"
+        with self._io_lock:
+            return self._mouse_one_shot_locked(command, expected)
+
+    def mouse_click_at(
+        self,
+        x: int,
+        y: int,
+        button: str = "left",
+        duration_ms: int = 50,
+    ) -> str:
+        """Move to a normalized absolute point and click exactly once.
+
+        Like ``tap``, the command is deliberately never replayed after an I/O
+        failure: the HID host may have received it even when its serial ACK was
+        lost.
+        """
+        x = absolute_mouse_coordinate(x, "absolute mouse x")
+        y = absolute_mouse_coordinate(y, "absolute mouse y")
+        button_token, button_mask = mouse_button_from_text(button)
+        duration_ms = mouse_click_duration(duration_ms)
+        command = f"MOUSE_CLICK_AT {x} {y} {button_token} {duration_ms}"
+        expected = (
+            f"OK MOUSE_CLICK_AT {x} {y} 0x{button_mask:02X} {duration_ms}ms"
+        )
+
+        with self._io_lock:
+            self._connect_locked()
+            if not self._supports_absolute_mouse:
+                raise RuntimeError(
+                    "ESP32 firmware does not advertise MOUSE_ABS=1"
+                )
+            return self._mouse_one_shot_locked(command, expected)
 
     def set_state(self, keys: Iterable[str]) -> bool:
         usages = {usage_from_text(key) for key in keys if key}

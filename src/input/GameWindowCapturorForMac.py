@@ -145,7 +145,7 @@ class GameWindowCapturor:
             self.last_frame_time = time.monotonic()
             self.is_closed = False
 
-    def get_frame(self):
+    def get_frame_snapshot(self):
         '''
         安全地獲取最新的螢幕畫面
         '''
@@ -157,9 +157,17 @@ class GameWindowCapturor:
                 self.last_frame_time > 0
                 and time.monotonic() - self.last_frame_time > frame_timeout
             ):
-                return None
+                return None, None
             # cv2.imwrite("debug_frame.png", self.frame)
-            return cv2.cvtColor(self.frame, cv2.COLOR_BGRA2BGR)
+            return (
+                cv2.cvtColor(self.frame, cv2.COLOR_BGRA2BGR),
+                self.last_frame_time,
+            )
+
+    def get_frame(self):
+        '''Safely get the latest game window frame.'''
+        frame, _ = self.get_frame_snapshot()
+        return frame
 
     def on_closed(self):
         '''

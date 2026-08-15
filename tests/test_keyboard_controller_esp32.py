@@ -67,6 +67,217 @@ class KeyboardControllerEsp32RoutingTests(unittest.TestCase):
 
         controller_module._input_client.release_all.assert_called_once_with()
 
+    @staticmethod
+    def make_session_recovery_controller():
+        controller = controller_module.KeyBoardController.__new__(
+            controller_module.KeyBoardController
+        )
+        controller.command_lock = controller_module.threading.RLock()
+        controller.is_enable = True
+        controller.capture_available = True
+        controller.is_terminated = False
+        controller.session_recovery_active = False
+        controller.is_need_force_heal = True
+        controller.cmd_left_right = "left"
+        controller.cmd_up_down = "up"
+        controller.cmd_action = "attack"
+        controller._last_source_action = "attack"
+        controller.cached_facing = "left"
+        controller.cmd_left_right_last = "left"
+        controller.cmd_up_down_last = "up"
+        controller.direction_held_since = 1.0
+        controller.is_game_window_active = Mock(return_value=True)
+        return controller
+
+    def test_session_recovery_gates_worker_but_allows_explicit_enter(self):
+        controller_module._input_allowed.set()
+        controller = self.make_session_recovery_controller()
+
+        self.assertTrue(
+            controller.suspend_automation_for_session_recovery()
+        )
+
+        self.assertTrue(controller.session_recovery_active)
+        self.assertFalse(controller_module._input_allowed.is_set())
+        self.assertEqual(
+            (
+                controller.cmd_left_right,
+                controller.cmd_up_down,
+                controller.cmd_action,
+            ),
+            ("none", "none", "none"),
+        )
+        self.assertFalse(controller.is_need_force_heal)
+        controller_module._input_client.release_all.assert_called_once_with()
+
+        # Normal automatic paths remain closed, including a stale movement
+        # snapshot captured by the worker before the suspension.
+        self.assertFalse(controller_module.press_key("ins"))
+        self.assertFalse(controller.update_movement_state("left", "up"))
+        controller_module._input_client.set_state.assert_not_called()
+
+        self.assertTrue(controller.press_session_recovery_key("enter"))
+        controller_module._input_client.tap.assert_called_once_with(
+            "enter", 50
+        )
+
+        self.assertTrue(
+            controller.resume_automation_after_session_recovery()
+        )
+        self.assertFalse(controller.session_recovery_active)
+        self.assertTrue(controller_module._input_allowed.is_set())
+
+    def test_paused_user_gate_blocks_explicit_session_recovery_key(self):
+        controller = self.make_session_recovery_controller()
+        controller.suspend_automation_for_session_recovery()
+        controller.is_enable = False
+
+        self.assertFalse(controller.press_session_recovery_key("enter"))
+
+        controller_module._input_client.tap.assert_not_called()
+
+    def test_session_recovery_click_normalizes_capture_point(self):
+        controller = self.make_session_recovery_controller()
+        controller.session_recovery_active = True
+        controller_module._input_client.mouse_click_at.return_value = (
+            "OK MOUSE_CLICK_AT 16384 16384 0x01 50ms"
+        )
+
+        self.assertTrue(
+            controller.click_session_recovery_point(
+                1789,
+                1006,
+                3579,
+                2013,
+                button="left",
+                duration=0.05,
+            )
+        )
+
+        controller_module._input_client.mouse_click_at.assert_called_once_with(
+            16384,
+            16384,
+            "left",
+            50,
+        )
+
+    def test_session_recovery_click_is_consumed_when_ack_is_uncertain(self):
+        controller = self.make_session_recovery_controller()
+        controller.session_recovery_active = True
+        controller_module._input_client.mouse_click_at.side_effect = (
+            Esp32HidTapUncertainError("response lost")
+        )
+
+        self.assertTrue(
+            controller.click_session_recovery_point(100, 200, 3579, 2013)
+        )
+
+        controller_module._input_client.mouse_click_at.assert_called_once()
+
+    def test_session_recovery_click_checks_every_safety_gate(self):
+        cases = {
+            "session": lambda controller: setattr(
+                controller, "session_recovery_active", False
+            ),
+            "user_pause": lambda controller: setattr(
+                controller, "is_enable", False
+            ),
+            "capture": lambda controller: setattr(
+                controller, "capture_available", False
+            ),
+            "terminate": lambda controller: setattr(
+                controller, "is_terminated", True
+            ),
+            "foreground": lambda controller: (
+                controller.is_game_window_active.reset_mock(),
+                setattr(
+                    controller.is_game_window_active,
+                    "return_value",
+                    False,
+                ),
+            ),
+        }
+        for name, close_gate in cases.items():
+            with self.subTest(gate=name):
+                controller = self.make_session_recovery_controller()
+                controller.session_recovery_active = True
+                close_gate(controller)
+                controller_module._input_client.reset_mock()
+
+                self.assertFalse(
+                    controller.click_session_recovery_point(
+                        100, 200, 3579, 2013
+                    )
+                )
+
+                controller_module._input_client.mouse_click_at.assert_not_called()
+
+    def test_session_recovery_click_rejects_invalid_frame_points(self):
+        controller = self.make_session_recovery_controller()
+        controller.session_recovery_active = True
+        invalid_points = (
+            (-1, 0, 3579, 2013),
+            (3579, 0, 3579, 2013),
+            (0, 2013, 3579, 2013),
+            (0, 0, 1, 2013),
+            (float("nan"), 0, 3579, 2013),
+        )
+        for point in invalid_points:
+            with self.subTest(point=point):
+                self.assertFalse(
+                    controller.click_session_recovery_point(*point)
+                )
+
+        controller_module._input_client.mouse_click_at.assert_not_called()
+
+    def test_session_recovery_relative_mouse_move_and_current_click(self):
+        controller = self.make_session_recovery_controller()
+        controller.session_recovery_active = True
+        controller_module._input_client.mouse_move.return_value = (
+            "OK MOUSE_MOVE 24 -11 0"
+        )
+        controller_module._input_client.mouse_click.return_value = (
+            "OK MOUSE_CLICK 0x01 50ms"
+        )
+
+        self.assertTrue(controller.move_session_recovery_mouse(24, -11))
+        self.assertTrue(
+            controller.click_session_recovery_mouse(
+                button="left", duration=0.05
+            )
+        )
+
+        controller_module._input_client.mouse_move.assert_called_once_with(
+            24, -11, 0
+        )
+        controller_module._input_client.mouse_click.assert_called_once_with(
+            "left", 50
+        )
+        controller_module._input_client.mouse_click_at.assert_not_called()
+
+    def test_uncertain_relative_move_is_consumed_for_visual_recheck(self):
+        controller = self.make_session_recovery_controller()
+        controller.session_recovery_active = True
+        controller_module._input_client.mouse_move.side_effect = (
+            Esp32HidTapUncertainError("response lost")
+        )
+
+        self.assertTrue(controller.move_session_recovery_mouse(10, 5))
+
+        controller_module._input_client.mouse_move.assert_called_once_with(
+            10, 5, 0
+        )
+
+    def test_relative_recovery_mouse_checks_session_gate(self):
+        controller = self.make_session_recovery_controller()
+        controller.session_recovery_active = False
+
+        self.assertFalse(controller.move_session_recovery_mouse(10, 5))
+        self.assertFalse(controller.click_session_recovery_mouse())
+
+        controller_module._input_client.mouse_move.assert_not_called()
+        controller_module._input_client.mouse_click.assert_not_called()
+
     def test_movement_axes_are_sent_as_one_atomic_state(self):
         controller_module._input_allowed.set()
         controller = controller_module.KeyBoardController.__new__(
@@ -315,6 +526,110 @@ class KeyboardControllerEsp32RoutingTests(unittest.TestCase):
         self.assertFalse(controller_module.press_key("space"))
 
     @staticmethod
+    def make_directional_jump_controller(
+        direction_last="none", held_since=None
+    ):
+        controller = controller_module.KeyBoardController.__new__(
+            controller_module.KeyBoardController
+        )
+        controller.command_lock = controller_module.threading.RLock()
+        controller.cached_facing = (
+            direction_last if direction_last in {"left", "right"} else None
+        )
+        controller.cmd_left_right_last = direction_last
+        controller.cmd_up_down_last = "none"
+        controller.direction_held_since = held_since
+        controller.directional_jump_runup_ms = 180
+        controller.cfg = {"key": {"jump": "space"}}
+        return controller
+
+    def test_directional_jump_from_rest_builds_full_runup_before_tap(self):
+        controller_module._input_allowed.set()
+        controller = self.make_directional_jump_controller()
+        calls_seen_while_running_up = []
+
+        def record_runup(duration):
+            self.assertAlmostEqual(duration, 0.18)
+            calls_seen_while_running_up.extend(
+                controller_module._input_client.method_calls
+            )
+
+        with patch.object(
+            controller_module.time, "monotonic", return_value=10.0
+        ), patch.object(
+            controller_module.time, "sleep", side_effect=record_runup
+        ) as sleep:
+            self.assertTrue(controller.perform_directional_jump("left"))
+
+        sleep.assert_called_once()
+        self.assertEqual(
+            calls_seen_while_running_up,
+            [call.set_state(["left"])],
+        )
+        self.assertEqual(
+            controller_module._input_client.method_calls,
+            [call.set_state(["left"]), call.tap("space", 50)],
+        )
+        self.assertEqual(controller.cmd_left_right_last, "left")
+        self.assertEqual(controller.direction_held_since, 10.0)
+
+    def test_directional_jump_only_waits_for_missing_runup(self):
+        controller_module._input_allowed.set()
+        controller = self.make_directional_jump_controller(
+            direction_last="right", held_since=9.9
+        )
+
+        with patch.object(
+            controller_module.time, "monotonic", return_value=10.0
+        ), patch.object(controller_module.time, "sleep") as sleep:
+            self.assertTrue(controller.perform_directional_jump("right"))
+
+        sleep.assert_called_once()
+        self.assertAlmostEqual(sleep.call_args.args[0], 0.08)
+        self.assertEqual(
+            controller_module._input_client.method_calls,
+            [call.set_state(["right"]), call.tap("space", 50)],
+        )
+
+    def test_directional_jump_with_existing_momentum_does_not_wait(self):
+        controller_module._input_allowed.set()
+        controller = self.make_directional_jump_controller(
+            direction_last="left", held_since=9.0
+        )
+
+        with patch.object(
+            controller_module.time, "monotonic", return_value=10.0
+        ), patch.object(controller_module.time, "sleep") as sleep:
+            self.assertTrue(controller.perform_directional_jump("left"))
+
+        sleep.assert_not_called()
+        self.assertEqual(
+            controller_module._input_client.method_calls,
+            [call.set_state(["left"]), call.tap("space", 50)],
+        )
+
+    def test_pause_during_directional_jump_runup_prevents_late_tap(self):
+        controller_module._input_allowed.set()
+        controller = self.make_directional_jump_controller()
+
+        def pause_during_runup(_duration):
+            controller_module._input_allowed.clear()
+
+        with patch.object(
+            controller_module.time, "monotonic", return_value=10.0
+        ), patch.object(
+            controller_module.time, "sleep", side_effect=pause_during_runup
+        ):
+            self.assertFalse(controller.perform_directional_jump("right"))
+
+        controller_module._input_client.set_state.assert_called_once_with(
+            ["right"]
+        )
+        controller_module._input_client.tap.assert_not_called()
+        self.assertIsNone(controller.cached_facing)
+        self.assertIsNone(controller.direction_held_since)
+
+    @staticmethod
     def make_stationary_jump_controller():
         controller = controller_module.KeyBoardController.__new__(
             controller_module.KeyBoardController
@@ -467,6 +782,16 @@ class KeyboardControllerEsp32RoutingTests(unittest.TestCase):
         self.assertFalse(predicate("right", "none", "jump"))
         self.assertFalse(predicate("none", "down", "jump"))
         self.assertFalse(predicate("none", "none", "teleport"))
+
+    def test_only_horizontal_jump_uses_runup_transaction(self):
+        predicate = controller_module.KeyBoardController \
+            .is_directional_jump_command
+
+        self.assertTrue(predicate("left", "none", "jump"))
+        self.assertTrue(predicate("right", "stop", "jump"))
+        self.assertFalse(predicate("none", "none", "jump"))
+        self.assertFalse(predicate("left", "down", "jump"))
+        self.assertFalse(predicate("left", "none", "teleport"))
 
     def test_repeated_source_action_is_edge_triggered(self):
         controller = controller_module.KeyBoardController.__new__(
@@ -924,6 +1249,35 @@ class KeyboardControllerEsp32RoutingTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "must differ"):
             controller_module.KeyBoardController(cfg, connect_input=False)
+
+    def test_run_routes_horizontal_jump_to_runup_transaction(self):
+        controller = controller_module.KeyBoardController.__new__(
+            controller_module.KeyBoardController
+        )
+        controller.cfg = {
+            "esp32_hid": {"remote_target": True},
+            "bot": {"attack": "directional"},
+        }
+        controller.command_lock = controller_module.threading.RLock()
+        controller.is_enable = True
+        controller.capture_available = True
+        controller.is_terminated = False
+        controller.is_need_force_heal = False
+        controller.cmd_left_right = "left"
+        controller.cmd_up_down = "none"
+        controller.cmd_action = "jump"
+        controller.input_client = controller_module._input_client
+        controller.perform_directional_jump = Mock(return_value=True)
+        controller.release_all_key = Mock()
+
+        def stop_after_one_frame():
+            controller.is_terminated = True
+
+        controller.limit_fps = stop_after_one_frame
+        controller.run()
+
+        controller.perform_directional_jump.assert_called_once_with("left")
+        self.assertEqual(controller.cmd_action, "none")
 
     def test_run_routes_directional_aoe_to_the_aoe_key(self):
         controller = controller_module.KeyBoardController.__new__(

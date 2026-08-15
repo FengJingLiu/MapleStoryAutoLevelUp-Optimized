@@ -169,10 +169,46 @@ the ESP32 connection for detection-only debugging. With `remote_target: True`,
 computer A's foreground window is intentionally ignored because MapleStory is
 assumed to stay in front on B. Pausing, disconnecting, and exiting release every
 held key; stale capture video also suspends input until fresh frames return.
-The current firmware is keyboard-only, so remote mode does not run
-any mouse-dependent workflow: party-window handling, channel switching,
-automatic login/character selection, and local window activation are all
-disabled. Firmware and setup instructions are in `esp32/README.md`.
+General remote mouse workflows such as party-window handling, in-game channel
+switching, and local window activation remain disabled. Session recovery is a
+scoped exception: after each page has been visually confirmed, it locates the
+  captured hand cursor and uses small relative ESP32 `MOUSE_MOVE` steps. Before
+  any click, a probe/steering move must produce a fresh captured cursor motion
+  in the commanded direction; a static cursor-like UI sprite is never enough.
+  Only two consecutive aligned frames may then issue a current-position
+  `MOUSE_CLICK`. It does not require `MOUSE_ABS=1`. The
+configured five-step flow is:
+
+1. Match the disconnect dialog, then send `Enter`.
+2. Match the connection page, then send `Enter`.
+3. Match the world page, then click the center of the **Piaopiao Pig** template.
+4. Match the channel page, then choose one of the configured 20 channel points
+   at random.
+5. Match the character page, then click the center of the **Start Game**
+   template.
+
+Gameplay control resumes only after fresh minimap player dots are confirmed in
+consecutive frames. Each action is gated by its own page template; if the next
+page or fresh gameplay evidence does not appear before its timeout, recovery
+fails closed and leaves gameplay input suspended for manual recovery. The
+bundled Chinese-page templates were recorded at 3579x2013 pixels
+(`flow_template_reference_size: [2013, 3579]`, height then width), and configured
+regions and click points scale with the captured frame. Keep the same UI layout
+  and cursor appearance, or replace the templates, cursor hotspot, coordinates,
+  and fixed-point channel anchor in `auto_relogin` for your client. Page overlays
+  are classified before acting (including channel-over-world and modal
+  disconnect priority), while fixed channel points follow the current matched
+  page anchor. Weak/ambiguous cursor matches, stale frames,
+page loss, capture resizing, movement stalls, and all timeouts fail closed
+without clicking. This flow recovers an already authenticated session; it does
+not enter credentials or handle launchers, CAPTCHA, two-factor prompts, or
+unexpected pages. Firmware and setup instructions are in `esp32/README.md`.
+
+The PotPlayer window may be on any monitor of computer A; its desktop position
+is not used for remote clicks. Magpie, Windows DPI scaling, and the game window's
+desktop offset may change how far one relative HID step moves, but the next
+captured cursor position corrects that error. The cursor must remain visible in
+the capture and retain the configured template scale.
 
 For visual verification, select `debug` in the UI's **Bot Mode** list, select
 the current map, open **Game Window Viz**, and press F1. Debug mode loads that
