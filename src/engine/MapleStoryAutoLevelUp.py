@@ -88,6 +88,13 @@ class MapleStoryAutoBot:
         self._stationary_jump_aligned_since = None
         self._stationary_jump_alignment_active = False
         self._stationary_jump_fired_key = None
+        self._rope_climb_targets_by_route = []
+        self._rope_climb_state = None
+        self._rope_climb_active = False
+        self._rope_climb_completed_key = None
+        self._rope_climb_failed_key = None
+        self._rope_climb_completed_position = None
+        self._rope_climb_failed_position = None
         self._portal_sweep_active = False
         self._portal_sweep_key = None
         self._portal_sweep_region = None
@@ -431,6 +438,7 @@ class MapleStoryAutoBot:
         if self.kb is None or getattr(self, "_input_suspended_for_capture", False):
             return False
         self._reset_stationary_jump_alignment()
+        self._reset_rope_climb(clear_locks=True)
         self._reset_portal_sweep()
         self.kb.set_command("none none none")
         if hasattr(self.kb, "set_capture_available"):
@@ -557,7 +565,9 @@ class MapleStoryAutoBot:
         self.img_route_debug = None
         self.img_routes = []
         self._stationary_jump_targets_by_route = []
+        self._rope_climb_targets_by_route = []
         self._reset_stationary_jump_alignment()
+        self._reset_rope_climb(clear_locks=True)
         self._reset_portal_sweep()
         self.monsters_info = {}
         self.minimap_geometry = None
@@ -659,6 +669,7 @@ class MapleStoryAutoBot:
             route_files = [p for p in route_files if not p.endswith("route_rest.png")]
             self.img_routes = []
             self._stationary_jump_targets_by_route = []
+            self._rope_climb_targets_by_route = []
             for route_file in route_files:
                 img = cv2.cvtColor(load_image(route_file), cv2.COLOR_BGR2RGB)
                 # Remove pixel in map that is color code
@@ -667,6 +678,9 @@ class MapleStoryAutoBot:
                 self.img_routes.append(img)
                 self._stationary_jump_targets_by_route.append(
                     self._find_stationary_jump_targets(img)
+                )
+                self._rope_climb_targets_by_route.append(
+                    self._find_rope_climb_targets(img)
                 )
 
         if mode in {"normal", "debug"} and monster_backend == "template":
@@ -1165,6 +1179,7 @@ class MapleStoryAutoBot:
             self.t_last_minimap_update = time.time()
             self.t_to_change_channel = time.time()
             self._reset_stationary_jump_alignment()
+            self._reset_rope_climb(clear_locks=True)
             self._reset_portal_sweep()
 
             # Set init state
@@ -2808,6 +2823,622 @@ class MapleStoryAutoBot:
         self.cmd_action = "jump_aligned"
 
     @staticmethod
+    def _is_rope_climb_route_command(command):
+        """Return whether a route color marks a rope's upper endpoint."""
+        parts = str(command).split()
+        return (
+            len(parts) == 3
+            and parts[0] in {"none", "stop"}
+            and parts[1] == "up"
+            and parts[2] == "climb"
+        )
+
+    def _find_rope_climb_targets(self, img_route):
+        """Find hand-drawn platform-to-rope guide components."""
+        if img_route is None:
+            return ()
+
+        targets = []
+        for color, command in self.color_code.items():
+            if not self._is_rope_climb_route_command(command):
+                continue
+
+            mask = np.all(img_route == color, axis=2).astype(np.uint8)
+            component_count, labels, stats, _ = \
+                cv2.connectedComponentsWithStats(mask, connectivity=8)
+            for component_idx in range(1, component_count):
+                x, y, width, height, area = map(
+                    int, stats[component_idx]
+                )
+                if area < 2:
+                    continue
+
+                ys, xs = np.where(labels == component_idx)
+                points = tuple(
+                    (int(px), int(py)) for px, py in zip(xs, ys)
+                )
+
+                # A two-sweep diameter gives stable endpoints for a straight
+                # or gently bent hand-drawn guide without assuming it is
+                # horizontal. Runtime picks the endpoint farther from Hero as
+                # the rope contact point.
+                seed = min(points, key=lambda point: (point[1], point[0]))
+
+                def squared_distance(first, second):
+                    return (
+                        (first[0] - second[0]) ** 2
+                        + (first[1] - second[1]) ** 2
+                    )
+
+                endpoint_a = max(
+                    points,
+                    key=lambda point: (
+                        squared_distance(seed, point), point[1], point[0]
+                    ),
+                )
+                endpoint_b = max(
+                    points,
+                    key=lambda point: (
+                        squared_distance(endpoint_a, point),
+                        point[1],
+                        point[0],
+                    ),
+                )
+                endpoints = tuple(sorted((endpoint_a, endpoint_b)))
+                targets.append({
+                    "color": tuple(color),
+                    "command": command,
+                    "pixels": frozenset(points),
+                    "endpoints": endpoints,
+                    "bbox": (x, y, width, height),
+                })
+
+        return tuple(sorted(
+            targets,
+            key=lambda target: (
+                target["bbox"][1], target["bbox"][0]
+            ),
+        ))
+
+    def _get_active_rope_climb_targets(self):
+        """Return cached guide components for the active route."""
+        route_idx = int(getattr(self, "idx_routes", 0))
+        routes = getattr(self, "img_routes", ())
+        cached = getattr(self, "_rope_climb_targets_by_route", ())
+        if 0 <= route_idx < len(routes) and \
+                0 <= route_idx < len(cached) and \
+                self.img_route is routes[route_idx]:
+            return cached[route_idx]
+        return self._find_rope_climb_targets(self.img_route)
+
+    @staticmethod
+    def _rope_climb_component_key(route_idx, target):
+        return (
+            int(route_idx),
+            tuple(target["bbox"]),
+            tuple(target["endpoints"]),
+        )
+
+    def _get_nearby_rope_climb_target(self):
+        """Acquire a guide and predict its far endpoint as the rope x."""
+        player = tuple(map(int, self.loc_player_global))
+        route_cfg = self.cfg.get("route", {})
+        detection_range = max(
+            0,
+            int(route_cfg.get(
+                "rope_climb_detection_range",
+                route_cfg.get("search_range", 10),
+            )),
+        )
+        completed_key = getattr(self, "_rope_climb_completed_key", None)
+        failed_key = getattr(self, "_rope_climb_failed_key", None)
+
+        candidates = []
+        for target in self._get_active_rope_climb_targets():
+            key = self._rope_climb_component_key(self.idx_routes, target)
+            if key in {completed_key, failed_key}:
+                continue
+            nearest_distance = min(
+                abs(point[0] - player[0]) + abs(point[1] - player[1])
+                for point in target["pixels"]
+            )
+            if nearest_distance > detection_range:
+                continue
+            endpoint_distances = [
+                (
+                    abs(endpoint[0] - player[0])
+                    + abs(endpoint[1] - player[1]),
+                    endpoint,
+                )
+                for endpoint in target["endpoints"]
+            ]
+            _, rope_endpoint = max(
+                endpoint_distances,
+                key=lambda item: (item[0], item[1][1], item[1][0]),
+            )
+            candidate = dict(target)
+            candidate["key"] = key
+            candidate["center"] = tuple(rope_endpoint)
+            candidates.append((
+                nearest_distance,
+                -max(distance for distance, _ in endpoint_distances),
+                candidate,
+            ))
+
+        if not candidates:
+            return None
+        return min(candidates, key=lambda item: item[:2])[-1]
+
+    def _reset_rope_climb(self, clear_locks=False):
+        """Release the climb state while optionally rearming all guides."""
+        self._rope_climb_state = None
+        self._rope_climb_active = False
+        if clear_locks:
+            self._rope_climb_completed_key = None
+            self._rope_climb_failed_key = None
+            self._rope_climb_completed_position = None
+            self._rope_climb_failed_position = None
+
+    def _clear_rope_climb_locks_if_departed(self):
+        """Rearm a guide after Hero leaves its completion/failure area."""
+        if getattr(self, "_rope_climb_completed_key", None) is None and \
+                getattr(self, "_rope_climb_failed_key", None) is None:
+            return
+        player_x, player_y = map(int, self.loc_player_global)
+        route_idx = int(self.idx_routes)
+        route_cfg = self.cfg.get("route", {})
+        detection_range = max(
+            1,
+            int(route_cfg.get(
+                "rope_climb_detection_range",
+                route_cfg.get("search_range", 10),
+            )),
+        )
+        runup_distance = max(
+            0, int(route_cfg.get("rope_climb_runup_distance", 8))
+        )
+        depart_distance = detection_range + runup_distance
+
+        for key_attr, position_attr in (
+            ("_rope_climb_completed_key", "_rope_climb_completed_position"),
+            ("_rope_climb_failed_key", "_rope_climb_failed_position"),
+        ):
+            key = getattr(self, key_attr, None)
+            position = getattr(self, position_attr, None)
+            if key is None:
+                continue
+            departed = key[0] != route_idx
+            if position is not None:
+                departed = departed or (
+                    abs(player_x - position[0]) > depart_distance
+                    or abs(player_y - position[1]) > depart_distance
+                )
+            if departed:
+                setattr(self, key_attr, None)
+                setattr(self, position_attr, None)
+
+    def _choose_rope_runup_side(self, target_x):
+        """Choose which side to back up to before running at the rope."""
+        player_x = int(self.loc_player_global[0])
+        tolerance = max(
+            0,
+            int(self.cfg.get("route", {}).get(
+                "rope_climb_align_tolerance", 1
+            )),
+        )
+        if player_x < target_x - tolerance:
+            side = "left"
+        elif player_x > target_x + tolerance:
+            side = "right"
+        else:
+            cached_facing = getattr(
+                getattr(self, "kb", None), "cached_facing", None
+            )
+            if cached_facing == "right":
+                side = "left"
+            elif cached_facing == "left":
+                side = "right"
+            else:
+                side = "left"
+        return side
+
+    def _set_rope_runup_side(self, state, side=None):
+        target_x = int(state["target"][0])
+        side = side or self._choose_rope_runup_side(target_x)
+        runup_distance = max(
+            0,
+            int(self.cfg.get("route", {}).get(
+                "rope_climb_runup_distance", 8
+            )),
+        )
+        width = self.img_route.shape[1] if self.img_route is not None else 0
+        if side == "left" and target_x - runup_distance < 0:
+            side = "right"
+        elif width > 0 and side == "right" and \
+                target_x + runup_distance >= width:
+            side = "left"
+        state["side"] = side
+        state["start_x"] = (
+            target_x - runup_distance
+            if side == "left"
+            else target_x + runup_distance
+        )
+        state["position_best_distance"] = None
+        state["position_last_progress_at"] = time.monotonic()
+
+    def _start_rope_climb(self, route_action):
+        """Create a climb state from one predicted rope guide endpoint."""
+        target = tuple(map(int, route_action["target_center"]))
+        key = route_action["guide_key"]
+        state = getattr(self, "_rope_climb_state", None)
+        if state is None or state.get("key") != key:
+            now = time.monotonic()
+            player_y = int(self.loc_player_global[1])
+            state = {
+                "key": key,
+                "target": target,
+                "phase": "position",
+                "started_at": now,
+                "aligned_since": None,
+                "mount_request_started_at": None,
+                "mount_origin_y": player_y,
+                "best_y": player_y,
+                "last_progress_at": now,
+                "last_y": player_y,
+                "last_y_change_at": now,
+                "attempts": 0,
+                "side": None,
+                "start_x": None,
+                "observed_ladder": bool(
+                    getattr(self, "is_on_ladder", False)
+                ),
+                "position_side_switches": 0,
+            }
+            self._set_rope_runup_side(state)
+            if state["observed_ladder"]:
+                state["phase"] = "climbing"
+                state["attempts"] = 1
+            else:
+                player_x = int(self.loc_player_global[0])
+                target_x = int(target[0])
+                tolerance = max(
+                    0,
+                    int(self.cfg.get("route", {}).get(
+                        "rope_climb_align_tolerance", 1
+                    )),
+                )
+                approach_side = None
+                approach_direction = None
+                if player_x < target_x - tolerance:
+                    approach_side = "left"
+                    approach_direction = "right"
+                elif player_x > target_x + tolerance:
+                    approach_side = "right"
+                    approach_direction = "left"
+
+                held_direction = getattr(
+                    getattr(self, "kb", None),
+                    "cmd_left_right_last",
+                    None,
+                )
+                if held_direction == approach_direction:
+                    self._set_rope_runup_side(
+                        state, side=approach_side
+                    )
+                    # Boundary fallback may have moved the generated runway
+                    # to the opposite side. Only use the seamless path when
+                    # the existing run still points from that runway at rope.
+                    if state["side"] == approach_side:
+                        state["phase"] = "running_approach"
+            self._rope_climb_state = state
+            if state["phase"] == "running_approach":
+                logger.info(
+                    "[route] Acquired climb guide while already running "
+                    f"toward {target}; keep moving without a stop and jump "
+                    f"at generated runway x={state['start_x']}"
+                )
+            else:
+                logger.info(
+                    "[route] Acquired climb guide; predicted rope contact at "
+                    f"{target} and generated {state['side']} runway "
+                    f"x={state['start_x']}"
+                )
+
+        self._rope_climb_active = True
+        return self._update_active_rope_climb()
+
+    def _finish_rope_climb(self):
+        state = getattr(self, "_rope_climb_state", None)
+        if state is None:
+            return
+        key = state["key"]
+        position = tuple(map(int, self.loc_player_global))
+        logger.info(
+            f"[route] Rope climb finished after {state['attempts']} "
+            "attempt(s) and sustained upward progress"
+        )
+        self._reset_rope_climb()
+        self._rope_climb_completed_key = key
+        self._rope_climb_completed_position = position
+
+    def _fail_rope_climb(self, reason):
+        state = getattr(self, "_rope_climb_state", None)
+        if state is None:
+            return
+        key = state["key"]
+        position = tuple(map(int, self.loc_player_global))
+        logger.warning(
+            f"[route] Rope climb {reason} near {state['target']}; "
+            "release input until the Hero leaves this guide"
+        )
+        self._reset_rope_climb()
+        self._rope_climb_failed_key = key
+        self._rope_climb_failed_position = position
+
+    def _prepare_rope_climb_retry(self, state):
+        previous_side = state.get("side")
+        next_side = "right" if previous_side == "left" else "left"
+        self._set_rope_runup_side(state, side=next_side)
+        state["phase"] = "position"
+        state["aligned_since"] = None
+        state["mount_request_started_at"] = None
+        state["position_side_switches"] = 0
+        logger.info(
+            "[route] Rope mount made no upward progress; retry from "
+            f"the {state['side']} side at x={state['start_x']}"
+        )
+
+    def _request_rope_mount(self, state, now, player_y):
+        """Publish one directional mount request without releasing the run."""
+        direction = "right" if state["side"] == "left" else "left"
+        state["phase"] = "mount_request"
+        state["attempts"] += 1
+        state["mount_request_started_at"] = now
+        state["mount_origin_y"] = player_y
+        state["best_y"] = player_y
+        state["last_progress_at"] = now
+        state["last_y"] = player_y
+        state["last_y_change_at"] = now
+        self.cmd_move_x = direction
+        self.cmd_move_y = "up"
+        self.cmd_action = f"rope_mount_{direction}"
+        return True
+
+    def _update_active_rope_climb(self):
+        """Drive retreat, directional mount, ascent, and retry feedback."""
+        state = getattr(self, "_rope_climb_state", None)
+        if state is None:
+            self._rope_climb_active = False
+            return False
+        kb = getattr(self, "kb", None)
+        if kb is not None and (
+                getattr(kb, "is_enable", True) is False
+                or getattr(kb, "capture_available", True) is False
+        ):
+            # F1 pause and capture suspension release all physical keys. Drop
+            # the visual transaction too, so wall-clock timeout cannot age it
+            # and resume cannot emit a delayed mount from stale coordinates.
+            self._reset_rope_climb()
+            return False
+        if int(self.idx_routes) != int(state["key"][0]):
+            self._reset_rope_climb()
+            return False
+
+        self._rope_climb_active = True
+        self.cmd_move_x = "none"
+        self.cmd_move_y = "none"
+        self.cmd_action = "rope_hold"
+
+        now = time.monotonic()
+        route_cfg = self.cfg.get("route", {})
+        max_duration = max(
+            0.1, float(route_cfg.get("rope_climb_max_duration", 15.0))
+        )
+        if now - state["started_at"] >= max_duration:
+            self._fail_rope_climb("timed out")
+            return True
+
+        player_x, player_y = map(int, self.loc_player_global)
+        phase = state["phase"]
+
+        if phase == "mount_request":
+            direction = "right" if state["side"] == "left" else "left"
+            request_hold = max(
+                0.20,
+                float(route_cfg.get("rope_climb_runup_ms", 180)) / 1000.0
+                + 0.05,
+            )
+            if now - state["mount_request_started_at"] < request_hold:
+                self.cmd_move_x = direction
+                self.cmd_move_y = "up"
+                self.cmd_action = f"rope_mount_{direction}"
+                return True
+            state["phase"] = "mounting"
+            phase = "mounting"
+
+        if phase in {"mounting", "climbing"}:
+            ladder_now = bool(getattr(self, "is_on_ladder", False))
+            state["observed_ladder"] = (
+                state["observed_ladder"] or ladder_now
+            )
+            if player_y < state["best_y"]:
+                state["best_y"] = player_y
+                state["last_progress_at"] = now
+            last_y = state.get("last_y", player_y)
+            if player_y != last_y:
+                state["last_y"] = player_y
+                state["last_y_change_at"] = now
+            else:
+                state.setdefault(
+                    "last_y_change_at",
+                    state.get("last_progress_at", now),
+                )
+
+            min_progress = max(
+                1, int(route_cfg.get("rope_climb_min_progress", 3))
+            )
+            upward_progress = state["mount_origin_y"] - state["best_y"]
+            current_elevation = state["mount_origin_y"] - player_y
+            if upward_progress >= min_progress or ladder_now:
+                state["phase"] = "climbing"
+                phase = "climbing"
+
+            no_progress_for = now - state["last_progress_at"]
+            stationary_for = now - state["last_y_change_at"]
+            finish_stall = max(
+                0.2,
+                float(route_cfg.get("rope_climb_finish_stall", 0.6)),
+            )
+            landing_tolerance = max(
+                0,
+                int(route_cfg.get("rope_climb_landing_tolerance", 2)),
+            )
+            attach_x_tolerance = max(
+                0,
+                int(route_cfg.get(
+                    "rope_climb_attach_x_tolerance", 3
+                )),
+            )
+            near_rope_x = (
+                abs(player_x - int(state["target"][0]))
+                <= attach_x_tolerance
+            )
+            if phase == "climbing" and not ladder_now and \
+                    upward_progress >= min_progress and \
+                    current_elevation > landing_tolerance and \
+                    near_rope_x and stationary_for >= finish_stall:
+                self._finish_rope_climb()
+                return True
+
+            retry_interval = max(
+                finish_stall,
+                float(route_cfg.get("rope_climb_retry_interval", 0.9)),
+            )
+            if ladder_now or no_progress_for < retry_interval or \
+                    current_elevation > landing_tolerance:
+                self.cmd_move_y = "up"
+                return True
+
+            max_attempts = max(
+                1, int(route_cfg.get("rope_climb_max_attempts", 4))
+            )
+            if state["attempts"] >= max_attempts:
+                self._fail_rope_climb("exhausted its mount retries")
+                return True
+            self._prepare_rope_climb_retry(state)
+            return True
+
+        if phase == "running_approach":
+            direction = "right" if state["side"] == "left" else "left"
+            start_x = int(state["start_x"])
+            tolerance = max(
+                0, int(route_cfg.get("rope_climb_align_tolerance", 1))
+            )
+            reached_runway = (
+                player_x >= start_x - tolerance
+                if direction == "right"
+                else player_x <= start_x + tolerance
+            )
+            self.cmd_move_x = direction
+            if reached_runway:
+                return self._request_rope_mount(
+                    state, now, player_y
+                )
+
+            remaining = (
+                start_x - player_x
+                if direction == "right"
+                else player_x - start_x
+            )
+            best_distance = state.get("position_best_distance")
+            if best_distance is None or remaining < best_distance:
+                state["position_best_distance"] = remaining
+                state["position_last_progress_at"] = now
+            position_timeout = max(
+                0.1,
+                float(route_cfg.get("rope_climb_position_timeout", 0.9)),
+            )
+            if now - state["position_last_progress_at"] >= position_timeout:
+                state["phase"] = "position"
+                state["aligned_since"] = None
+                logger.info(
+                    "[route] Continuous rope approach stopped making "
+                    "progress; fall back to runway positioning"
+                )
+            return True
+
+        tolerance = max(
+            0, int(route_cfg.get("rope_climb_align_tolerance", 1))
+        )
+        dx = int(state["start_x"]) - player_x
+        distance = abs(dx)
+        if distance > tolerance:
+            state["phase"] = "position"
+            state["aligned_since"] = None
+            best_distance = state.get("position_best_distance")
+            if best_distance is None or distance < best_distance:
+                state["position_best_distance"] = distance
+                state["position_last_progress_at"] = now
+            position_timeout = max(
+                0.1,
+                float(route_cfg.get("rope_climb_position_timeout", 0.9)),
+            )
+            if now - state["position_last_progress_at"] >= position_timeout:
+                state["position_side_switches"] = (
+                    state.get("position_side_switches", 0) + 1
+                )
+                if state["position_side_switches"] >= 2:
+                    self._fail_rope_climb(
+                        "could not reach a runway on either side"
+                    )
+                    return True
+                previous_side = state["side"]
+                next_side = "right" if previous_side == "left" else "left"
+                self._set_rope_runup_side(state, side=next_side)
+                logger.info(
+                    "[route] Runway position is blocked; switch from "
+                    f"{previous_side} to {state['side']} side"
+                )
+                return True
+            self.cmd_action = (
+                "rope_align_right" if dx > 0 else "rope_align_left"
+            )
+            return True
+
+        if phase != "settle" or state["aligned_since"] is None:
+            state["phase"] = "settle"
+            state["aligned_since"] = now
+            return True
+
+        settle_delay = max(
+            0.0, float(route_cfg.get("rope_climb_settle_delay", 0.15))
+        )
+        if now - state["aligned_since"] < settle_delay:
+            return True
+
+        return self._request_rope_mount(state, now, player_y)
+
+    def _ignore_completed_rope_up_pixel(self, pixel, command):
+        """Keep legacy gray Up strokes from immediately re-grabbing at top."""
+        completed_key = getattr(self, "_rope_climb_completed_key", None)
+        completed_position = getattr(
+            self, "_rope_climb_completed_position", None
+        )
+        if completed_key is None or completed_position is None or \
+                command != "none up none":
+            return False
+        if int(completed_key[0]) != int(self.idx_routes):
+            return False
+        x, y = map(int, pixel)
+        search_range = max(
+            1, int(self.cfg.get("route", {}).get("search_range", 10))
+        )
+        return (
+            abs(x - completed_position[0]) <= search_range
+            and abs(y - completed_position[1]) <= search_range * 2
+        )
+
+    @staticmethod
     def _is_portal_sweep_route_command(command):
         parts = str(command).split()
         return len(parts) == 3 and parts[2] == "portal"
@@ -3003,11 +3634,12 @@ class MapleStoryAutoBot:
         parts = str(command).split()
         return len(parts) == 3 and parts[2] != "none"
 
-    def get_nearest_color_code(self):
+    def get_nearest_color_code(self, include_rope_climb=True):
         '''
         Searches for route colors around the player on the route map.
 
         This function:
+        - Acquires a hand-drawn climb guide before reaching its rope endpoint.
         - Aligns compact stationary-jump blobs by their explicit center.
         - Requires the player's center pixel to overlap other point actions
           such as directional jump, teleport, goal, and stop.
@@ -3036,7 +3668,33 @@ class MapleStoryAutoBot:
         min_dist = float('inf')
         min_dist_up_down = float('inf')
 
-        stationary_jump_target = self._get_nearby_stationary_jump_target()
+        rope_climb_target = (
+            self._get_nearby_rope_climb_target()
+            if include_rope_climb
+            else None
+        )
+        if rope_climb_target is not None:
+            target_center = rope_climb_target["center"]
+            nearest = {
+                "pixel": target_center,
+                "color": rope_climb_target["color"],
+                "command": rope_climb_target["command"],
+                "distance": (
+                    abs(target_center[0] - x0)
+                    + abs(target_center[1] - y0)
+                ),
+                "exact_action": False,
+                "rope_climb": True,
+                "target_center": target_center,
+                "guide_key": rope_climb_target["key"],
+            }
+            min_dist = nearest["distance"]
+
+        stationary_jump_target = (
+            None
+            if rope_climb_target is not None
+            else self._get_nearby_stationary_jump_target()
+        )
         if stationary_jump_target is not None:
             target_center = stationary_jump_target["center"]
             nearest = {
@@ -3057,6 +3715,7 @@ class MapleStoryAutoBot:
             player_pixel = tuple(self.img_route[y0, x0])
             player_command = self.color_code.get(player_pixel)
             if player_command is not None and \
+                    not self._is_rope_climb_route_command(player_command) and \
                     self._route_command_requires_exact_position(player_command):
                 portal_region = None
                 portal_failed = False
@@ -3102,7 +3761,8 @@ class MapleStoryAutoBot:
                 # Movement-only route colors retain the configured search
                 # tolerance. Point actions were handled only at (x0, y0)
                 # above and are deliberately ignored everywhere else.
-                if stationary_jump_target is None and \
+                if rope_climb_target is None and \
+                        stationary_jump_target is None and \
                         command is not None and \
                         not self._route_command_requires_exact_position(command) and \
                         dist < min_dist:
@@ -3115,11 +3775,15 @@ class MapleStoryAutoBot:
                     }
                     min_dist = dist
                 # Get nearest color (up, dowm)
-                if pixel in self.color_code_up_down and dist < min_dist_up_down:
+                up_down_command = self.color_code_up_down.get(pixel)
+                if up_down_command is not None and \
+                        not self._ignore_completed_rope_up_pixel(
+                            (x, y), up_down_command
+                        ) and dist < min_dist_up_down:
                     nearest_up_down = {
                         "pixel": (x, y),
                         "color": pixel,
-                        "command": self.color_code_up_down[pixel],
+                        "command": up_down_command,
                         "distance": dist
                     }
                     min_dist_up_down = dist
@@ -4105,11 +4769,11 @@ class MapleStoryAutoBot:
         Returns:
             bool: True if the player is stuck, False otherwise.
         """
-        if getattr(self, "_stationary_jump_alignment_active", False) or \
+        if getattr(self, "_rope_climb_active", False) or \
+                getattr(self, "_stationary_jump_alignment_active", False) or \
                 getattr(self, "_portal_sweep_active", False):
-            # Centering may intentionally spend longer than the normal stuck
-            # timeout issuing tiny corrections, verifying a full stop, or
-            # searching a portal region while Up remains held.
+            # Route-owned feedback loops may intentionally spend longer than
+            # the normal stuck timeout positioning, retrying, or holding Up.
             self.loc_watch_dog = self.loc_player_global
             self.t_watch_dog = time.time()
             return False
@@ -4720,12 +5384,17 @@ class MapleStoryAutoBot:
         self.cmd_move_y = "none"
         self.cmd_action = "none"
         self._stationary_jump_alignment_active = False
+        self._clear_rope_climb_locks_if_departed()
         self._clear_failed_portal_if_departed()
 
+        # A generated rope run-up remains active after the Hero leaves the
+        # endpoint marker's acquisition window. It owns input until progress,
+        # retries, or the endpoint height resolves the attempt.
+        if self._update_active_rope_climb():
+            return
+
         # Once entered, a portal region owns input until the minimap confirms
-        # a sufficiently large displacement. Do this before ordinary route
-        # lookup because jumping/teleporting can move the hero off the marker
-        # while Up still needs to remain held.
+        # a sufficiently large displacement.
         if self._update_active_portal_sweep():
             return
 
@@ -4748,8 +5417,11 @@ class MapleStoryAutoBot:
                         self.img_route, cv2.COLOR_RGB2BGR
                     )
 
+                # A far-away endpoint on another route must not attract the
+                # Hero away from the explicitly active route. Rope markers
+                # are considered only on the initially selected route.
                 color_code, color_code_up_down = \
-                    self.get_nearest_color_code()
+                    self.get_nearest_color_code(include_rope_climb=False)
                 if color_code or color_code_up_down:
                     logger.info(
                         "[route] No action near player on "
@@ -4769,6 +5441,12 @@ class MapleStoryAutoBot:
                         self.img_route, cv2.COLOR_RGB2BGR
                     )
                 return
+
+        if color_code and color_code.get("rope_climb", False):
+            self._reset_stationary_jump_alignment()
+            self._reset_portal_sweep()
+            self._start_rope_climb(color_code)
+            return
 
         if color_code and color_code.get("portal_sweep", False):
             self._reset_stationary_jump_alignment()
@@ -4829,11 +5507,11 @@ class MapleStoryAutoBot:
     def update_cmd_by_mob_detection(self):
         self._suppress_periodic_attack = False
         combat_actions = {"attack", "directional_aoe", "power_knockback"}
-        if getattr(self, "_stationary_jump_alignment_active", False) or \
+        if getattr(self, "_rope_climb_active", False) or \
+                getattr(self, "_stationary_jump_alignment_active", False) or \
                 getattr(self, "_portal_sweep_active", False):
-            # Route alignment owns movement and action until its visually
-            # verified jump has been emitted. Portal activation likewise owns
-            # Up and its bounded horizontal search pulses.
+            # Route-owned climb/alignment/portal transactions cannot be
+            # overwritten by combat while their visual feedback loop runs.
             self._suppress_periodic_attack = True
             return
 
@@ -5027,6 +5705,7 @@ class MapleStoryAutoBot:
     def check_reach_goal(self):
         if self.cmd_action == "goal":
             # Switch to next route map
+            self._reset_rope_climb(clear_locks=True)
             self.idx_routes = (self.idx_routes+1)%len(self.img_routes)
             logger.debug(f"Change to new route:{self.idx_routes}")
 

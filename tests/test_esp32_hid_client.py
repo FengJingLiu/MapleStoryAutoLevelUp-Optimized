@@ -219,6 +219,7 @@ class Esp32HidClientTests(unittest.TestCase):
         self.assertTrue(factory.calls)
         self.assertEqual(fake_socket.commands, ["STATUS", "RELEASE_ALL"])
         self.assertIn(2.5, fake_socket.timeouts)
+        self.assertGreaterEqual(client.state_generation, 1)
 
     def test_key_down_and_up_are_deduplicated(self):
         client, fake_socket, _ = self.make_client()
@@ -243,6 +244,7 @@ class Esp32HidClientTests(unittest.TestCase):
             reconnect_interval=0,
         )
         self.addCleanup(client.close)
+        generation_before = client.state_generation
 
         self.assertTrue(client.key_down("left"))
 
@@ -256,6 +258,7 @@ class Esp32HidClientTests(unittest.TestCase):
         )
         self.assertEqual(len(factory.calls), 2)
         self.assertTrue(first_socket.closed)
+        self.assertGreater(client.state_generation, generation_before)
 
     def test_tap_uses_requested_duration_without_changing_held_state(self):
         client, fake_socket, _ = self.make_client()
@@ -351,11 +354,13 @@ class Esp32HidClientTests(unittest.TestCase):
         self.addCleanup(client.close)
         fake_socket.commands.clear()
         client.key_down("left")
+        generation_before = client.state_generation
 
         fake_socket.status_response = (
             "OK SERIAL=1 BLE_CONNECTED=0 BLE_READY=0"
         )
         client.status()
+        self.assertIsNone(client.state_continuity_token)
         fake_socket.status_response = (
             "OK SERIAL=1 BLE_CONNECTED=1 BLE_READY=1"
         )
@@ -364,6 +369,10 @@ class Esp32HidClientTests(unittest.TestCase):
         self.assertEqual(
             fake_socket.commands,
             ["DOWN 0x50", "STATUS", "STATE 0x50"],
+        )
+        self.assertGreater(client.state_generation, generation_before)
+        self.assertEqual(
+            client.state_continuity_token, client.state_generation
         )
 
     def test_ble_not_ready_command_error_invalidates_held_state(self):

@@ -327,6 +327,22 @@ class KeyboardControllerEsp32RoutingTests(unittest.TestCase):
         controller.cfg = {"key": {"jump": "space"}}
         return controller
 
+    @staticmethod
+    def make_rope_controller():
+        controller = controller_module.KeyBoardController.__new__(
+            controller_module.KeyBoardController
+        )
+        controller.command_lock = controller_module.threading.RLock()
+        controller.cached_facing = "right"
+        controller.cmd_left_right_last = "right"
+        controller.cmd_up_down_last = "none"
+        controller.direction_held_since = None
+        controller.direction_held_generation = None
+        controller.rope_climb_runup_ms = 180
+        controller.rope_climb_align_nudge_ms = 30
+        controller.cfg = {"key": {"jump": "space"}}
+        return controller
+
     def test_stationary_jump_stops_and_settles_before_tap(self):
         controller_module._input_allowed.set()
         controller = self.make_stationary_jump_controller()
@@ -485,6 +501,265 @@ class KeyboardControllerEsp32RoutingTests(unittest.TestCase):
 
                 self.assertEqual(controller.cmd_action, action)
 
+    def test_consumed_rope_alignment_action_can_be_queued_again(self):
+        for action in ("rope_align_left", "rope_align_right"):
+            with self.subTest(action=action):
+                controller = controller_module.KeyBoardController.__new__(
+                    controller_module.KeyBoardController
+                )
+                controller.cmd_action = "none"
+                controller._last_source_action = "none"
+
+                controller.set_command(f"none none {action}")
+                controller._consume_action(action)
+                controller.set_command(f"none none {action}")
+
+                self.assertEqual(controller.cmd_action, action)
+
+    def test_rope_alignment_is_one_safe_short_tap_transaction(self):
+        controller_module._input_allowed.set()
+        controller = self.make_rope_controller()
+        controller.rope_climb_align_nudge_ms = 34
+
+        self.assertTrue(controller.perform_rope_alignment_nudge("left"))
+
+        self.assertEqual(
+            controller_module._input_client.method_calls,
+            [call.set_state([]), call.tap("left", 34)],
+        )
+        self.assertEqual(controller.cmd_left_right_last, "none")
+        self.assertEqual(controller.cmd_up_down_last, "none")
+        self.assertEqual(controller.cached_facing, "left")
+
+    def test_pause_after_rope_alignment_state_prevents_late_tap(self):
+        controller_module._input_allowed.set()
+        controller = self.make_rope_controller()
+
+        def pause_after_state(_keys):
+            controller_module._input_allowed.clear()
+
+        controller_module._input_client.set_state.side_effect = \
+            pause_after_state
+
+        self.assertFalse(controller.perform_rope_alignment_nudge("right"))
+
+        self.assertEqual(
+            controller_module._input_client.method_calls,
+            [call.set_state([])],
+        )
+        self.assertIsNone(controller.cached_facing)
+
+    def test_rope_mount_runs_then_adds_up_and_jumps(self):
+        controller_module._input_allowed.set()
+        controller = self.make_rope_controller()
+        calls_seen_during_runup = []
+
+        def record_runup(duration):
+            self.assertEqual(duration, 0.18)
+            calls_seen_during_runup.extend(
+                controller_module._input_client.method_calls
+            )
+
+        with patch.object(
+            controller_module.time,
+            "sleep",
+            side_effect=record_runup,
+        ) as sleep:
+            self.assertTrue(controller.perform_rope_mount("left"))
+
+        sleep.assert_called_once_with(0.18)
+        self.assertEqual(calls_seen_during_runup, [call.set_state(["left"])])
+        self.assertEqual(
+            controller_module._input_client.method_calls,
+            [
+                call.set_state(["left"]),
+                call.set_state(["left", "up"]),
+                call.tap("space", 50),
+                call.set_state(["up"]),
+            ],
+        )
+        self.assertEqual(controller.cmd_left_right_last, "none")
+        self.assertEqual(controller.cmd_up_down_last, "up")
+        self.assertEqual(controller.cached_facing, "left")
+
+    def test_rope_mount_keeps_existing_same_direction_run_without_pause(self):
+        controller_module._input_allowed.set()
+        controller = self.make_rope_controller()
+        controller.cmd_left_right_last = "right"
+        controller.direction_held_since = 99.0
+
+        with patch.object(
+            controller_module.time, "monotonic", return_value=100.0
+        ), patch.object(controller_module.time, "sleep") as sleep:
+            self.assertTrue(controller.perform_rope_mount("right"))
+
+        sleep.assert_not_called()
+        self.assertEqual(
+            controller_module._input_client.method_calls,
+            [
+                call.set_state(["right"]),
+                call.set_state(["right", "up"]),
+                call.tap("space", 50),
+                call.set_state(["up"]),
+            ],
+        )
+        self.assertIsNone(controller.direction_held_since)
+
+    def test_rope_mount_only_builds_missing_same_direction_runup(self):
+        controller_module._input_allowed.set()
+        controller = self.make_rope_controller()
+        controller.cmd_left_right_last = "left"
+        controller.direction_held_since = 99.9
+
+        with patch.object(
+            controller_module.time, "monotonic", return_value=100.0
+        ), patch.object(controller_module.time, "sleep") as sleep:
+            self.assertTrue(controller.perform_rope_mount("left"))
+
+        sleep.assert_called_once()
+        self.assertAlmostEqual(sleep.call_args.args[0], 0.08)
+
+    def test_movement_tracking_feeds_same_direction_rope_runup(self):
+        controller_module._input_allowed.set()
+        controller_module._input_client.state_continuity_token = None
+        controller = self.make_rope_controller()
+        controller.cmd_left_right_last = "none"
+
+        with patch.object(
+            controller_module.time, "monotonic", return_value=100.0
+        ):
+            self.assertTrue(
+                controller.update_movement_state("right", "none")
+            )
+        self.assertEqual(controller.direction_held_since, 100.0)
+
+        with patch.object(
+            controller_module.time, "monotonic", return_value=100.1
+        ), patch.object(controller_module.time, "sleep") as sleep:
+            self.assertTrue(controller.perform_rope_mount("right"))
+
+        sleep.assert_called_once()
+        self.assertAlmostEqual(sleep.call_args.args[0], 0.08)
+
+    def test_rope_mount_discards_hold_time_after_state_discontinuity(self):
+        controller_module._input_allowed.set()
+        controller_module._input_client.state_continuity_token = 8
+        controller = self.make_rope_controller()
+        controller.cmd_left_right_last = "right"
+        controller.direction_held_since = 99.0
+        controller.direction_held_generation = 7
+
+        with patch.object(
+            controller_module.time, "monotonic", return_value=100.0
+        ), patch.object(controller_module.time, "sleep") as sleep:
+            self.assertTrue(controller.perform_rope_mount("right"))
+
+        sleep.assert_called_once_with(0.18)
+
+    def test_pause_during_rope_jump_prevents_final_up_state(self):
+        controller_module._input_allowed.set()
+        controller = self.make_rope_controller()
+
+        def pause_during_jump(_key, _duration):
+            controller_module._input_allowed.clear()
+
+        controller_module._input_client.tap.side_effect = pause_during_jump
+
+        with patch.object(controller_module.time, "sleep"):
+            self.assertFalse(controller.perform_rope_mount("right"))
+
+        self.assertEqual(
+            controller_module._input_client.method_calls,
+            [
+                call.set_state(["right"]),
+                call.set_state(["right", "up"]),
+                call.tap("space", 50),
+            ],
+        )
+        self.assertIsNone(controller.cached_facing)
+        self.assertIsNone(controller.direction_held_since)
+        self.assertIsNone(controller.direction_held_generation)
+
+    def test_pause_during_rope_runup_prevents_late_state_or_tap(self):
+        controller_module._input_allowed.set()
+        controller = self.make_rope_controller()
+
+        def pause_during_runup(_duration):
+            controller_module._input_allowed.clear()
+
+        with patch.object(
+            controller_module.time,
+            "sleep",
+            side_effect=pause_during_runup,
+        ):
+            self.assertFalse(controller.perform_rope_mount("right"))
+
+        self.assertEqual(
+            controller_module._input_client.method_calls,
+            [call.set_state(["right"])],
+        )
+        self.assertIsNone(controller.cached_facing)
+
+    def test_pause_during_rope_up_state_prevents_late_jump(self):
+        controller_module._input_allowed.set()
+        controller = self.make_rope_controller()
+
+        def pause_on_up_state(keys):
+            if keys == ["left", "up"]:
+                controller_module._input_allowed.clear()
+
+        controller_module._input_client.set_state.side_effect = \
+            pause_on_up_state
+
+        with patch.object(controller_module.time, "sleep"):
+            self.assertFalse(controller.perform_rope_mount("left"))
+
+        self.assertEqual(
+            controller_module._input_client.method_calls,
+            [
+                call.set_state(["left"]),
+                call.set_state(["left", "up"]),
+            ],
+        )
+        controller_module._input_client.tap.assert_not_called()
+        self.assertIsNone(controller.cached_facing)
+
+    def test_rope_mount_invalidates_when_final_up_state_fails(self):
+        controller_module._input_allowed.set()
+        controller = self.make_rope_controller()
+
+        def fail_final_up_state(keys):
+            if keys == ["up"]:
+                raise RuntimeError("serial disconnected")
+
+        controller_module._input_client.set_state.side_effect = \
+            fail_final_up_state
+
+        with patch.object(controller_module.time, "sleep"):
+            self.assertFalse(controller.perform_rope_mount("right"))
+
+        self.assertEqual(
+            controller_module._input_client.method_calls,
+            [
+                call.set_state(["right"]),
+                call.set_state(["right", "up"]),
+                call.tap("space", 50),
+                call.set_state(["up"]),
+            ],
+        )
+        self.assertIsNone(controller.cached_facing)
+        self.assertEqual(controller.cmd_left_right_last, "")
+        self.assertEqual(controller.cmd_up_down_last, "")
+
+    def test_rope_actions_reject_unknown_horizontal_direction(self):
+        controller_module._input_allowed.set()
+        controller = self.make_rope_controller()
+
+        self.assertFalse(controller.perform_rope_alignment_nudge("none"))
+        self.assertFalse(controller.perform_rope_mount("up"))
+
+        self.assertEqual(controller_module._input_client.method_calls, [])
+
     def test_portal_sweep_holds_up_and_taps_horizontal_direction(self):
         controller_module._input_allowed.set()
         controller = controller_module.KeyBoardController.__new__(
@@ -558,6 +833,8 @@ class KeyboardControllerEsp32RoutingTests(unittest.TestCase):
         thread_class.return_value.start.assert_called_once_with()
         self.assertIsNone(controller.input_client)
         self.assertFalse(controller.is_enable)
+        self.assertEqual(controller.rope_climb_runup_ms, 180)
+        self.assertEqual(controller.rope_climb_align_nudge_ms, 30)
         self.assertEqual(controller.portal_sweep_nudge_ms, 30)
 
     def test_enabled_directional_aoe_requires_an_aoe_key(self):
@@ -768,6 +1045,123 @@ class KeyboardControllerEsp32RoutingTests(unittest.TestCase):
 
         controller.perform_portal_sweep_step.assert_called_once_with("right")
         self.assertEqual(controller.cmd_action, "none")
+
+    def test_run_routes_rope_alignment_before_ordinary_movement(self):
+        controller = controller_module.KeyBoardController.__new__(
+            controller_module.KeyBoardController
+        )
+        controller.cfg = {
+            "esp32_hid": {"remote_target": True},
+            "bot": {"attack": "directional"},
+            "buff_skill": {"keys": [], "cooldown": [], "action_cooldown": 1},
+            "system": {"fps_limit_keyboard_controller": 30},
+        }
+        controller.command_lock = controller_module.threading.RLock()
+        controller.is_enable = True
+        controller.capture_available = True
+        controller.is_terminated = False
+        controller.is_need_force_heal = False
+        controller.cmd_left_right = "none"
+        controller.cmd_up_down = "none"
+        controller.cmd_action = "rope_align_left"
+        controller.cmd_left_right_last = ""
+        controller.cmd_up_down_last = ""
+        controller.t_last_buff_cast = []
+        controller.t_last_skill = 0.0
+        controller.input_client = controller_module._input_client
+        controller.perform_rope_alignment_nudge = Mock(return_value=True)
+        controller.update_movement_state = Mock(return_value=True)
+        controller.release_all_key = Mock()
+
+        def stop_after_one_frame():
+            controller.is_terminated = True
+
+        controller.limit_fps = stop_after_one_frame
+        controller.run()
+
+        controller.perform_rope_alignment_nudge.assert_called_once_with(
+            "left"
+        )
+        controller.update_movement_state.assert_not_called()
+        self.assertEqual(controller.cmd_action, "none")
+
+    def test_run_routes_rope_mount_before_ordinary_movement(self):
+        controller = controller_module.KeyBoardController.__new__(
+            controller_module.KeyBoardController
+        )
+        controller.cfg = {
+            "esp32_hid": {"remote_target": True},
+            "bot": {"attack": "directional"},
+            "buff_skill": {"keys": [], "cooldown": [], "action_cooldown": 1},
+            "system": {"fps_limit_keyboard_controller": 30},
+        }
+        controller.command_lock = controller_module.threading.RLock()
+        controller.is_enable = True
+        controller.capture_available = True
+        controller.is_terminated = False
+        controller.is_need_force_heal = False
+        controller.cmd_left_right = "right"
+        controller.cmd_up_down = "none"
+        controller.cmd_action = "rope_mount_right"
+        controller.cmd_left_right_last = ""
+        controller.cmd_up_down_last = ""
+        controller.t_last_buff_cast = []
+        controller.t_last_skill = 0.0
+        controller.input_client = controller_module._input_client
+        controller.perform_rope_mount = Mock(return_value=True)
+        controller.update_movement_state = Mock(return_value=True)
+        controller.release_all_key = Mock()
+
+        def stop_after_one_frame():
+            controller.is_terminated = True
+
+        controller.limit_fps = stop_after_one_frame
+        controller.run()
+
+        controller.perform_rope_mount.assert_called_once_with("right")
+        controller.update_movement_state.assert_not_called()
+        self.assertEqual(controller.cmd_action, "none")
+
+    def test_run_rope_hold_owns_frame_without_consuming_action(self):
+        controller = controller_module.KeyBoardController.__new__(
+            controller_module.KeyBoardController
+        )
+        controller.cfg = {
+            "esp32_hid": {"remote_target": True},
+            "bot": {"attack": "directional"},
+            "buff_skill": {
+                "keys": ["b"],
+                "cooldown": [0],
+                "action_cooldown": 0,
+            },
+            "system": {"fps_limit_keyboard_controller": 30},
+        }
+        controller.command_lock = controller_module.threading.RLock()
+        controller.is_enable = True
+        controller.capture_available = True
+        controller.is_terminated = False
+        controller.is_need_force_heal = False
+        controller.cmd_left_right = "none"
+        controller.cmd_up_down = "up"
+        controller.cmd_action = "rope_hold"
+        controller.cmd_left_right_last = ""
+        controller.cmd_up_down_last = ""
+        controller.t_last_buff_cast = [0.0]
+        controller.t_last_skill = 0.0
+        controller.input_client = controller_module._input_client
+        controller.update_movement_state = Mock(return_value=True)
+        controller.release_all_key = Mock()
+
+        def stop_after_one_frame():
+            controller.is_terminated = True
+
+        controller.limit_fps = stop_after_one_frame
+        with patch.object(controller_module, "press_key") as press:
+            controller.run()
+
+        controller.update_movement_state.assert_called_once_with("none", "up")
+        press.assert_not_called()
+        self.assertEqual(controller.cmd_action, "rope_hold")
 
     def test_remote_target_does_not_depend_on_computer_a_focus(self):
         controller = controller_module.KeyBoardController.__new__(

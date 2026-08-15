@@ -332,6 +332,26 @@ filled horizontal region over the portal activation position:
 - RGB `(255, 255, 127)` remains the legacy `Down` route color and must not be
   used for portal regions.
 
+### Manually paint a rope-climb guide
+
+The route recorder is unchanged and does not create rope commands. After
+saving a route, manually edit `minimaps/<map>/route*.png` and draw one exact-
+color connected segment from the current platform approach toward the rope:
+
+- Color: RGB `(0, 127, 255)`, hex `#007FFF` (OpenCV BGR: `(255, 127, 0)`).
+- Put the near end where the normal platform route can discover it and the far
+  end on the rope contact x-position. The bot detects the segment early and
+  treats the endpoint farther from Hero as the rope position.
+- Keep each guide as a separate connected component. Do not join two ropes or
+  cover the segment with another route color.
+- The bot generates its own takeoff point (8 minimap pixels by default). If
+  Hero is already running toward the rope, that direction remains held and the
+  jump is issued at the generated point with no stop. Otherwise the bot first
+  repositions, then performs a left/right run-up followed by `Up + Jump`.
+- Once mounted, the bot holds `Up`, detects upward minimap progress, and retries
+  from the other side if a mount produces no progress. Existing routes keep
+  their old behavior until this color is added manually.
+
 * Please register mobs in config/config_data.yaml after creating a new map. 
 * If this is a big map, it's recommended to scan the map first instead of start record route right away.
   Operate your character in the game and make sure you explore the whole map.

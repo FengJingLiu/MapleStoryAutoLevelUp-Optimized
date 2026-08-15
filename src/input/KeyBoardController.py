@@ -136,6 +136,15 @@ def _call_input(method, *args):
 def _regular_input_allowed():
     return _input_allowed.is_set() and input_recovery_remaining() <= 0.0
 
+
+def _input_state_generation():
+    """Return the ESP32 held-state continuity epoch when supported."""
+    client = _get_input_client()
+    generation = getattr(client, "state_continuity_token", None)
+    # unittest.mock and legacy clients synthesize arbitrary attributes. Only
+    # a concrete integer is a usable continuity token.
+    return generation if isinstance(generation, int) else None
+
 def key_down(key):
     '''
     Press key down
@@ -219,6 +228,11 @@ class KeyBoardController():
         self._last_source_action = "none"
         self.command_lock = threading.RLock()
         self.cached_facing = None
+        # Monotonic timestamp for the currently held horizontal direction.
+        # Rope mounting uses this to preserve an existing same-direction run
+        # instead of stopping and rebuilding momentum.
+        self.direction_held_since = None
+        self.direction_held_generation = None
         self.window_title = cfg["game_window"]["title"]
         self.fps = 0 # Frame per seconds
         # Timer
@@ -268,6 +282,14 @@ class KeyBoardController():
         self.jump_alignment_nudge_ms = max(
             1,
             int(cfg.get("route", {}).get("jump_alignment_nudge_ms", 30)),
+        )
+        self.rope_climb_runup_ms = max(
+            0,
+            int(cfg.get("route", {}).get("rope_climb_runup_ms", 180)),
+        )
+        self.rope_climb_align_nudge_ms = max(
+            1,
+            int(cfg.get("route", {}).get("rope_climb_align_nudge_ms", 30)),
         )
         self.portal_sweep_nudge_ms = max(
             1,
@@ -430,6 +452,8 @@ class KeyBoardController():
                     "power_knockback",
                     "jump_align_left",
                     "jump_align_right",
+                    "rope_align_left",
+                    "rope_align_right",
                     "portal_sweep_left",
                     "portal_sweep_right",
                 }
@@ -515,6 +539,8 @@ class KeyBoardController():
             self.cached_facing = None
             self.cmd_left_right_last = ""
             self.cmd_up_down_last = ""
+            self.direction_held_since = None
+            self.direction_held_generation = None
 
     def update_movement_state(self, cmd_left_right=None, cmd_up_down=None):
         """Send both movement axes as one deduplicated HID report."""
@@ -545,12 +571,28 @@ class KeyBoardController():
             )
 
         if not set_key_state(keys):
+            self._invalidate_facing_cache()
             return False
+        now = time.monotonic()
+        generation = _input_state_generation()
         with self._ensure_command_lock():
+            previous_direction = getattr(self, "cmd_left_right_last", "")
+            held_since = getattr(self, "direction_held_since", None)
+            held_generation = getattr(
+                self, "direction_held_generation", None
+            )
+            if cmd_left_right in {"left", "right"}:
+                if previous_direction != cmd_left_right or held_since is None \
+                        or held_since > now \
+                        or held_generation != generation:
+                    self.direction_held_since = now
+                self.direction_held_generation = generation
+                self.cached_facing = cmd_left_right
+            else:
+                self.direction_held_since = None
+                self.direction_held_generation = None
             self.cmd_left_right_last = cmd_left_right
             self.cmd_up_down_last = cmd_up_down
-            if cmd_left_right in {"left", "right"}:
-                self.cached_facing = cmd_left_right
         return True
 
     def perform_directional_attack(
@@ -600,6 +642,8 @@ class KeyBoardController():
             with self._ensure_command_lock():
                 self.cmd_left_right_last = "none"
                 self.cmd_up_down_last = "none"
+                self.direction_held_since = None
+                self.direction_held_generation = None
 
             # The state request above can block on serial I/O. Recheck after
             # it returns so an F1 pause or capture-loss event cannot be
@@ -651,6 +695,8 @@ class KeyBoardController():
             with self._ensure_command_lock():
                 self.cmd_left_right_last = "none"
                 self.cmd_up_down_last = "none"
+                self.direction_held_since = None
+                self.direction_held_generation = None
 
             if self.jump_up_settle_delay > 0:
                 time.sleep(self.jump_up_settle_delay)
@@ -685,6 +731,8 @@ class KeyBoardController():
             with self._ensure_command_lock():
                 self.cmd_left_right_last = "none"
                 self.cmd_up_down_last = "none"
+                self.direction_held_since = None
+                self.direction_held_generation = None
 
             if not _regular_input_allowed():
                 self._invalidate_facing_cache()
@@ -700,6 +748,130 @@ class KeyBoardController():
                 self.cached_facing = direction
             return True
 
+    def perform_rope_alignment_nudge(self, direction):
+        """Release held movement and apply one atomic rope-centering pulse."""
+        if direction not in {"left", "right"}:
+            return False
+
+        with _input_transaction_lock:
+            if not _regular_input_allowed():
+                return False
+
+            success, _ = _invoke_input("set_state", [])
+            if not success:
+                self._invalidate_facing_cache()
+                return False
+            with self._ensure_command_lock():
+                self.cmd_left_right_last = "none"
+                self.cmd_up_down_last = "none"
+                self.direction_held_since = None
+                self.direction_held_generation = None
+
+            # Pause/capture loss may arrive while STATE is in flight. Keep the
+            # centering TAP in this transaction, but never send it afterwards.
+            if not _regular_input_allowed():
+                self._invalidate_facing_cache()
+                return False
+
+            success, _ = _invoke_input(
+                "tap", direction, self.rope_climb_align_nudge_ms
+            )
+            if not success:
+                self._invalidate_facing_cache()
+                return False
+            with self._ensure_command_lock():
+                self.cached_facing = direction
+            return True
+
+    def perform_rope_mount(self, direction):
+        """Keep/build a sideways run, add Up, and jump onto the rope."""
+        if direction not in {"left", "right"}:
+            return False
+
+        with _input_transaction_lock:
+            if not _regular_input_allowed():
+                self._invalidate_facing_cache()
+                return False
+
+            success, _ = _invoke_input("set_state", [direction])
+            if not success:
+                self._invalidate_facing_cache()
+                return False
+            now = time.monotonic()
+            generation = _input_state_generation()
+            with self._ensure_command_lock():
+                previous_direction = getattr(
+                    self, "cmd_left_right_last", ""
+                )
+                held_since = getattr(self, "direction_held_since", None)
+                held_generation = getattr(
+                    self, "direction_held_generation", None
+                )
+                if previous_direction != direction or held_since is None \
+                        or held_since > now \
+                        or held_generation != generation:
+                    held_since = now
+                self.direction_held_since = held_since
+                self.direction_held_generation = generation
+                self.cached_facing = direction
+                self.cmd_left_right_last = direction
+                self.cmd_up_down_last = "none"
+
+            required_runup = max(
+                0.0, float(self.rope_climb_runup_ms) / 1000.0
+            )
+            remaining_runup = max(
+                0.0, required_runup - (now - held_since)
+            )
+            if remaining_runup > 0.0:
+                time.sleep(remaining_runup)
+
+            # The run-up wait is deliberately inside the HID transaction, but
+            # pause/capture loss can still clear the permission gate.
+            if not _regular_input_allowed():
+                self._invalidate_facing_cache()
+                return False
+
+            success, _ = _invoke_input(
+                "set_state", [direction, "up"]
+            )
+            if not success:
+                self._invalidate_facing_cache()
+                return False
+            with self._ensure_command_lock():
+                self.cmd_left_right_last = direction
+                self.cmd_up_down_last = "up"
+
+            # STATE may block on the ESP32 acknowledgement. Recheck so a pause
+            # during that request cannot be followed by a late jump.
+            if not _regular_input_allowed():
+                self._invalidate_facing_cache()
+                return False
+
+            success, _ = _invoke_input(
+                "tap", self.cfg["key"]["jump"], 50
+            )
+            if not success:
+                self._invalidate_facing_cache()
+                return False
+
+            # The lateral key is only for mounting momentum. Release it as
+            # soon as the jump has been issued so the character does not pass
+            # through the rope; Up remains held for the climb.
+            if not _regular_input_allowed():
+                self._invalidate_facing_cache()
+                return False
+            success, _ = _invoke_input("set_state", ["up"])
+            if not success:
+                self._invalidate_facing_cache()
+                return False
+            with self._ensure_command_lock():
+                self.cmd_left_right_last = "none"
+                self.cmd_up_down_last = "up"
+                self.direction_held_since = None
+                self.direction_held_generation = None
+            return True
+
     def perform_aligned_jump(self):
         """Jump immediately after the vision loop verified a stable center."""
         with _input_transaction_lock:
@@ -713,6 +885,8 @@ class KeyBoardController():
             with self._ensure_command_lock():
                 self.cmd_left_right_last = "none"
                 self.cmd_up_down_last = "none"
+                self.direction_held_since = None
+                self.direction_held_generation = None
 
             # There is deliberately no fixed sleep here. The vision loop has
             # already observed the exact route center continuously for the
@@ -748,6 +922,8 @@ class KeyBoardController():
             with self._ensure_command_lock():
                 self.cmd_left_right_last = "none"
                 self.cmd_up_down_last = "up"
+                self.direction_held_since = None
+                self.direction_held_generation = None
 
             # Pause/capture loss can occur while waiting for the STATE ACK.
             # Never send a late horizontal pulse after input was suspended.
@@ -837,6 +1013,16 @@ class KeyBoardController():
                     with self._ensure_command_lock():
                         self.cmd_action = cmd_action
 
+                # Rope climbing owns the frame even though it has no TAP. This
+                # prevents a buff from interrupting persistent direction/Up
+                # while the engine waits for the character to finish climbing.
+                if cmd_action == "rope_hold":
+                    self.update_movement_state(
+                        cmd_left_right, cmd_up_down
+                    )
+                    self.limit_fps()
+                    continue
+
                 # Direction and attack must remain paired. This branch runs
                 # before buffs, movement, or healing and owns the HID output
                 # transaction until TAP has been sent.
@@ -881,6 +1067,20 @@ class KeyBoardController():
                 if cmd_action in {"jump_align_left", "jump_align_right"}:
                     direction = cmd_action.rsplit("_", 1)[-1]
                     if self.perform_jump_alignment_nudge(direction):
+                        self._consume_action(cmd_action)
+                    self.limit_fps()
+                    continue
+
+                if cmd_action in {"rope_align_left", "rope_align_right"}:
+                    direction = cmd_action.rsplit("_", 1)[-1]
+                    if self.perform_rope_alignment_nudge(direction):
+                        self._consume_action(cmd_action)
+                    self.limit_fps()
+                    continue
+
+                if cmd_action in {"rope_mount_left", "rope_mount_right"}:
+                    direction = cmd_action.rsplit("_", 1)[-1]
+                    if self.perform_rope_mount(direction):
                         self._consume_action(cmd_action)
                     self.limit_fps()
                     continue

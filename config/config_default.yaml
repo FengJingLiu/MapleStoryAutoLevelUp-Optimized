@@ -333,6 +333,23 @@ route:
   jump_down_cooldown: 3.0     # ⏱️ Cooldown (in seconds) for 'jump down' action to prevent continuous descent
   jump_up_settle_delay: 0.6   # 🛑 Seconds the hero center must remain exactly on a stationary-jump center
   jump_alignment_nudge_ms: 30 # ↔️ Duration of each left/right centering pulse
+  # Draw an azure segment manually from the current platform toward the rope.
+  # Seeing any part of that segment lets the bot predict its far endpoint as
+  # the rope x, generate its own runway, and mount with a directional jump.
+  rope_climb_detection_range: 10   # Distance from Hero to acquire a climb guide segment
+  rope_climb_runup_distance: 8     # Generated takeoff offset to the left/right of the rope
+  rope_climb_align_tolerance: 1    # Accepted minimap x error at the generated takeoff point
+  rope_climb_settle_delay: 0.15    # Reposition-only pause; skipped when already running toward the rope
+  rope_climb_runup_ms: 180         # Minimum directional momentum before Up + Jump (existing run time counts)
+  rope_climb_align_nudge_ms: 30    # Duration of each takeoff-position correction pulse
+  rope_climb_position_timeout: 0.9 # Switch runway side if backing up makes no x progress
+  rope_climb_retry_interval: 0.9   # Retry when an attempt produces no continued upward progress
+  rope_climb_min_progress: 3       # Upward pixels required before an attempt counts as attached
+  rope_climb_attach_x_tolerance: 3 # Maximum x error from the predicted rope while confirming the top
+  rope_climb_finish_stall: 0.6     # Finish after this long stopped above the starting platform
+  rope_climb_landing_tolerance: 2  # Treat a stalled attempt this close to start y as a miss
+  rope_climb_max_attempts: 4       # Alternate/recalculate the run-up side up to this many times
+  rope_climb_max_duration: 15.0    # Release control after an overall climb timeout
   portal_sweep_nudge_ms: 30       # Horizontal TAP duration while Up remains held
   portal_sweep_edge_margin: 2     # Turn inward this many pixels before a block edge
   portal_sweep_repeat_interval: 0.2 # Minimum seconds between pulses on an unchanged frame
@@ -355,6 +372,7 @@ route:
     "0,127,0": "left none teleport"     # 🟩 Dark green
     "139,69,19": "right none teleport"  # 🟫 Brown
     "127,255,255": "none up portal"     # Light cyan portal region
+    "0,127,255": "none up climb"        # Azure hand-drawn platform-to-rope guide
 
   # 🎨 Color-coded(RGB) actions for up and down
   color_code_up_down:

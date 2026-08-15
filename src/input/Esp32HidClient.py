@@ -231,6 +231,10 @@ class Esp32HidClient:
         self._serial: object | None = None
         self._pressed: set[int] = set()
         self._state_dirty = False
+        # Changes whenever firmware-side held-key continuity is known to have
+        # been broken (release, BLE loss, or serial reconnect). Consumers can
+        # use this epoch instead of trusting a stale local hold duration.
+        self._state_generation = 0
         self._io_lock = threading.RLock()
         self._stop = threading.Event()
         self._closed = False
@@ -281,6 +285,19 @@ class Esp32HidClient:
         port = self.serial_port or self.configured_serial_port
         return f"{port}@{self.baudrate}"
 
+    @property
+    def state_generation(self) -> int:
+        with self._io_lock:
+            return self._state_generation
+
+    @property
+    def state_continuity_token(self) -> int | None:
+        """Return the epoch only while firmware held state is trustworthy."""
+        with self._io_lock:
+            if self._state_dirty:
+                return None
+            return self._state_generation
+
     def _make_serial(self):
         selected_port = resolve_serial_port(
             self.configured_serial_port, self._port_lister
@@ -308,12 +325,16 @@ class Esp32HidClient:
             return
         transport.close()
 
+    def _mark_state_discontinuous_locked(self, *, dirty: bool) -> None:
+        self._pressed.clear()
+        self._state_dirty = dirty
+        self._last_state_write = 0.0
+        self._state_generation += 1
+
     def _disconnect_locked(self) -> None:
         transport, self._serial = self._serial, None
-        self._pressed.clear()
-        self._state_dirty = True
+        self._mark_state_discontinuous_locked(dirty=True)
         self._last_status = 0.0
-        self._last_state_write = 0.0
         self._close_serial(transport)
 
     @staticmethod
@@ -343,9 +364,7 @@ class Esp32HidClient:
                 # Both responses mean the firmware has cleared (or cannot
                 # guarantee) its keyboard report. Invalidate client-side
                 # dedupe immediately so the next control frame reasserts it.
-                self._pressed.clear()
-                self._state_dirty = True
-                self._last_state_write = 0.0
+                self._mark_state_discontinuous_locked(dirty=True)
             raise RuntimeError(response)
         return response
 
@@ -372,9 +391,9 @@ class Esp32HidClient:
             self._close_serial(transport)
             raise
 
-        self._pressed.clear()
-        self._state_dirty = False
-        self._last_state_write = 0.0
+        # Every connection handshake deliberately sends RELEASE_ALL, so any
+        # held-state duration from the prior transport is no longer valid.
+        self._mark_state_discontinuous_locked(dirty=False)
         self._serial = transport
 
     def _request_locked(self, command: str, retry_safe: bool) -> str:
@@ -470,9 +489,7 @@ class Esp32HidClient:
     def release_all(self) -> str:
         with self._io_lock:
             response = self._request_locked("RELEASE_ALL", retry_safe=True)
-            self._pressed.clear()
-            self._state_dirty = False
-            self._last_state_write = 0.0
+            self._mark_state_discontinuous_locked(dirty=False)
             return response
 
     def status(self) -> str:
@@ -483,9 +500,7 @@ class Esp32HidClient:
                 # firmware releases every key on that edge, so invalidate the
                 # local dedupe cache and let the controller reassert movement
                 # after the keyboard reconnects.
-                self._pressed.clear()
-                self._state_dirty = True
-                self._last_state_write = 0.0
+                self._mark_state_discontinuous_locked(dirty=True)
             return response
 
     def _heartbeat_loop(self) -> None:
@@ -500,9 +515,7 @@ class Esp32HidClient:
                 try:
                     response = self._request_locked("STATUS", retry_safe=True)
                     if "BLE_READY=1" not in response:
-                        self._pressed.clear()
-                        self._state_dirty = True
-                        self._last_state_write = 0.0
+                        self._mark_state_discontinuous_locked(dirty=True)
                 except (OSError, RuntimeError, ConnectionError):
                     # The next heartbeat or input request will reconnect. A disconnect
                     # clears both the firmware and local pressed-key state.

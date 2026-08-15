@@ -1,8 +1,8 @@
 bot:
-  map: east_rocky_mountain_5
+  map: east_rocky_mountain_4
 buff_skill:
-  keys:
-  - ins
+  cooldown: []
+  keys: []
 directional_attack:
   range_y: 60
 game_window:
