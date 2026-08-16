@@ -8,6 +8,10 @@ class HuntingState(State):
         pass
 
     def check_transitions(self):
+        # Legacy rune PNGs are intentionally not enlarged for DirectShow 4K.
+        # Keep the solver inert until native templates and geometry are ready.
+        if not self.bot.cfg.get("rune_solver", {}).get("enable", True):
+            return None
         if self.bot.rune_solver.is_rune_enable(
             self.bot.img_frame_gray, self.bot.img_frame_debug) or \
             self.bot.rune_solver.is_rune_warning(

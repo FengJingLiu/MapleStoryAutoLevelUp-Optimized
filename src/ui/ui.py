@@ -581,7 +581,7 @@ class MainWindow(QMainWindow):
         target. This makes the bot usable with windows other than
         "MapleStory Worlds" (e.g. other MapleStory clients or emulators).
         '''
-        gbox = QGroupBox("🎯 Target Program")
+        gbox = QGroupBox("🎯 Capture / Legacy Target Window")
         layout = QVBoxLayout()
         layout.setSpacing(6)
 
@@ -597,8 +597,8 @@ class MainWindow(QMainWindow):
         self.target_window_combo.setEditable(True)
         self.target_window_combo.setMinimumWidth(360)
         self.target_window_combo.setToolTip(
-            "Pick an open window, or type part of its title.\n"
-            "The bot will capture whichever window matches this text."
+            "DirectShow capture ignores this field. Pick or type a window "
+            "title only when capture.source is set to 'window'."
         )
         window_row.addWidget(self.target_window_combo)
 
@@ -623,8 +623,8 @@ class MainWindow(QMainWindow):
 
         self.checkbox_auto_resize = QCheckBox("Auto-resize window")
         self.checkbox_auto_resize.setToolTip(
-            "Force-resize the target window on start (needed for MapleStory\n"
-            "detection). Uncheck for programs that should not be resized."
+            "Legacy window capture only: force-resize the target window on "
+            "start. DirectShow capture never resizes a window."
         )
         options_row.addWidget(self.checkbox_auto_resize)
 
@@ -1101,9 +1101,8 @@ class MainWindow(QMainWindow):
         if not img.flags.c_contiguous:
             img = img.copy()
         height, width, _ = img.shape
-        # Native PotPlayer widths such as 3579 have an unaligned three-byte
-        # scanline. Pass the real NumPy stride so QImage does not assume padded
-        # rows and read beyond the frame buffer.
+        # Pass the real NumPy stride so QImage handles every BGR capture width
+        # correctly instead of assuming padded rows.
         qimg = QImage(
             img.data,
             width,

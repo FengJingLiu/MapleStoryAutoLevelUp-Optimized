@@ -654,7 +654,7 @@ class KeyBoardController():
         - True
         - False
         '''
-        # In capture-card mode this process sees PotPlayer on computer A while
+        # In capture-card mode this process sees DirectShow on computer A while
         # the BLE keyboard controls computer B. A's foreground window is not a
         # meaningful safety signal for B, so input follows only the bot's
         # enable/pause state.

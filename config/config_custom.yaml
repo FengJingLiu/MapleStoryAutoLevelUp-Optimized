@@ -1,5 +1,14 @@
 bot:
   map: east_rocky_mountain_6
+capture:
+  source: directshow
+capture_card:
+  device_index: 0
+  device_name: AVerMedia GC573 1 Capture
+  fps: 60
+  height: 2160
+  pixel_format: RGB24
+  width: 3840
 buff_skill:
   keys:
   - ins
@@ -10,9 +19,9 @@ directional_attack:
   range_y: 50
 game_window:
   auto_resize: false
-  capture_profile: potplayer
+  capture_profile: capture_card
   preserve_native_resolution: true
-  title: "TV/CAM/\u8BBE\u5907 - PotPlayer"
+  title: MapleStory Worlds
 health_monitor:
   add_hp_percent: 0
   add_mp_percent: 0
@@ -21,15 +30,19 @@ key:
   directional_attack: control
   jump: alt
 nametag:
+  # Re-enable these detectors only after replacing liu_muning*.png with
+  # templates captured from the native 3840x2160 DirectShow frame.
   medal:
-    enable: true
+    enable: false
+  appearance:
+    enable: false
   name: liu_muning
   overhead_marker:
-    enable: true
+    enable: false
   pet:
-    enable: true
+    enable: false
   template_reference_size:
-  - 2013
-  - 3579
+  - 2160
+  - 3840
 power_knockback:
   trigger_distance_x: 20

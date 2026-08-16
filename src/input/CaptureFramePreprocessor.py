@@ -1,4 +1,4 @@
-"""Extract game content from direct-game and PotPlayer capture frames."""
+"""Extract game content from window and capture-card frames."""
 
 from __future__ import annotations
 
@@ -11,19 +11,41 @@ from src.utils.global_var import WINDOW_WORKING_SIZE
 
 POTPLAYER_PROFILE = "potplayer"
 DIRECT_PROFILE = "direct"
+CAPTURE_CARD_PROFILE = "capture_card"
+
+
+def _normalize_profile_name(value: Any) -> str:
+    """Return the canonical preprocessing profile name."""
+    profile = str(value).strip().lower()
+    if profile in {"directshow", "direct_show", "capture-card"}:
+        return CAPTURE_CARD_PROFILE
+    return profile
 
 
 def resolve_capture_profile(
     game_window_cfg: dict[str, Any], window_title: str = ""
 ) -> str:
     """Resolve ``auto`` to either the direct-window or PotPlayer pipeline."""
-    configured = str(game_window_cfg.get("capture_profile", "auto")).strip().lower()
+    configured = _normalize_profile_name(
+        game_window_cfg.get("capture_profile", "auto")
+    )
     if configured == "auto":
-        title = window_title or str(game_window_cfg.get("title", ""))
+        # Capture implementations and lifecycle tests may expose a non-string
+        # diagnostic attribute (for example ``Mock.window_title``).  Only a
+        # real title can participate in the PotPlayer heuristic.
+        title = window_title if isinstance(window_title, str) else ""
+        if not title:
+            configured_title = game_window_cfg.get("title", "")
+            title = configured_title if isinstance(configured_title, str) else ""
         return POTPLAYER_PROFILE if "potplayer" in title.casefold() else DIRECT_PROFILE
-    if configured not in {DIRECT_PROFILE, POTPLAYER_PROFILE}:
+    if configured not in {
+        DIRECT_PROFILE,
+        POTPLAYER_PROFILE,
+        CAPTURE_CARD_PROFILE,
+    }:
         raise ValueError(
-            "game_window.capture_profile must be one of: auto, direct, potplayer"
+            "game_window.capture_profile must be one of: "
+            "auto, direct, potplayer, capture_card"
         )
     return configured
 
@@ -98,6 +120,7 @@ def preprocess_capture_frame(
     cfg: dict[str, Any],
     *,
     window_title: str = "",
+    capture_profile: str | None = None,
     skip_direct_size_check: bool = False,
 ):
     """Extract pure game content and return the configured working frame.
@@ -112,15 +135,45 @@ def preprocess_capture_frame(
         raise ValueError("Captured frame is empty")
 
     game_window_cfg = cfg["game_window"]
-    profile = resolve_capture_profile(game_window_cfg, window_title)
+    if capture_profile is None:
+        profile = resolve_capture_profile(game_window_cfg, window_title)
+    else:
+        profile = _normalize_profile_name(capture_profile)
+        if profile not in {
+            DIRECT_PROFILE,
+            POTPLAYER_PROFILE,
+            CAPTURE_CARD_PROFILE,
+        }:
+            raise ValueError(f"Unsupported capture profile: {capture_profile}")
     preserve_native_resolution = bool(
         game_window_cfg.get("preserve_native_resolution", False)
     )
-    expected_h, expected_w = _positive_pair(
-        game_window_cfg["size"], "game_window.size"
-    )
 
-    if profile == POTPLAYER_PROFILE:
+    if profile == CAPTURE_CARD_PROFILE:
+        capture_card_cfg = cfg.get("capture_card", {})
+        expected_w = int(capture_card_cfg.get("width", 3840))
+        expected_h = int(capture_card_cfg.get("height", 2160))
+        if expected_w <= 0 or expected_h <= 0:
+            raise ValueError(
+                "capture_card.width and capture_card.height must be positive"
+            )
+        if frame.ndim != 3 or frame.shape[2] != 3:
+            raise ValueError(
+                "DirectShow capture must provide a three-channel RGB24 frame; "
+                f"received shape {frame.shape}"
+            )
+        if frame.shape[:2] != (expected_h, expected_w):
+            raise ValueError(
+                f"Unexpected capture-card frame size: {frame.shape[:2]} "
+                f"(expected {(expected_h, expected_w)})"
+            )
+        content = frame
+        native_content = frame
+        roi = (0, 0, frame.shape[1], frame.shape[0])
+    elif profile == POTPLAYER_PROFILE:
+        expected_h, expected_w = _positive_pair(
+            game_window_cfg["size"], "game_window.size"
+        )
         native_content, roi = _potplayer_video_roi(frame, game_window_cfg)
         content = native_content
         if not preserve_native_resolution and content.shape[:2] != (
@@ -138,6 +191,9 @@ def preprocess_capture_frame(
                 interpolation=interpolation,
             )
     else:
+        expected_h, expected_w = _positive_pair(
+            game_window_cfg["size"], "game_window.size"
+        )
         title_bar_height = int(game_window_cfg.get("title_bar_height", 0))
         if title_bar_height < 0 or title_bar_height >= frame.shape[0]:
             raise ValueError(
@@ -163,7 +219,7 @@ def preprocess_capture_frame(
                     f"(expected {(expected_h, expected_w)})"
                 )
 
-    normalized = not (
+    normalized = profile != CAPTURE_CARD_PROFILE and not (
         profile == POTPLAYER_PROFILE and preserve_native_resolution
     )
     if normalized:

@@ -25,6 +25,10 @@ from src.input.KeyBoardListener import KeyBoardListener, normalize_key_name
 from src.input.Esp32KeyForwarder import Esp32KeyForwarder
 from src.input.GameWindowCapturor import GameWindowCapturor
 from src.input.CaptureFramePreprocessor import preprocess_capture_frame
+from src.input.CaptureSource import (
+    capture_profile_override,
+    create_capture_source,
+)
 from src.utils.frame_geometry import (
     LEGACY_FRAME_SIZE,
     scale_runtime_pixel_config,
@@ -579,6 +583,7 @@ class RouteRecorder():
                 self.frame,
                 base_cfg,
                 window_title=getattr(self.capture, "window_title", ""),
+                capture_profile=capture_profile_override(self.capture),
             )
         except (KeyError, TypeError, ValueError) as exc:
             logger.error(f"[capture] {exc}")
@@ -745,11 +750,12 @@ class RouteRecorder():
                 key_event_handler=event_handler,
             )
 
-            # Start game window capturing thread
-            logger.info(
-                "Waiting for game window to activate, please click on game window"
+            # Start the configured window or DirectShow capture source.
+            logger.info("Starting configured capture source")
+            self.capture = create_capture_source(
+                self.cfg,
+                window_capture_cls=GameWindowCapturor,
             )
-            self.capture = GameWindowCapturor(self.cfg)
             self.wait_for_initial_capture_frame()
         except BaseException:
             self.stop()

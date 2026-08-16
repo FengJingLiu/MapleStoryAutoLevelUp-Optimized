@@ -43,6 +43,12 @@ from src.utils.minimap_geometry import (
     scale_minimap_rect,
 )
 from src.input.CaptureFramePreprocessor import preprocess_capture_frame
+from src.input.CaptureSource import (
+    DIRECTSHOW_SOURCE,
+    capture_profile_override,
+    create_capture_source,
+    resolve_capture_source,
+)
 from src.input.KeyBoardController import KeyBoardController, press_key
 from src.input.Esp32HidClient import (
     RELATIVE_MOUSE_MAX_DELTA,
@@ -295,7 +301,7 @@ class MapleStoryAutoBot:
         if not has_frame and not has_route:
             return
 
-        # A native fullscreen capture is about 22 MB at 3579x2013. Sending a
+        # A native 4K capture is about 24 MB at 3840x2160. Sending a
         # fresh full-size copy through Qt ten times per second floods the GUI
         # event queue and makes tab changes appear to hang. Recognition and
         # screenshots continue to use the native image; only the UI preview is
@@ -458,6 +464,21 @@ class MapleStoryAutoBot:
         """Return whether HID input goes to game computer B, not this PC."""
         return self.cfg.get("esp32_hid", {}).get("remote_target", False)
 
+    def is_capture_card_source(self):
+        """Return whether frames have no corresponding local target window."""
+        capture = getattr(self, "capture", None)
+        if capture_profile_override(capture) == "capture_card":
+            return True
+        args = getattr(self, "args", None)
+        test_image_name = getattr(args, "test_image", None)
+        try:
+            return resolve_capture_source(
+                self.cfg,
+                test_image_name=test_image_name,
+            ) == DIRECTSHOW_SOURCE
+        except (AttributeError, TypeError, ValueError):
+            return False
+
     def is_debug_mode(self):
         """Return whether this run is the vision-only debug mode."""
         cfg = getattr(self, "cfg", None) or {}
@@ -465,6 +486,12 @@ class MapleStoryAutoBot:
 
     def click_game_ui(self, coord, action):
         """Click only when the captured window and game are on the same PC."""
+        if self.is_capture_card_source():
+            logger.warning(
+                f"[{action}] Skipped local mouse click: DirectShow capture "
+                "has no corresponding local game window"
+            )
+            return False
         if self.remote_keyboard_target():
             logger.warning(
                 f"[{action}] Skipped generic local mouse click: ESP32 is paired "
@@ -684,7 +711,7 @@ class MapleStoryAutoBot:
                 len(point) != 2:
             return None
         reference = self._auto_relogin_config().get(
-            "flow_template_reference_size", (2013, 3579)
+            "flow_template_reference_size", (2160, 3840)
         )
         try:
             reference_h, reference_w = map(float, reference[:2])
@@ -706,7 +733,7 @@ class MapleStoryAutoBot:
                 len(vector) != 2:
             return None
         reference = self._auto_relogin_config().get(
-            "flow_template_reference_size", (2013, 3579)
+            "flow_template_reference_size", (2160, 3840)
         )
         try:
             reference_h, reference_w = map(float, reference[:2])
@@ -2437,7 +2464,7 @@ class MapleStoryAutoBot:
 
             for reference_name, default_reference in (
                     ("template_reference_size", (700, 1296)),
-                    ("flow_template_reference_size", (2013, 3579))):
+                    ("flow_template_reference_size", (2160, 3840))):
                 reference = auto_relogin_cfg.get(
                     reference_name, default_reference
                 )
@@ -2458,7 +2485,7 @@ class MapleStoryAutoBot:
                 "disconnect", "connect", "world", "channel", "character"
             }
             flow_reference = auto_relogin_cfg.get(
-                "flow_template_reference_size", (2013, 3579)
+                "flow_template_reference_size", (2160, 3840)
             )
             reference_h, reference_w = flow_reference
 
@@ -3597,7 +3624,7 @@ class MapleStoryAutoBot:
         base_cfg = getattr(self, "_base_cfg", None) or self.cfg
         auto_relogin_cfg = base_cfg.get("auto_relogin", {})
         reference = auto_relogin_cfg.get(
-            "flow_template_reference_size", (2013, 3579)
+            "flow_template_reference_size", (2160, 3840)
         )
         try:
             reference_h, reference_w = map(int, reference[:2])
@@ -3804,10 +3831,11 @@ class MapleStoryAutoBot:
         try:
             # Validate and start the capture source on computer A before opening
             # the ESP32's USB serial input session.
-            if self.args.test_image == '':
-                self.capture = GameWindowCapturor(self.cfg)
-            else:
-                self.capture = GameWindowCapturor(self.cfg, self.args.test_image)
+            self.capture = create_capture_source(
+                self.cfg,
+                test_image_name=self.args.test_image or None,
+                window_capture_cls=GameWindowCapturor,
+            )
 
             control_enabled = (
                 not self.is_disable_control
@@ -7590,6 +7618,7 @@ class MapleStoryAutoBot:
                 self.frame,
                 self.cfg,
                 window_title=getattr(self.capture, "window_title", ""),
+                capture_profile=capture_profile_override(self.capture),
                 skip_direct_size_check=getattr(self.args, "test_image", "") != "",
             )
         except (KeyError, TypeError, ValueError) as exc:
@@ -7967,6 +7996,12 @@ class MapleStoryAutoBot:
         '''
         ensure_is_in_party
         '''
+        if self.is_capture_card_source():
+            logger.info(
+                "[ensure_is_in_party] Disabled for DirectShow capture: no "
+                "local game window is available"
+            )
+            return False
         if self.remote_keyboard_target():
             logger.info(
                 "[ensure_is_in_party] Disabled in remote keyboard-only mode"
@@ -8010,6 +8045,12 @@ class MapleStoryAutoBot:
         '''
         logger.info("[channel_change] Start")
 
+        if self.is_capture_card_source():
+            logger.error(
+                "[channel_change] Disabled for DirectShow capture: no local "
+                "game window is available"
+            )
+            return False
         if self.remote_keyboard_target():
             logger.error(
                 "[channel_change] Disabled in capture-card mode: changing "
@@ -8764,7 +8805,8 @@ class MapleStoryAutoBot:
         if img_frame is None:
             self.suspend_input_for_capture_loss()
             if not self.is_debug_mode() and \
-                not is_mac() and not self.remote_keyboard_target():
+                not is_mac() and not self.remote_keyboard_target() and \
+                    not self.is_capture_card_source():
                 activate_game_window(self.capture.window_title)
             return -1 # Wait for game window to be ready
         else:
@@ -9117,9 +9159,10 @@ class MapleStoryAutoBot:
         '''
         try:
             # Computer B is already foreground in capture-card mode. Focusing
-            # PotPlayer on A is unrelated to where the BLE keyboard types.
+            # any preview window on A is unrelated to where BLE input lands.
             if not self.is_debug_mode() and \
-                not is_mac() and not self.remote_keyboard_target():
+                not is_mac() and not self.remote_keyboard_target() and \
+                    not self.is_capture_card_source():
                 activate_game_window(self.capture.window_title)
                 time.sleep(0.3)
                 self.ensure_is_in_party()
