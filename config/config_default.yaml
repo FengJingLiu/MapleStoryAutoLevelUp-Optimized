@@ -622,6 +622,7 @@ route_recoder:
   map_padding: 30           # 🖤 Padding (in pixels) added as margin around the edge of the map
   # Mirror A's gameplay keys to the ESP32/B computer while recording. F1-F4
   # always remain local recorder controls. Add uncommon gameplay keys below.
+  minimap_lock_frames: 5    # Lock the session crop to the median of these detections
   forward_input_to_esp32: True
   forward_keys: []
   # Keep matching near the previous camera offset. Repeating platforms can

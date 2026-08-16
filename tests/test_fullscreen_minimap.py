@@ -46,40 +46,70 @@ class FullscreenMinimapTests(unittest.TestCase):
         # top starts at y=25 and includes title/icon content.
         self.assertEqual(location, (52, 212, 417, 177))
 
-    def test_route_recorder_redetects_minimap_on_each_frame(self):
+    def test_route_recorder_locks_median_minimap_rect(self):
         recorder = RouteRecorder.__new__(RouteRecorder)
-        first = make_bordered_frame(
-            map_top_left=(30, 80),
-            map_bottom_right=(250, 180),
-            expanded_panel=False,
-        )
-        second = make_bordered_frame(
-            map_top_left=(120, 160),
-            map_bottom_right=(400, 300),
-            expanded_panel=False,
-        )
+        recorder.cfg = {"route_recoder": {"minimap_lock_frames": 5}}
+        recorder.img_frame = np.zeros((400, 600, 3), dtype=np.uint8)
+        detections = [
+            (30, 80, 220, 100),
+            (31, 81, 220, 100),
+            (30, 80, 221, 101),
+            (90, 140, 280, 160),  # One bad border detection is rejected.
+            (29, 79, 219, 99),
+        ]
 
-        recorder.img_frame = first
-        first_detected = get_minimap_loc_size(first)
-        self.assertTrue(recorder.update_minimap_from_current_frame())
-        self.assertEqual(
-            recorder.loc_minimap,
-            (first_detected[0] + 1, first_detected[1] + 1),
-        )
-        first_crop_shape = recorder.img_minimap_source.shape[:2]
+        with patch(
+            "tools.routeRecorder.get_minimap_loc_size",
+            side_effect=detections,
+        ) as detect:
+            for _ in range(4):
+                self.assertFalse(recorder.update_minimap_from_current_frame())
+            self.assertTrue(recorder.update_minimap_from_current_frame())
+            self.assertEqual(recorder.loc_minimap, (31, 81))
+            self.assertEqual(recorder.minimap_screen_size, (98, 218))
 
-        recorder.img_frame = second
-        second_detected = get_minimap_loc_size(second)
-        self.assertTrue(recorder.update_minimap_from_current_frame())
-        self.assertEqual(
-            recorder.loc_minimap,
-            (second_detected[0] + 1, second_detected[1] + 1),
-        )
-        self.assertEqual(
-            recorder.img_minimap_source.shape[:2],
-            (second_detected[3] - 2, second_detected[2] - 2),
-        )
-        self.assertNotEqual(recorder.img_minimap_source.shape[:2], first_crop_shape)
+            # Once calibrated, even a later frame uses the same crop and does
+            # not ask the noisy border detector for another rectangle.
+            recorder.img_frame = np.ones((400, 600, 3), dtype=np.uint8)
+            self.assertTrue(recorder.update_minimap_from_current_frame())
+            self.assertEqual(recorder.loc_minimap, (31, 81))
+            self.assertEqual(recorder.img_minimap_source.shape[:2], (98, 218))
+            self.assertEqual(detect.call_count, 5)
+
+    def test_route_recorder_pauses_if_frame_size_changes_after_lock(self):
+        recorder = RouteRecorder.__new__(RouteRecorder)
+        recorder.cfg = {"route_recoder": {"minimap_lock_frames": 1}}
+        recorder.is_enable = True
+        recorder.img_frame = np.zeros((400, 600, 3), dtype=np.uint8)
+
+        with patch(
+            "tools.routeRecorder.get_minimap_loc_size",
+            return_value=(30, 80, 220, 100),
+        ):
+            self.assertTrue(recorder.update_minimap_from_current_frame())
+
+        recorder.loc_player_global_last = (10, 20)
+        recorder.img_frame = np.zeros((401, 600, 3), dtype=np.uint8)
+        self.assertFalse(recorder.update_minimap_from_current_frame())
+        self.assertFalse(recorder.is_enable)
+        self.assertIsNone(recorder.loc_player_global_last)
+
+    def test_route_recorder_reuses_preserved_minimap_geometry(self):
+        recorder = RouteRecorder.__new__(RouteRecorder)
+        recorder.cfg = {"route_recoder": {"minimap_lock_frames": 5}}
+        recorder.is_enable = True
+        recorder.img_frame = np.zeros((400, 600, 3), dtype=np.uint8)
+        recorder._saved_minimap_geometry = {
+            "frame_size": (400, 600),
+            "minimap_rect": (31, 81, 218, 98),
+        }
+
+        with patch("tools.routeRecorder.get_minimap_loc_size") as detect:
+            self.assertTrue(recorder.update_minimap_from_current_frame())
+
+        detect.assert_not_called()
+        self.assertEqual(recorder.loc_minimap, (31, 81))
+        self.assertEqual(recorder.img_minimap_source.shape[:2], (98, 218))
 
     def test_runtime_pixel_config_is_always_derived_from_unscaled_base(self):
         recorder = RouteRecorder.__new__(RouteRecorder)

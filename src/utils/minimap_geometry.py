@@ -42,14 +42,15 @@ def minimap_geometry_path(map_dir):
     return Path(map_dir) / MINIMAP_GEOMETRY_FILENAME
 
 
-def save_minimap_geometry(map_dir, frame_size, minimap_rect):
-    """Save one human-readable minimap rectangle text file atomically."""
-    geometry = build_minimap_geometry(frame_size, minimap_rect)
-    path = minimap_geometry_path(map_dir)
-    path.parent.mkdir(parents=True, exist_ok=True)
+def serialize_minimap_geometry(geometry):
+    """Return the canonical text representation of validated geometry."""
+    geometry = build_minimap_geometry(
+        geometry["frame_size"],
+        geometry["minimap_rect"],
+    )
     frame_h, frame_w = geometry["frame_size"]
     x, y, width, height = geometry["minimap_rect"]
-    content = (
+    return (
         "# MapleStoryAutoLevelUp minimap capture geometry\n"
         "# minimap_rect is the border-free interior: x, y, width, height\n"
         f"version={MINIMAP_GEOMETRY_VERSION}\n"
@@ -60,6 +61,14 @@ def save_minimap_geometry(map_dir, frame_size, minimap_rect):
         f"width={width}\n"
         f"height={height}\n"
     )
+
+
+def save_minimap_geometry(map_dir, frame_size, minimap_rect):
+    """Save one human-readable minimap rectangle text file atomically."""
+    geometry = build_minimap_geometry(frame_size, minimap_rect)
+    path = minimap_geometry_path(map_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    content = serialize_minimap_geometry(geometry)
     temporary_path = path.with_name(path.name + ".tmp")
     temporary_path.write_text(content, encoding="utf-8")
     os.replace(temporary_path, path)

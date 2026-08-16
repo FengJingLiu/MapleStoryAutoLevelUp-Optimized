@@ -7,6 +7,7 @@ import argparse
 import sys
 import os
 from copy import deepcopy
+from pathlib import Path
 
 # CV import
 import numpy as np
@@ -30,7 +31,10 @@ from src.utils.frame_geometry import (
     scale_runtime_pixel_config,
 )
 from src.utils.minimap_geometry import (
-    save_minimap_geometry,
+    build_minimap_geometry,
+    load_minimap_geometry,
+    minimap_geometry_path,
+    serialize_minimap_geometry,
 )
 
 
@@ -188,7 +192,11 @@ def select_stable_minimap_match(
             mask=mask,
             global_threshold=0.0,
         )
-        return location, score, True
+        accepted = (
+            np.isfinite(score)
+            and score <= global_accept_threshold
+        )
+        return location, score, accepted
 
     global_location, global_score, _ = find_pattern_sqdiff(
         img_map,
@@ -354,6 +362,95 @@ def prepare_route_output_directory(map_dir, confirm=input):
         f"map.png {'preserved' if os.path.isfile(map_path) else 'not present'}"
     )
     return True
+
+
+def stage_png_write(path, image):
+    """Encode and verify a PNG beside its destination before replacement."""
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temporary = target.with_name(f".{target.stem}.recording.tmp{target.suffix}")
+    encoded_ok, encoded = cv2.imencode(target.suffix, image)
+    if not encoded_ok:
+        raise OSError(f"Unable to encode image: {target}")
+    temporary.write_bytes(encoded.tobytes())
+
+    decoded = cv2.imdecode(
+        np.frombuffer(temporary.read_bytes(), dtype=np.uint8),
+        cv2.IMREAD_UNCHANGED,
+    )
+    if (
+        decoded is None
+        or decoded.shape != image.shape
+        or decoded.dtype != image.dtype
+        or not np.array_equal(decoded, image)
+    ):
+        try:
+            temporary.unlink()
+        except OSError:
+            pass
+        raise OSError(f"PNG verification failed: {target}")
+    return temporary
+
+
+def stage_text_write(path, content):
+    """Write and verify UTF-8 text beside its final destination."""
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temporary = target.with_name(f".{target.stem}.recording.tmp{target.suffix}")
+    temporary.write_text(content, encoding="utf-8")
+    if temporary.read_text(encoding="utf-8") != content:
+        try:
+            temporary.unlink()
+        except OSError:
+            pass
+        raise OSError(f"Text verification failed: {target}")
+    return temporary
+
+
+def commit_staged_files(staged_files):
+    """Replace a staged file set, restoring all old targets on any failure."""
+    token = f"{os.getpid()}.{time.time_ns()}"
+    backups = []
+    committed = set()
+    try:
+        for target, temporary in staged_files:
+            target = Path(target)
+            backup = None
+            if target.exists():
+                backup = target.with_name(
+                    f".{target.name}.recording.backup.{token}"
+                )
+                os.replace(target, backup)
+            backups.append((target, backup))
+            os.replace(temporary, target)
+            committed.add(target)
+    except OSError:
+        rollback_errors = []
+        for target, backup in reversed(backups):
+            try:
+                if backup is not None and backup.exists():
+                    if target.exists():
+                        target.unlink()
+                    os.replace(backup, target)
+                elif target in committed and target.exists():
+                    target.unlink()
+            except OSError as rollback_error:
+                rollback_errors.append(str(rollback_error))
+        if rollback_errors:
+            logger.error(
+                "Recording bundle rollback was incomplete: "
+                + "; ".join(rollback_errors)
+            )
+        raise
+    else:
+        for _, backup in backups:
+            if backup is not None:
+                try:
+                    backup.unlink()
+                except OSError as exc:
+                    logger.warning(
+                        f"Unable to remove recording backup {backup}: {exc}"
+                    )
 
 
 class RouteRecorder():
@@ -608,22 +705,16 @@ class RouteRecorder():
             self._last_capture_geometry = geometry_key
         return img_frame
 
-    def update_minimap_from_current_frame(self):
-        """Detect and crop the minimap from the current native game frame."""
-        minimap_result = get_minimap_loc_size(self.img_frame)
-        if minimap_result is None:
-            logger.warning("Minimap not found; waiting for the next frame")
-            return False
-
-        x, y, w, h = minimap_result
-        # Discard one remaining pixel on each edge so the white border cannot
-        # leak into route-map matching.
-        x += 1
-        y += 1
-        w -= 2
-        h -= 2
-        if w <= 0 or h <= 0:
-            logger.warning("Detected minimap has no usable interior")
+    def _apply_locked_minimap_rect(self, minimap_rect):
+        """Crop one already validated, border-free minimap rectangle."""
+        x, y, w, h = map(int, minimap_rect)
+        frame_h, frame_w = self.img_frame.shape[:2]
+        if x < 0 or y < 0 or w <= 0 or h <= 0 \
+                or x + w > frame_w or y + h > frame_h:
+            logger.error(
+                "Locked minimap rectangle is outside the current frame: "
+                f"rect={(x, y, w, h)}, frame={(frame_w, frame_h)}"
+            )
             return False
 
         self.loc_minimap = (x, y)
@@ -631,6 +722,101 @@ class RouteRecorder():
         self.img_minimap_screen = self.img_frame[y:y+h, x:x+w]
         self.img_minimap_source = self.img_minimap_screen
         return True
+
+    def update_minimap_from_current_frame(self):
+        """Calibrate once, then keep one fixed minimap crop for the session."""
+        if getattr(self, "_minimap_geometry_error", False):
+            return False
+
+        frame_size = tuple(map(int, self.img_frame.shape[:2]))
+        locked_rect = getattr(self, "_locked_minimap_rect", None)
+        locked_frame_size = getattr(self, "_minimap_lock_frame_size", None)
+        if locked_rect is not None:
+            if frame_size != locked_frame_size:
+                logger.error(
+                    "Game-frame size changed after minimap calibration: "
+                    f"{locked_frame_size[::-1]} -> {frame_size[::-1]}. "
+                    "Recording is paused; restart the recorder so one route "
+                    "cannot mix coordinate systems."
+                )
+                self._minimap_geometry_error = True
+                self.is_enable = False
+                self.break_route_segment()
+                return False
+            return self._apply_locked_minimap_rect(locked_rect)
+
+        saved_geometry = getattr(self, "_saved_minimap_geometry", None)
+        if saved_geometry is not None:
+            saved_frame_size = tuple(saved_geometry["frame_size"])
+            if frame_size != saved_frame_size:
+                logger.error(
+                    "Current game-frame size does not match the preserved "
+                    "map geometry: "
+                    f"saved={saved_frame_size[::-1]}, "
+                    f"current={frame_size[::-1]}. Use a fresh map directory."
+                )
+                self._minimap_geometry_error = True
+                self.is_enable = False
+                self.break_route_segment()
+                return False
+            self._locked_minimap_rect = tuple(saved_geometry["minimap_rect"])
+            self._minimap_lock_frame_size = saved_frame_size
+            logger.info(
+                "Using preserved fixed minimap crop: "
+                f"{self._locked_minimap_rect}"
+            )
+            return self._apply_locked_minimap_rect(
+                self._locked_minimap_rect
+            )
+
+        calibration_frame_size = getattr(
+            self, "_minimap_calibration_frame_size", None
+        )
+        if calibration_frame_size != frame_size:
+            self._minimap_calibration_frame_size = frame_size
+            self._minimap_rect_samples = []
+
+        minimap_result = get_minimap_loc_size(self.img_frame)
+        if minimap_result is None:
+            logger.warning("Minimap not found; waiting for the next frame")
+            return False
+
+        x, y, w, h = map(int, minimap_result)
+        # Discard one remaining pixel on each edge so the white border cannot
+        # leak into route-map matching.
+        interior_rect = (x + 1, y + 1, w - 2, h - 2)
+        if interior_rect[2] <= 0 or interior_rect[3] <= 0:
+            logger.warning("Detected minimap has no usable interior")
+            return False
+
+        samples = getattr(self, "_minimap_rect_samples", None)
+        if samples is None:
+            samples = []
+            self._minimap_rect_samples = samples
+        samples.append(interior_rect)
+        route_cfg = getattr(self, "cfg", {}).get("route_recoder", {})
+        required_samples = max(
+            1, int(route_cfg.get("minimap_lock_frames", 5))
+        )
+        if len(samples) < required_samples:
+            logger.info(
+                "Calibrating fixed minimap crop: "
+                f"{len(samples)}/{required_samples}"
+            )
+            return False
+
+        recent_samples = np.asarray(samples[-required_samples:], dtype=np.int32)
+        locked_rect = tuple(
+            int(round(value)) for value in np.median(recent_samples, axis=0)
+        )
+        self._locked_minimap_rect = locked_rect
+        self._minimap_lock_frame_size = frame_size
+        self._minimap_rect_samples = []
+        logger.info(
+            "Locked minimap crop for this recording session: "
+            f"rect={locked_rect}, frame={frame_size[::-1]}"
+        )
+        return self._apply_locked_minimap_rect(locked_rect)
 
     def __init__(self, args):
         '''
@@ -648,6 +834,7 @@ class RouteRecorder():
         self.loc_minimap_global = (0, 0) # minimap location on global map
         self.loc_player_global = (0, 0) # player location on global map
         self.loc_player_global_last = None # playeer location on global map last frame
+        self._last_route_action = None
         self.minimap_match_score = 0.0
         self.minimap_match_held = False
         self.input_forwarder = None
@@ -665,6 +852,13 @@ class RouteRecorder():
         self._native_minimap_size = None
         self._last_native_minimap_error = None
         self._last_route_map_size_error = None
+        self._locked_minimap_rect = None
+        self._minimap_lock_frame_size = None
+        self._minimap_calibration_frame_size = None
+        self._minimap_rect_samples = []
+        self._minimap_geometry_error = False
+        self._saved_minimap_geometry = None
+        self.completed_routes = []
         # Timers
         self.t_last_frame = time.time() # Last frame timer, for fps calculation
         self.t_last_draw_blob = time.time() # Last draw blob timer
@@ -719,6 +913,14 @@ class RouteRecorder():
             if os.path.isfile(existing_map_path):
                 self.img_map = load_image(existing_map_path)
                 logger.info(f"Loaded preserved map: {existing_map_path}")
+
+        if self.img_map is not None:
+            geometry_dir = self.map_dir
+            if self.args.map != '':
+                explicit_map_dir = os.path.dirname(self.args.map)
+                if explicit_map_dir:
+                    geometry_dir = explicit_map_dir
+            self._saved_minimap_geometry = load_minimap_geometry(geometry_dir)
 
         try:
             route_cfg = self.cfg.get("route_recoder", {})
@@ -779,6 +981,134 @@ class RouteRecorder():
         )
         return False
 
+    def break_route_segment(self):
+        """Prevent the next valid sample from bridging an invalid time gap."""
+        self.loc_player_global_last = None
+        self._last_route_action = None
+
+    def record_route_sample(self, action, is_draw_blob):
+        """Draw one action sample while keeping unrelated segments separate."""
+        if not getattr(self, "is_enable", False) or not action \
+                or self.img_route is None:
+            self.break_route_segment()
+            return False
+
+        dict_action_to_color = {v: k for k, v in self.color_code.items()}
+        color_rgb = dict_action_to_color.get(action)
+        if color_rgb is None:
+            logger.error(f"Unknown route action; skipping sample: {action}")
+            self.break_route_segment()
+            return False
+        color_bgr = (color_rgb[2], color_rgb[1], color_rgb[0])
+        px, py = map(int, self.loc_player_global)
+
+        if is_draw_blob:
+            # A discrete action must never leave a pending point that can be
+            # connected across its cooldown or to a later movement action.
+            self.break_route_segment()
+            force_draw = action == "none none goal"
+            dt = time.time() - self.t_last_draw_blob
+            if force_draw or dt > self.cfg["route_recoder"]["blob_cooldown"]:
+                cv2.circle(
+                    self.img_route,
+                    (px, py),
+                    radius=2,
+                    color=color_bgr,
+                    thickness=-1,
+                )
+                self.t_last_draw_blob = time.time()
+                return True
+            return False
+
+        if action != getattr(self, "_last_route_action", None):
+            self.break_route_segment()
+
+        previous = self.loc_player_global_last
+        if previous is None:
+            previous = (px, py)
+        cv2.line(
+            self.img_route,
+            tuple(map(int, previous)),
+            (px, py),
+            color=color_bgr,
+            thickness=1,
+        )
+        self.loc_player_global_last = (px, py)
+        self._last_route_action = action
+        return True
+
+    def _recording_geometry(self):
+        """Return and pre-validate the geometry saved beside a route bundle."""
+        minimap_rect = getattr(self, "_locked_minimap_rect", None)
+        frame_size = getattr(self, "_minimap_lock_frame_size", None)
+        if minimap_rect is None:
+            x, y = self.loc_minimap
+            h, w = self.minimap_screen_size
+            minimap_rect = (x, y, w, h)
+        if frame_size is None:
+            frame_size = self.img_frame.shape[:2]
+        return build_minimap_geometry(frame_size, minimap_rect)
+
+    def save_recording_bundle(self, include_current_route=False):
+        """Save map, geometry, and every completed route at one canvas size."""
+        routes = list(getattr(self, "completed_routes", []))
+        if include_current_route:
+            if self.img_route is None:
+                logger.error("Unable to save route: route canvas is missing")
+                return False
+            routes.append(self.img_route.copy())
+
+        map_shape = self.img_map.shape
+        for index, route in enumerate(routes, start=1):
+            if route.shape != map_shape:
+                logger.error(
+                    "Refusing inconsistent route bundle: "
+                    f"map={map_shape}, route{index}={route.shape}"
+                )
+                return False
+
+        try:
+            geometry = self._recording_geometry()
+        except (AttributeError, TypeError, ValueError) as exc:
+            logger.error(f"Unable to save minimap geometry: {exc}")
+            return False
+
+        image_targets = [(Path(self.map_dir) / "map.png", self.img_map)]
+        image_targets.extend(
+            (Path(self.map_dir) / f"route{index}.png", route)
+            for index, route in enumerate(routes, start=1)
+        )
+        staged = []
+        try:
+            for target, image in image_targets:
+                staged.append((target, stage_png_write(target, image)))
+            geometry_target = minimap_geometry_path(self.map_dir)
+            staged.append(
+                (
+                    geometry_target,
+                    stage_text_write(
+                        geometry_target,
+                        serialize_minimap_geometry(geometry),
+                    ),
+                )
+            )
+            commit_staged_files(staged)
+        except (KeyError, OSError, TypeError, ValueError) as exc:
+            logger.error(f"Unable to save recording bundle: {exc}")
+            return False
+        finally:
+            for _, temporary in staged:
+                try:
+                    temporary.unlink()
+                except OSError:
+                    pass
+
+        logger.info(
+            f"Saved recording bundle: {self.map_dir} "
+            f"({len(routes)} route image(s), canvas={map_shape[1]}x{map_shape[0]})"
+        )
+        return True
+
     def ensure_img_map_capacity(self, x, y, h, w):
         '''
         Ensure that self.img_map is large enough to contain the region defined by (x, y, h, w).
@@ -800,6 +1130,23 @@ class RouteRecorder():
         if expand_top == 0 and expand_bottom == 0 and expand_left == 0 and expand_right == 0:
             return (0, 0)
 
+        if self.img_route is not None \
+                and self.img_route.shape[:2] != (map_h, map_w):
+            route_h, route_w = self.img_route.shape[:2]
+            raise RuntimeError(
+                "Route canvas lost alignment before expansion: "
+                f"map={(map_w, map_h)}, route={(route_w, route_h)}"
+            )
+        completed_routes = getattr(self, "completed_routes", [])
+        for index, route in enumerate(completed_routes, start=1):
+            route_h, route_w = route.shape[:2]
+            if (route_h, route_w) != (map_h, map_w):
+                raise RuntimeError(
+                    "Completed route lost alignment before expansion: "
+                    f"map={(map_w, map_h)}, "
+                    f"route{index}={(route_w, route_h)}"
+                )
+
         # Create new canvas and paste old image
         new_h = map_h + expand_top + expand_bottom
         new_w = map_w + expand_left + expand_right
@@ -818,6 +1165,17 @@ class RouteRecorder():
                 expand_left:expand_left + route_w,
             ] = self.img_route
             self.img_route = new_route
+
+        expanded_routes = []
+        for index, route in enumerate(completed_routes, start=1):
+            route_h, route_w = route.shape[:2]
+            new_route = np.zeros((new_h, new_w, 3), dtype=route.dtype)
+            new_route[
+                expand_top:expand_top + route_h,
+                expand_left:expand_left + route_w,
+            ] = route
+            expanded_routes.append(new_route)
+        self.completed_routes = expanded_routes
 
         # Also update all global coordinates that depend on the map (optional)
         self.loc_minimap_global = (
@@ -853,6 +1211,7 @@ class RouteRecorder():
         # Get lastest game screen frame buffer
         img_frame = self.get_img_frame()
         if img_frame is None:
+            self.break_route_segment()
             return -1 # Wait for game window to be ready
         else:
             self.img_frame = img_frame
@@ -860,10 +1219,11 @@ class RouteRecorder():
         # Image for debug use
         self.img_frame_debug = self.img_frame.copy()
 
-        # The minimap may move on screen, so re-detect its rectangle every
-        # frame. Its native raster size is locked below because resizing would
-        # invalidate the recorded route coordinate system.
+        # Calibrate one fixed minimap rectangle for this session. Per-frame
+        # rectangle jitter would otherwise move the entire route coordinate
+        # system even when the in-game camera is stationary.
         if not self.update_minimap_from_current_frame():
+            self.break_route_segment()
             return -1
         native_size = self.img_minimap_source.shape[:2]
         expected_size = getattr(self, "_native_minimap_size", None)
@@ -878,6 +1238,7 @@ class RouteRecorder():
                     "discarding this frame to preserve route coordinates"
                 )
                 self._last_native_minimap_error = error_key
+            self.break_route_segment()
             return -1
         self._native_minimap_size = native_size
         self._last_native_minimap_error = None
@@ -900,6 +1261,7 @@ class RouteRecorder():
                     "map instead of reusing this canvas"
                 )
                 self._last_route_map_size_error = error_key
+            self.break_route_segment()
             return -1
         self._last_route_map_size_error = None
 
@@ -929,6 +1291,7 @@ class RouteRecorder():
                     "Player dot not found on minimap; skipping this frame"
                 )
                 self._last_player_warning_time = now
+            self.break_route_segment()
             return -1
         self.loc_player_minimap = loc_player_minimap
 
@@ -957,12 +1320,36 @@ class RouteRecorder():
                 self.minimap_match_score = 0.0
                 self.minimap_match_held = False
             else:
-                self.loc_minimap_global, self.minimap_match_score, _ = \
-                    find_pattern_sqdiff(
+                (
+                    self.loc_minimap_global,
+                    self.minimap_match_score,
+                    match_accepted,
+                ) = select_stable_minimap_match(
                         self.img_map,
                         img_minimap_alignment,
+                        last_result=None,
                         mask=minimap_match_mask,
+                        global_accept_threshold=self.cfg["route_recoder"].get(
+                            "global_match_threshold", 0.22
+                        ),
                     )
+                self.minimap_match_held = not match_accepted
+                if not match_accepted:
+                    error_key = round(float(self.minimap_match_score), 4)
+                    if error_key != getattr(
+                        self, "_last_initial_match_error", None
+                    ):
+                        logger.error(
+                            "Existing map.png does not match the locked "
+                            "minimap crop closely enough: "
+                            f"score={self.minimap_match_score:.4f}. "
+                            "Use the map's saved geometry or create a fresh "
+                            "map directory."
+                        )
+                        self._last_initial_match_error = error_key
+                    self.break_route_segment()
+                    return -1
+                self._last_initial_match_error = None
                 x, y = self.loc_minimap_global
                 h, w = self.img_minimap.shape[:2]
                 self.ensure_img_map_capacity(x, y, h, w)
@@ -993,6 +1380,9 @@ class RouteRecorder():
                 ),
             )
             self.minimap_match_held = not match_accepted
+            if not match_accepted:
+                self.break_route_segment()
+                return -1
             x, y = self.loc_minimap_global
             h, w = self.img_minimap.shape[:2]
             # Ensure img_map is big enough to fit the newly explored region
@@ -1012,6 +1402,7 @@ class RouteRecorder():
                         "Skip map update: minimap lies outside expanded map "
                         f"at {(x, y, w, h)}"
                     )
+                    self.break_route_segment()
                     return -1
 
                 # img_route is a separate canvas.  Expanding it kept the
@@ -1030,6 +1421,8 @@ class RouteRecorder():
                         "Skip route background update: minimap lies outside "
                         f"route canvas at {(x, y, w, h)}"
                     )
+                    self.break_route_segment()
+                    return -1
 
         cv2.imshow("Map", self.img_map)
         self.img_route_debug = self.img_route.copy()
@@ -1053,60 +1446,23 @@ class RouteRecorder():
             logger.info(f"User press F1, is_enable = {self.is_enable}")
             self.kb.is_pressed_func_key[0] = False
 
-        # Update route image
-        if self.is_enable and action != "":
-            # Get color from action
-            dict_action_to_color = {v: k for k, v in self.color_code.items()}
-            color_rgb = dict_action_to_color.get(action, None)
-            color_bgr = (color_rgb[2], color_rgb[1], color_rgb[0])
-
-            # Draw a line from the last position to the current one (if available)
-            px, py = self.loc_player_global
-            if is_draw_blob:
-                dt = time.time() - self.t_last_draw_blob
-                if dt > self.cfg["route_recoder"]["blob_cooldown"]:
-                    # Draw a small filled circle at current position
-                    cv2.circle(self.img_route,
-                            (px, py),
-                            radius=2,
-                            color=color_bgr,
-                            thickness=-1)  # filled circle
-                    self.t_last_draw_blob = time.time()
-                    self.loc_player_global_last = None
-            else:
-                if self.loc_player_global_last is None:
-                    px_last, py_last = self.loc_player_global
-                else:
-                    px_last, py_last = self.loc_player_global_last
-                cv2.line(self.img_route,
-                        (px_last, py_last),
-                        (px     , py),
-                        color=color_bgr,
-                        thickness=1)
-                self.loc_player_global_last = self.loc_player_global
+        # Any key release, action change, discrete action, or invalid frame
+        # breaks continuity so unrelated samples cannot be joined by a line.
+        self.record_route_sample(action, is_draw_blob)
 
         # Save route image if goal is drawn
         if action == "none none goal":
-            out_path = f"minimaps/{self.args.new_map}/route{self.idx_routes+1}.png"
-            cv2.imwrite(out_path, self.img_route)
-            self.idx_routes += 1
-            self.img_route = self.img_map.copy()
-            logger.info(f"Save route image to {out_path}")
+            if self.save_recording_bundle(include_current_route=True):
+                self.completed_routes.append(self.img_route.copy())
+                self.idx_routes = len(self.completed_routes)
+                self.img_route = self.remove_color_code_pixels(
+                    self.img_map.copy()
+                )
+                self.break_route_segment()
 
         # Save img_map to map.png
         if self.kb.is_pressed_func_key[3]: # 'F4' is pressed
-            out_path = f"minimaps/{self.args.new_map}/map.png"
-            if cv2.imwrite(out_path, self.img_map):
-                x, y = self.loc_minimap
-                h, w = self.minimap_screen_size
-                save_minimap_geometry(
-                    self.map_dir,
-                    self.img_frame.shape[:2],
-                    (x, y, w, h),
-                )
-                logger.info(f"Save map image to {out_path}")
-            else:
-                logger.error(f"Unable to save map image to {out_path}")
+            self.save_recording_bundle(include_current_route=False)
             self.kb.is_pressed_func_key[3] = False
 
         #####################

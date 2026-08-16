@@ -1,4 +1,5 @@
 import unittest
+import os
 import threading
 import time
 import tempfile
@@ -12,7 +13,7 @@ from pynput import keyboard
 
 from src.input.KeyBoardListener import KeyBoardListener, normalize_key_name
 from src.input.Esp32KeyForwarder import Esp32KeyForwarder
-from src.utils.common import find_pattern_sqdiff
+from src.utils.common import find_pattern_sqdiff, mask_route_colors
 from tools.routeRecorder import (
     RouteRecorder,
     fill_empty_canvas_pixels,
@@ -188,6 +189,25 @@ class RouteRecorderKeyTests(unittest.TestCase):
 
 
 class RouteRecorderGeometryTests(unittest.TestCase):
+    @staticmethod
+    def make_draw_recorder():
+        recorder = RouteRecorder.__new__(RouteRecorder)
+        recorder.cfg = {
+            "route_recoder": {"blob_cooldown": 0.7, "map_padding": 3}
+        }
+        recorder.color_code = {
+            (255, 0, 0): "left none none",
+            (0, 255, 0): "right none none",
+            (0, 0, 255): "none none jump",
+            (255, 255, 0): "none none goal",
+        }
+        recorder.img_route = np.zeros((20, 20, 3), dtype=np.uint8)
+        recorder.is_enable = True
+        recorder.loc_player_global_last = None
+        recorder._last_route_action = None
+        recorder.t_last_draw_blob = time.time()
+        return recorder
+
     def test_new_map_background_is_added_without_erasing_route(self):
         canvas = np.zeros((10, 12, 3), dtype=np.uint8)
         source = np.full((4, 5, 3), 80, dtype=np.uint8)
@@ -231,6 +251,21 @@ class RouteRecorderGeometryTests(unittest.TestCase):
 
         self.assertEqual(location, (90, 0))
         self.assertTrue(accepted)
+
+    def test_initial_match_rejects_an_unrelated_existing_map(self):
+        stitched_map = np.zeros((30, 40, 3), dtype=np.uint8)
+        current_minimap = np.full((20, 25, 3), 180, dtype=np.uint8)
+
+        _, score, accepted = select_stable_minimap_match(
+            stitched_map,
+            current_minimap,
+            last_result=None,
+            mask=np.full((20, 25), 255, dtype=np.uint8),
+            global_accept_threshold=0.05,
+        )
+
+        self.assertGreater(score, 0.05)
+        self.assertFalse(accepted)
 
     def test_stable_match_accepts_clearly_better_distant_portal(self):
         pattern = np.full((20, 20, 3), 80, dtype=np.uint8)
@@ -340,6 +375,7 @@ class RouteRecorderGeometryTests(unittest.TestCase):
         recorder.cfg = {"route_recoder": {"map_padding": 3}}
         recorder.img_map = np.full((4, 6, 3), 11, dtype=np.uint8)
         recorder.img_route = np.full((4, 6, 3), 22, dtype=np.uint8)
+        recorder.completed_routes = [np.full((4, 6, 3), 33, dtype=np.uint8)]
         recorder.loc_minimap_global = (0, 0)
         recorder.loc_player_global_last = (2, 3)
 
@@ -350,8 +386,203 @@ class RouteRecorderGeometryTests(unittest.TestCase):
         self.assertEqual(recorder.img_route.shape, recorder.img_map.shape)
         self.assertTrue(np.all(recorder.img_map[3:7, 3:9] == 11))
         self.assertTrue(np.all(recorder.img_route[3:7, 3:9] == 22))
+        self.assertEqual(recorder.completed_routes[0].shape, recorder.img_map.shape)
+        self.assertTrue(
+            np.all(recorder.completed_routes[0][3:7, 3:9] == 33)
+        )
         self.assertEqual(recorder.loc_minimap_global, (3, 3))
         self.assertEqual(recorder.loc_player_global_last, (5, 6))
+
+    def test_key_release_breaks_route_segment(self):
+        recorder = self.make_draw_recorder()
+        recorder.loc_player_global = (1, 5)
+        recorder.record_route_sample("left none none", False)
+        recorder.loc_player_global = (5, 5)
+        recorder.record_route_sample("left none none", False)
+
+        recorder.loc_player_global = (7, 5)
+        recorder.record_route_sample("", False)
+        recorder.loc_player_global = (9, 5)
+        recorder.record_route_sample("left none none", False)
+
+        red_bgr = (0, 0, 255)
+        self.assertTrue(np.all(recorder.img_route[5, 3] == red_bgr))
+        self.assertTrue(np.all(recorder.img_route[5, 7] == 0))
+        self.assertTrue(np.all(recorder.img_route[5, 9] == red_bgr))
+
+    def test_action_change_starts_a_new_segment(self):
+        recorder = self.make_draw_recorder()
+        recorder.loc_player_global = (5, 1)
+        recorder.record_route_sample("left none none", False)
+        recorder.loc_player_global = (5, 5)
+        recorder.record_route_sample("left none none", False)
+
+        recorder.loc_player_global = (9, 9)
+        recorder.record_route_sample("right none none", False)
+
+        green_bgr = (0, 255, 0)
+        self.assertTrue(np.all(recorder.img_route[9, 9] == green_bgr))
+        self.assertTrue(np.all(recorder.img_route[7, 7] == 0))
+
+    def test_blob_cooldown_still_breaks_route_segment(self):
+        recorder = self.make_draw_recorder()
+        recorder.loc_player_global = (1, 5)
+        recorder.record_route_sample("left none none", False)
+        recorder.loc_player_global = (5, 5)
+        recorder.record_route_sample("left none none", False)
+
+        recorder.loc_player_global = (6, 5)
+        self.assertFalse(
+            recorder.record_route_sample("none none jump", True)
+        )
+        recorder.loc_player_global = (9, 5)
+        recorder.record_route_sample("left none none", False)
+
+        self.assertTrue(np.all(recorder.img_route[5, 7] == 0))
+
+    def test_save_bundle_keeps_map_and_every_route_at_one_size(self):
+        recorder = self.make_draw_recorder()
+        recorder.img_map = np.full((4, 6, 3), 11, dtype=np.uint8)
+        recorder.img_route = np.full((4, 6, 3), 22, dtype=np.uint8)
+        recorder.completed_routes = [
+            np.full((4, 6, 3), 33, dtype=np.uint8)
+        ]
+        recorder.loc_minimap_global = (0, 0)
+        recorder.loc_player_global_last = None
+        recorder._locked_minimap_rect = (1, 1, 3, 2)
+        recorder._minimap_lock_frame_size = (10, 12)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            recorder.map_dir = temp_dir
+            self.assertTrue(
+                recorder.save_recording_bundle(include_current_route=True)
+            )
+
+            def read_png(name):
+                data = np.frombuffer(
+                    (Path(temp_dir) / name).read_bytes(), dtype=np.uint8
+                )
+                return cv2.imdecode(data, cv2.IMREAD_UNCHANGED)
+
+            saved_map = read_png("map.png")
+            saved_route1 = read_png("route1.png")
+            saved_route2 = read_png("route2.png")
+            self.assertEqual(saved_map.shape, (4, 6, 3))
+            self.assertEqual(saved_route1.shape, saved_map.shape)
+            self.assertEqual(saved_route2.shape, saved_map.shape)
+
+            recorder.completed_routes.append(recorder.img_route.copy())
+            recorder.ensure_img_map_capacity(0, 0, 4, 6)
+            self.assertTrue(
+                recorder.save_recording_bundle(include_current_route=False)
+            )
+            rewritten_route1 = read_png("route1.png")
+            rewritten_route2 = read_png("route2.png")
+            self.assertEqual(rewritten_route1.shape, (10, 12, 3))
+            self.assertEqual(rewritten_route2.shape, (10, 12, 3))
+            self.assertTrue(np.all(rewritten_route1[3:7, 3:9] == 33))
+
+    def test_save_bundle_rejects_a_mismatched_completed_route(self):
+        recorder = self.make_draw_recorder()
+        recorder.img_map = np.zeros((4, 6, 3), dtype=np.uint8)
+        recorder.completed_routes = [np.zeros((5, 6, 3), dtype=np.uint8)]
+        recorder._locked_minimap_rect = (1, 1, 3, 2)
+        recorder._minimap_lock_frame_size = (10, 12)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            recorder.map_dir = temp_dir
+            self.assertFalse(recorder.save_recording_bundle())
+            self.assertFalse((Path(temp_dir) / "map.png").exists())
+
+    def test_geometry_stage_failure_keeps_existing_bundle_unchanged(self):
+        recorder = self.make_draw_recorder()
+        recorder.img_map = np.full((4, 6, 3), 11, dtype=np.uint8)
+        recorder.completed_routes = [
+            np.full((4, 6, 3), 33, dtype=np.uint8)
+        ]
+        recorder._locked_minimap_rect = (1, 1, 3, 2)
+        recorder._minimap_lock_frame_size = (10, 12)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            recorder.map_dir = temp_dir
+            map_path = Path(temp_dir) / "map.png"
+            route_path = Path(temp_dir) / "route1.png"
+            map_path.write_bytes(b"old map")
+            route_path.write_bytes(b"old route")
+
+            with patch(
+                "tools.routeRecorder.stage_text_write",
+                side_effect=OSError("geometry stage failed"),
+            ):
+                self.assertFalse(recorder.save_recording_bundle())
+
+            self.assertEqual(map_path.read_bytes(), b"old map")
+            self.assertEqual(route_path.read_bytes(), b"old route")
+            self.assertFalse((Path(temp_dir) / "minimap_geometry.txt").exists())
+
+    def test_replace_failure_rolls_back_every_bundle_target(self):
+        recorder = self.make_draw_recorder()
+        recorder.img_map = np.full((4, 6, 3), 11, dtype=np.uint8)
+        recorder.completed_routes = [
+            np.full((4, 6, 3), 33, dtype=np.uint8)
+        ]
+        recorder._locked_minimap_rect = (1, 1, 3, 2)
+        recorder._minimap_lock_frame_size = (10, 12)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            recorder.map_dir = temp_dir
+            map_path = Path(temp_dir) / "map.png"
+            route_path = Path(temp_dir) / "route1.png"
+            map_path.write_bytes(b"old map")
+            route_path.write_bytes(b"old route")
+            real_replace = os.replace
+
+            def fail_route_commit(source, destination):
+                if (
+                    Path(source).name == ".route1.recording.tmp.png"
+                    and Path(destination).name == "route1.png"
+                ):
+                    raise OSError("route replace failed")
+                return real_replace(source, destination)
+
+            with patch(
+                "tools.routeRecorder.os.replace",
+                side_effect=fail_route_commit,
+            ):
+                self.assertFalse(recorder.save_recording_bundle())
+
+            self.assertEqual(map_path.read_bytes(), b"old map")
+            self.assertEqual(route_path.read_bytes(), b"old route")
+            self.assertFalse((Path(temp_dir) / "minimap_geometry.txt").exists())
+            leftovers = [
+                path.name for path in Path(temp_dir).iterdir()
+                if ".recording." in path.name
+            ]
+            self.assertEqual(leftovers, [])
+
+    def test_route_loader_rejects_canvas_resize(self):
+        img_map = np.zeros((4, 6, 3), dtype=np.uint8)
+        img_route = np.zeros((5, 6, 3), dtype=np.uint8)
+
+        with self.assertRaisesRegex(ValueError, "canvas mismatch"):
+            mask_route_colors(
+                img_map,
+                img_route,
+                {"255,0,0": "left none none"},
+            )
+
+    def test_expansion_mismatch_does_not_partially_resize_the_map(self):
+        recorder = self.make_draw_recorder()
+        recorder.img_map = np.full((4, 6, 3), 11, dtype=np.uint8)
+        recorder.img_route = np.full((5, 6, 3), 22, dtype=np.uint8)
+        recorder.completed_routes = []
+        recorder.loc_minimap_global = (0, 0)
+
+        with self.assertRaises(RuntimeError):
+            recorder.ensure_img_map_capacity(0, 0, 4, 6)
+
+        self.assertEqual(recorder.img_map.shape, (4, 6, 3))
+        self.assertTrue(np.all(recorder.img_map == 11))
 
     def test_player_global_location_tracks_centroid_pixel_changes_directly(self):
         recorder = RouteRecorder.__new__(RouteRecorder)
