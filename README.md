@@ -119,38 +119,38 @@ All automated keyboard output is sent to the ESP32-S3 over a persistent USB
 serial connection. The intended capture-card topology is:
 
 ```text
-Game PC B --HDMI--> capture card / PotPlayer on computer A --> bot detection
+Game PC B --HDMI--> GC573 / OpenCV DirectShow on computer A --> bot detection
 Computer A --USB serial--> ESP32-S3 --Bluetooth HID--> game PC B
 ```
 
-PotPlayer is a client-drawn window: its title skin, playback controls, and
-letterbox/pillarbox pixels are included in Windows Graphics Capture. The
-`auto` capture profile detects a PotPlayer title, removes that chrome, takes
-the largest centered 16:9 HDMI region, normalizes it through the original
-1282x693 game raster, and only then produces the 1296x700 vision frame:
+Windows reads the GC573 directly with OpenCV's DirectShow backend. Startup
+requests and verifies RGB24 at exactly 3840x2160 and 60 FPS; it fails closed if
+the driver negotiates a fallback format or resolution. DirectShow calls the
+media subtype RGB24, while OpenCV exposes the NumPy array in BGR channel order:
 
 ```yaml
+capture:
+  source: directshow
+capture_card:
+  device_index: 0
+  device_name: "AVerMedia GC573 1 Capture"
+  width: 3840
+  height: 2160
+  fps: 60
+  pixel_format: RGB24
 game_window:
-  capture_profile: "auto"  # auto, direct, or potplayer
-  potplayer_chrome_top: 34
-  potplayer_chrome_bottom: 65
-  potplayer_video_aspect_ratio: [16, 9]
-  potplayer_resize_width: 2768
-  potplayer_resize_height: 1656
+  capture_profile: capture_card
 ```
 
-The PotPlayer chrome values depend on its skin and Windows DPI scale. The log
-prints the detected source size and exact video ROI whenever that geometry
-changes. Keep computer B's game image filling the HDMI output without desktop
-panels or overlays.
+Frames remain at their native 4K raster; no player-window crop, screenshot, or
+1296x700 normalization is applied. `device_index: 0` is the verified GC573
+endpoint on the current machine. Keep computer B's game image filling its HDMI
+output without desktop panels or overlays. Set `capture.source: window` only
+to use the retained legacy window/PotPlayer compatibility path.
 
-The stored `fire_land_1/map.png` is 319x202 because the route recorder added
-about 30 pixels of black expansion padding around a 259x142 local minimap
-raster. The calibrated 2768x1656 PotPlayer outer size makes the live minimap
-closely match that local raster. The PotPlayer profile also restores the
-extracted minimap to exactly 259x142 before route matching to absorb capture
-card, skin, and DPI rounding. The rest of the frame stays on the original
-1282x693 vision raster so monster and UI templates keep their expected scale.
+Routes and pixel templates are intentionally not enlarged from legacy assets.
+Re-record the items you use from native 4K frames; see the
+[DirectShow 4K asset checklist](DIRECTSHOW_4K_ASSET_CHECKLIST.md).
 
 Pair `Maple-ESP32-Keyboard` with game PC B before starting the bot. The default
 configuration automatically finds an ESP32-S3 USB Serial/JTAG port:
@@ -191,23 +191,23 @@ Gameplay control resumes only after fresh minimap player dots are confirmed in
 consecutive frames. Each action is gated by its own page template; if the next
 page or fresh gameplay evidence does not appear before its timeout, recovery
 fails closed and leaves gameplay input suspended for manual recovery. The
-bundled Chinese-page templates were recorded at 3579x2013 pixels
-(`flow_template_reference_size: [2013, 3579]`, height then width), and configured
-regions and click points scale with the captured frame. Keep the same UI layout
-  and cursor appearance, or replace the templates, cursor hotspot, coordinates,
-  and fixed-point channel anchor in `auto_relogin` for your client. Page overlays
-  are classified before acting (including channel-over-world and modal
-  disconnect priority), while fixed channel points follow the current matched
-  page anchor. Weak/ambiguous cursor matches, stale frames,
-page loss, capture resizing, movement stalls, and all timeouts fail closed
+configuration now uses the DirectShow 4K reference
+(`flow_template_reference_size: [2160, 3840]`, height then width), but the
+bundled PNG files remain legacy assets. `auto_relogin.enable` therefore stays
+`False` until the listed templates, cursor hotspots, coordinates, and page
+anchors have been recorded again from native 4K frames. Page overlays are
+classified before acting (including channel-over-world and modal disconnect
+priority), while fixed channel points follow the current matched page anchor.
+Weak/ambiguous cursor matches, stale frames, page loss, capture resizing,
+movement stalls, and all timeouts fail closed
 without clicking. This flow recovers an already authenticated session; it does
 not enter credentials or handle launchers, CAPTCHA, two-factor prompts, or
 unexpected pages. Firmware and setup instructions are in `esp32/README.md`.
 
-The PotPlayer window may be on any monitor of computer A; its desktop position
-is not used for remote clicks. Magpie, Windows DPI scaling, and the game window's
-desktop offset may change how far one relative HID step moves, but the next
-captured cursor position corrects that error. The cursor must remain visible in
+DirectShow has no clickable desktop window, and computer A's desktop position
+is not used for remote clicks. Game-PC scaling may change how far one relative
+HID step moves, but the next captured cursor position corrects that error. The
+cursor must remain visible in
 the capture and retain the configured template scale.
 
 For visual verification, select `debug` in the UI's **Bot Mode** list, select

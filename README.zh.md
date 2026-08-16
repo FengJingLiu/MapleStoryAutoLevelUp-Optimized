@@ -132,6 +132,34 @@ uv pip install --python .venv\Scripts\python.exe -r requirements.txt
 .venv\Scripts\python.exe -c "import torch; print(torch.cuda.is_available(), torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'CPU')"
 ```
 
+### GC573 DirectShow 擷取
+
+Windows 預設不再經過 PotPlayer 視窗截圖，而是由 OpenCV DirectShow 直接
+讀取 GC573。啟動時會嚴格驗證 RGB24、3840×2160、60 FPS；若驅動退回其他
+格式或解析度，程式會安全停止。DirectShow 的媒體子型別是 RGB24，而
+OpenCV 提供給既有視覺演算法的陣列仍是 BGR 通道順序。
+
+```yaml
+capture:
+  source: directshow
+capture_card:
+  device_index: 0
+  device_name: "AVerMedia GC573 1 Capture"
+  width: 3840
+  height: 2160
+  fps: 60
+  pixel_format: RGB24
+game_window:
+  capture_profile: capture_card
+```
+
+影像會保持原生 4K，不再裁切播放器外框，也不再縮放至 1296×700。
+`device_index: 0` 是目前電腦已實測的 GC573 端點；只有需要舊版視窗擷取時
+才把 `capture.source` 改為 `window`。
+
+舊路線和像素範本不會被插值放大；請直接從原生 4K 畫面重錄實際會用的素材。
+完整檔名與條件請見 [DirectShow 4K 素材重做清單](DIRECTSHOW_4K_ASSET_CHECKLIST.md)。
+
 鍵盤指令由電腦 A 經 USB 串口傳給 ESP32-S3，再由 ESP32-S3 透過 BLE HID
 送到遊戲電腦 B。預設會自動尋找 ESP32-S3 USB Serial/JTAG 裝置；也可固定端口：
 
@@ -160,18 +188,20 @@ esp32_hid:
 
 只有在連續畫面中確認新的小地圖玩家點後才恢復遊戲控制。每個動作都必須
 先命中對應的頁面範本；若下一頁或新遊戲畫面未在限時內出現，功能會安全
-停用自動輸入，等待人工恢復。內附中文頁面範本以 3579x2013 畫面錄製，
-設定中以 `[2013, 3579]` 表示「高、寬」，搜尋區域與點擊座標會依擷取畫面
-比例縮放。頻道覆蓋世界頁及掉線模態框會先按頁面優先級分類；「確定」與頻道
-固定點也會跟隨本幀頁面範本錨點平移。請保持相同的 UI 配置與游標外觀；其他
+停用自動輸入，等待人工恢復。設定座標已改用 DirectShow 4K，並以
+`[2160, 3840]` 表示「高、寬」，但倉庫內的 PNG 仍是舊解析度素材。
+因此在從原生 4K 畫面重做下列頁面與游標範本、熱點及錨點之前，
+`auto_relogin.enable` 預設為 `False`。頻道覆蓋世界頁及掉線模態框會先按
+頁面優先級分類；掉線與連線頁使用 `Enter`，世界與角色頁點擊匹配中心，
+只有頻道固定點會跟隨本幀頁面範本錨點平移。請保持相同的 UI 配置與游標外觀；其他
 客戶端需於 `auto_relogin` 更換頁面範本、游標範本、熱點、座標與頁面錨點。
 游標識別模糊、舊畫面、頁面消失、
 擷取尺寸改變、移動停滯或逾時時都會安全停止且不點擊。此流程只恢復已驗證的
 工作階段，不會輸入帳號密碼，也不處理啟動器、驗證碼、雙重驗證或未預期頁面。
 
-電腦 A 上的 PotPlayer 視窗可放在任意螢幕，其桌面座標不參與遠端點擊。
-Magpie、Windows DPI 縮放及遊戲視窗偏移只會改變單次相對移動的距離，下一幀
-會依游標實際落點繼續修正；但游標必須出現在擷取畫面中，且外觀尺寸需符合範本。
+DirectShow 沒有可點擊的桌面視窗，電腦 A 的桌面座標不參與遠端點擊。
+遊戲電腦的縮放只會改變單次相對移動的距離，下一幀會依游標實際落點
+繼續修正；但游標必須出現在擷取畫面中，且外觀尺寸需符合範本。
 
 ### 建議使用 UI 執行
 執行以下指令

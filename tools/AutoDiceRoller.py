@@ -12,17 +12,30 @@ import numpy as np
 import cv2
 
 # Local import
-from src.utils.global_var import WINDOW_WORKING_SIZE
 from src.utils.logger import logger
 from src.utils.common import (
     find_pattern_sqdiff, screenshot, load_image,
     is_mac, override_cfg, load_yaml, click_in_game_window,
 )
+from src.input.CaptureFramePreprocessor import preprocess_capture_frame
+from src.input.CaptureSource import (
+    DIRECTSHOW_SOURCE,
+    capture_profile_override,
+    create_capture_source,
+    resolve_capture_source,
+)
+from src.input.KeyBoardListener import KeyBoardListener
 if is_mac():
     from src.input.GameWindowCapturorForMac import GameWindowCapturor
 else:
     from src.input.GameWindowCapturor import GameWindowCapturor
-from src.input.KeyBoardListener import KeyBoardListener
+
+
+DICE_REFERENCE_SIZE = (700, 1296)  # height, width
+DICE_ROLL_POINT = (981, 445)
+DICE_FIRST_BOX = (890, 371)
+DICE_BOX_SIZE = (22, 37)  # height, width
+DICE_BOX_Y_INTERVAL = 25
 
 class AutoDiceRoller:
     '''
@@ -60,24 +73,125 @@ class AutoDiceRoller:
         self.fps_limit = self.cfg["system"]["fps_limit_auto_dice_roller"]
 
         # Load number image
+        # Templates are loaded at their authored scale.  DirectShow users must
+        # replace these with native 4K crops; legacy PNGs are never enlarged.
         self.img_numbers = [
             load_image(f"numbers/{i}.png", cv2.IMREAD_GRAYSCALE)
             for i in range(4, 14)
         ]
+        self._runtime_geometry_size = None
+        self.loc_dice = DICE_ROLL_POINT
+        self.loc_first_box = DICE_FIRST_BOX
+        self.box_size = DICE_BOX_SIZE
+        self.box_y_interval = DICE_BOX_Y_INTERVAL
+        self.debug_ui_y_start = self.cfg["ui_coords"]["ui_y_start"]
 
         # Start keyboard listener thread
         self.kb = KeyBoardListener(self.cfg, is_autobot=False)
 
-        # Start game window capturing thread
-        logger.info("Waiting for game window to activate, please click on game window")
-        self.capture = GameWindowCapturor(self.cfg)
+        # Start the configured window or DirectShow capture source.
+        logger.info("Starting configured capture source")
+        self.capture_source = resolve_capture_source(self.cfg)
+        self.capture = create_capture_source(
+            self.cfg,
+            window_capture_cls=GameWindowCapturor,
+        )
+
+    def refresh_runtime_geometry(self, output_size):
+        """Scale dice ROI geometry while preserving authored template pixels."""
+        output_h, output_w = map(int, output_size[:2])
+        if output_h <= 0 or output_w <= 0:
+            raise ValueError(
+                f"Invalid dice output size: {(output_h, output_w)}"
+            )
+
+        reference = self.cfg.get("game_window", {}).get(
+            "coordinate_reference_size", DICE_REFERENCE_SIZE
+        )
+        if not isinstance(reference, (list, tuple)) or len(reference) != 2:
+            raise ValueError(
+                "game_window.coordinate_reference_size must contain "
+                "[height, width]"
+            )
+        reference_h, reference_w = map(int, reference)
+        if reference_h <= 0 or reference_w <= 0:
+            raise ValueError(
+                "game_window.coordinate_reference_size values must be positive"
+            )
+
+        geometry_key = (
+            output_h,
+            output_w,
+            reference_h,
+            reference_w,
+        )
+        if geometry_key == self._runtime_geometry_size:
+            return
+
+        scale_x = output_w / reference_w
+        scale_y = output_h / reference_h
+
+        def scale_point(point):
+            return (
+                int(round(point[0] * scale_x)),
+                int(round(point[1] * scale_y)),
+            )
+
+        self.loc_dice = scale_point(DICE_ROLL_POINT)
+        self.loc_first_box = scale_point(DICE_FIRST_BOX)
+        self.box_size = (
+            max(1, int(round(DICE_BOX_SIZE[0] * scale_y))),
+            max(1, int(round(DICE_BOX_SIZE[1] * scale_x))),
+        )
+        self.box_y_interval = max(
+            1, int(round(DICE_BOX_Y_INTERVAL * scale_y))
+        )
+        self.debug_ui_y_start = max(
+            1,
+            int(round(
+                self.cfg["ui_coords"]["ui_y_start"] * scale_y
+            )),
+        )
+
+        self._runtime_geometry_size = geometry_key
+        logger.info(
+            "[AutoDiceRoller] Scaled dice ROI geometry from "
+            f"{(reference_h, reference_w)} to {(output_h, output_w)}"
+        )
+
+    def click_dice(self):
+        """Click only when capture coordinates belong to a local window."""
+        if self.capture_source == DIRECTSHOW_SOURCE:
+            remote = self.cfg.get("esp32_hid", {}).get(
+                "remote_target", False
+            )
+            target = "remote HDMI target" if remote else "local target window"
+            raise RuntimeError(
+                "AutoDiceRoller DirectShow recognition is available, but "
+                f"clicking the {target} is not supported; no click was sent"
+            )
+        window_title = getattr(
+            self.capture,
+            "window_title",
+            self.cfg["game_window"]["title"],
+        )
+        click_in_game_window(window_title, self.loc_dice)
+
+    def stop(self):
+        """Release listener and capture resources, including DirectShow."""
+        if getattr(self, "kb", None) is not None:
+            self.kb.stop()
+            self.kb = None
+        if getattr(self, "capture", None) is not None:
+            self.capture.stop()
+            self.capture = None
 
     def update_img_frame_debug(self):
         '''
         update_img_frame_debug
         '''
         cv2.imshow("Game Window Debug",
-            self.img_frame_debug[:self.cfg["ui_coords"]["ui_y_start"], :])
+            self.img_frame_debug[:self.debug_ui_y_start, :])
         # Update FPS timer
         self.t_last_frame = time.time()
 
@@ -91,18 +205,18 @@ class AutoDiceRoller:
             logger.warning("Failed to capture game frame.")
             return
 
-        # Make sure resolution is as expected
-        if self.cfg["game_window"]["size"] != self.frame.shape[:2]:
-            text = (
-                f"Unexpeted window size: {self.frame.shape[:2]} "
-                f"(expect {self.cfg['game_window']['size']})"
+        try:
+            self.img_frame, _ = preprocess_capture_frame(
+                self.frame,
+                self.cfg,
+                window_title=getattr(self.capture, "window_title", ""),
+                capture_profile=capture_profile_override(self.capture),
             )
-            logger.error(text)
+        except (KeyError, TypeError, ValueError) as exc:
+            logger.error(f"[capture] {exc}")
             return
 
-        # Resize raw frame to working size
-        self.img_frame = cv2.resize(self.frame, WINDOW_WORKING_SIZE,
-                                    interpolation=cv2.INTER_NEAREST)
+        self.refresh_runtime_geometry(self.img_frame.shape[:2])
 
         # Grayscale game window
         self.img_frame_gray = cv2.cvtColor(self.img_frame, cv2.COLOR_BGR2GRAY)
@@ -124,19 +238,24 @@ class AutoDiceRoller:
             screenshot(self.img_frame)
             self.kb.is_pressed_func_key[1] = False
 
-        if self.is_enable and self.kb.is_game_window_active():
-            loc_dice = (981, 445)
-            loc_first_box = (890, 371)
-            box_size = (22, 37) # (h ,w)
-            box_y_interval = 25
-            window_title = self.cfg["game_window"]["title"]
+        target_active = (
+            self.capture_source == DIRECTSHOW_SOURCE
+            or self.kb.is_game_window_active()
+        )
+        if self.is_enable and target_active:
 
             # Parse the attribute number
             attibutes_info = []
             for i, attibute in enumerate(["STR", "DEX", "INT", "LUK"]):
                 # Calculate the box position
-                p0 = (loc_first_box[0], loc_first_box[1] + i * box_y_interval)
-                p1 = (p0[0] + box_size[1], p0[1] + box_size[0])
+                p0 = (
+                    self.loc_first_box[0],
+                    self.loc_first_box[1] + i * self.box_y_interval,
+                )
+                p1 = (
+                    p0[0] + self.box_size[1],
+                    p0[1] + self.box_size[0],
+                )
 
                 # Crop the box region from the image
                 img_roi = self.img_frame_gray[p0[1]:p1[1], p0[0]:p1[0]]
@@ -184,7 +303,7 @@ class AutoDiceRoller:
 
             # Click to roll the dice or not
             if self.is_enable:
-                click_in_game_window(window_title, loc_dice)
+                self.click_dice()
                 logger.info("Roll the dice")
 
         # Show debug image on window
@@ -236,27 +355,30 @@ if __name__ == '__main__':
         help='Choose customized config yaml file in config/'
     )
 
+    autoDiceRoller = None
     try:
         autoDiceRoller = AutoDiceRoller(parser.parse_args())
     except Exception as e:
         logger.error(f"AutoDiceRoller Init failed: {e}")
         sys.exit(1)
     else:
-        while True:
-            t_start = time.time()
+        try:
+            while True:
+                t_start = time.time()
 
-            # Process one game window frame
-            autoDiceRoller.run_once()
+                # Process one game window frame
+                autoDiceRoller.run_once()
 
-            # Exit if 'q' is pressed
-            key = cv2.waitKey(1) & 0xFF
-            if key == ord('q'):
-                break
+                # Exit if 'q' is pressed
+                key = cv2.waitKey(1) & 0xFF
+                if key == ord('q'):
+                    break
 
-            # Cap FPS to save system resource
-            frame_duration = time.time() - t_start
-            target_duration = 1.0 / autoDiceRoller.fps_limit
-            if frame_duration < target_duration:
-                time.sleep(target_duration - frame_duration)
-
-        cv2.destroyAllWindows()
+                # Cap FPS to save system resource
+                frame_duration = time.time() - t_start
+                target_duration = 1.0 / autoDiceRoller.fps_limit
+                if frame_duration < target_duration:
+                    time.sleep(target_duration - frame_duration)
+        finally:
+            autoDiceRoller.stop()
+            cv2.destroyAllWindows()
