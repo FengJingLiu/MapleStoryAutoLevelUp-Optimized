@@ -27,8 +27,10 @@ from src.input.Esp32KeyForwarder import Esp32KeyForwarder
 from src.input.GameWindowCapturor import GameWindowCapturor
 from src.input.CaptureFramePreprocessor import preprocess_capture_frame
 from src.input.CaptureSource import (
+    DIRECTSHOW_SOURCE,
     capture_profile_override,
     create_capture_source,
+    resolve_capture_source,
 )
 from src.utils.frame_geometry import (
     LEGACY_FRAME_SIZE,
@@ -332,39 +334,93 @@ def get_debug_preview_max_size(cfg, monitor_size=None):
     return tuple(max(1, int(size * screen_ratio)) for size in monitor_size)
 
 
-def prepare_route_output_directory(map_dir, confirm=input):
-    """Prepare one recording directory without deleting its saved map.
+def prepare_route_output_directory(
+        map_dir,
+        confirm=input,
+        *,
+        expected_frame_size=None,
+    ):
+    """Prepare one recording directory using an explicit replacement scope.
 
-    A repeated recording normally means replacing route*.png while reusing the
-    stitched map.png.  Other files in the map directory are also preserved.
+    ``routes`` keeps the stitched map and geometry while replacing route PNGs.
+    ``rebuild`` starts a new coordinate system by removing only the
+    recorder-owned map, geometry, and route files. Other files are preserved.
+    The former ``y`` response remains a compatibility alias for ``routes``.
     """
     if not os.path.isdir(map_dir):
         os.makedirs(map_dir, exist_ok=True)
         logger.info(f"Created new directory: {map_dir}")
         return True
 
-    answer = confirm(
-        f"[Warning] Directory '{map_dir}' already exists. "
-        "Clear route*.png only and keep map.png? (y/n): "
-    ).strip().lower()
-    if answer != "y":
-        return False
-
-    removed = 0
+    recorder_files = []
     for name in os.listdir(map_dir):
         lower_name = name.lower()
-        if not (lower_name.startswith("route") and lower_name.endswith(".png")):
+        if lower_name in {"map.png", "minimap_geometry.txt"} or (
+                lower_name.startswith("route")
+                and lower_name.endswith(".png")):
+            path = os.path.join(map_dir, name)
+            if os.path.isfile(path):
+                recorder_files.append((path, lower_name))
+
+    if not recorder_files:
+        logger.info(
+            f"Using empty existing map directory: {map_dir}"
+        )
+        return True
+
+    answer = confirm(
+        f"[Warning] Directory '{map_dir}' already exists. "
+        "Type 'routes' to clear route*.png only and keep map/geometry; "
+        "type 'rebuild' to clear map.png, minimap_geometry.txt, and "
+        "route*.png for a full re-record; press Enter to cancel: "
+    ).strip().lower()
+    routes_only = answer in {"routes", "r", "y"}
+    full_reset = answer == "rebuild"
+    if not routes_only and not full_reset:
+        return False
+
+    if routes_only and expected_frame_size is not None \
+            and os.path.isfile(os.path.join(map_dir, "map.png")):
+        expected_frame_size = tuple(map(int, expected_frame_size))
+        saved_geometry = load_minimap_geometry(map_dir)
+        if saved_geometry is None or tuple(
+                saved_geometry["frame_size"]) != expected_frame_size:
+            saved_size = None if saved_geometry is None else tuple(
+                saved_geometry["frame_size"])
+            logger.error(
+                "Routes were not cleared because the preserved map geometry "
+                "cannot be reused by the configured capture: "
+                f"saved={saved_size}, expected={expected_frame_size}. "
+                "Run the recorder again and type 'rebuild' to create a new "
+                "map, geometry, and routes."
+            )
+            return False
+
+    removed = 0
+    for path, lower_name in recorder_files:
+        is_route = (
+            lower_name.startswith("route")
+            and lower_name.endswith(".png")
+        )
+        if not is_route and not (
+                full_reset
+                and lower_name in {"map.png", "minimap_geometry.txt"}):
             continue
-        path = os.path.join(map_dir, name)
-        if os.path.isfile(path):
-            os.remove(path)
-            removed += 1
+        os.remove(path)
+        removed += 1
 
     map_path = os.path.join(map_dir, "map.png")
-    logger.info(
-        f"Cleared {removed} route image(s) from {map_dir}; "
-        f"map.png {'preserved' if os.path.isfile(map_path) else 'not present'}"
-    )
+    if full_reset:
+        logger.info(
+            f"Cleared {removed} recorder-owned file(s) from {map_dir}; "
+            "a new 4K map and minimap geometry will be recorded"
+        )
+    else:
+        logger.info(
+            f"Cleared {removed} route image(s) from {map_dir}; "
+            f"map.png "
+            f"{'preserved' if os.path.isfile(map_path) else 'not present'}"
+        )
     return True
 
 
@@ -758,7 +814,8 @@ class RouteRecorder():
                     "Current game-frame size does not match the preserved "
                     "map geometry: "
                     f"saved={saved_frame_size[::-1]}, "
-                    f"current={frame_size[::-1]}. Use a fresh map directory."
+                    f"current={frame_size[::-1]}. Restart the recorder and "
+                    "type 'rebuild' for this map directory."
                 )
                 self._minimap_geometry_error = True
                 self.is_enable = False
@@ -904,9 +961,20 @@ class RouteRecorder():
 
         self.fps_limit = self.cfg["system"]["fps_limit_route_recorder"]
 
-        # Re-recording a route must preserve the previously stitched map.
+        # Re-recording can either preserve one compatible bundle or explicitly
+        # rebuild the map, geometry, and routes together.
         self.map_dir = os.path.join("minimaps", args.new_map)
-        if not prepare_route_output_directory(self.map_dir):
+        expected_frame_size = None
+        if resolve_capture_source(self.cfg) == DIRECTSHOW_SOURCE:
+            capture_card_cfg = self.cfg.get("capture_card", {})
+            expected_frame_size = (
+                int(capture_card_cfg.get("height", 2160)),
+                int(capture_card_cfg.get("width", 3840)),
+            )
+        if not prepare_route_output_directory(
+                self.map_dir,
+                expected_frame_size=expected_frame_size,
+            ):
             sys.exit(0)
 
         # An explicit --map takes precedence. Otherwise automatically continue

@@ -39,20 +39,23 @@ esp32_hid:
   heartbeat_interval: 1.0    # Firmware releases all keys if its 3 s lease expires.
   reconnect_interval: 0.5
   state_refresh_interval: 1.0 # Reassert held movement after a brief BLE reconnect.
+  # Absolute mouse geometry on the BLE target. The GC573 sees Magpie's scaled
+  # 4K output, while Windows input must land inside Magpie's original 1366x768
+  # source client. Map capture coordinates back through that physical source
+  # rectangle before normalizing them to absolute HID coordinates.
+  capture_frame_is_desktop: false
+  absolute_desktop_rect: [0, 0, 3840, 2160]
+  magpie_source_rect: [1235, 721, 1366, 768]
 
 auto_relogin:
-  # Recover an already authenticated game session through the recorded
-  # Chinese Artale disconnect/login flow. Every action requires the expected
-  # page template; this never stores or types an account password.
-  # Keep disabled until every auto_relogin_*.png listed in
-  # DIRECTSHOW_4K_ASSET_CHECKLIST.md is
-  # re-captured from the native 3840x2160 DirectShow frame.
-  enable: False
+  # Recover an already authenticated Chinese Artale session with RapidOCR.
+  # No page image template is loaded or matched, and this flow never stores or
+  # types an account password.
+  enable: True
   template_reference_size: [700, 1296] # Legacy login_button_*.png native [height, width].
-  flow_template_reference_size: [2160, 3840] # DirectShow 4K flow [height, width].
-  template_threshold: 0.03       # TM_SQDIFF_NORMED; lower scores are better.
-  confirm_frames: 2              # Consecutive matches required before each action.
-  confirm_seconds: 0.5           # The page must remain matched for at least this long.
+  flow_template_reference_size: [2160, 3840] # OCR/click coordinate reference [height, width].
+  confirm_frames: 2              # Consecutive OCR page matches before each action.
+  confirm_seconds: 0.5           # The OCR page must remain stable for this long.
   cancel_confirm_misses: 2       # Distinct misses needed to cancel an unacted false positive.
   input_retry_delay: 1.0         # Retry a definite local/HID send failure after this delay.
   retry_cooldown: 3.0            # Minimum wait before retrying an action on the same page.
@@ -61,11 +64,12 @@ auto_relogin:
   max_recovery_duration: 300.0   # Stop all automatic retries after this total time.
   max_step_attempts: 5           # Maximum actions on any one confirmed page.
   game_ready_confirm_frames: 2   # Fresh, expanded minimap player dots required before combat resumes.
-  mouse_click_duration: 0.05     # Left-click duration for local/ESP32 mouse input.
-  # Remote clicks use screenshot feedback and relative HID movement. This is
-  # independent of Magpie scaling, Windows DPI, and virtual-desktop offsets.
-  # "absolute" remains available only as an explicit legacy fallback.
-  remote_mouse_mode: visual_relative # visual_relative | absolute
+  mouse_click_duration: 0.10     # Slightly longer BLE click for remote game UI reliability.
+  channel_click_count: 2         # Enter a displayed channel with a real double-click.
+  channel_double_click_interval: 0.08 # Delay between the two channel clicks.
+  # Remote game-UI clicks use calibrated absolute HID. visual_relative is an
+  # explicit compatibility mode only and is not selected by shipped profiles.
+  remote_mouse_mode: absolute # absolute | visual_relative
   cursor_template: "misc/auto_relogin_cursor_cn.png" # Large hand cursor for world/channel/character pages.
   cursor_hotspot: [14, 6]        # Click hotspot inside the large 4K template.
   disconnect_cursor_template: "misc/auto_relogin_cursor_small_cn.png" # Compact title/disconnect cursor.
@@ -111,28 +115,58 @@ auto_relogin:
     - [0, 384]
     - [0, -448]
     - [0, 512]
-  remote_confirm_key: "enter"    # Key sent on confirmed disconnect and connection pages.
-  page_templates:
-    disconnect: "misc/auto_relogin_disconnect_cn.png"
-    connect: "misc/auto_relogin_connect_cn.png"
-    world: "misc/auto_relogin_world_cn.png"
-    channel: "misc/auto_relogin_channel_cn.png"
-    character: "misc/auto_relogin_character_cn.png"
-  # Search rectangles are [x0, y0, x1, y1] in flow_template_reference_size.
-  page_search_regions:
-    disconnect: [1341, 644, 2468, 1234]
-    connect: [1824, 912, 2360, 1234]
-    world: [1931, 322, 2629, 590]
-    channel: [1288, 751, 2092, 1127]
-    character: [2468, 537, 3165, 1019]
-  # Template centers in the recorded reference frame. Only the channel anchor
-  # is used by the current flow; disconnect uses Enter. The disconnect fields
-  # remain valid 4K placeholders for backward-compatible config validation.
-  page_anchor_points:
-    disconnect: [1864, 920]
-    channel: [1679, 939]
-  disconnect_confirm_point: [1974, 1186] # Unused by the current Enter flow.
-  # Twenty channel buttons (four columns by five rows); one is chosen randomly.
+  # Keep sending one OCR-authorized Enter at a time while the connection page
+  # remains visible. Stop immediately when the world-selection page appears.
+  connect_enter_retry_delay: 1.0
+  connect_enter_max_attempts: 30 # Bounded loop; max_recovery_duration also applies.
+  remote_confirm_key: "enter"    # Key sent only after a configured OCR key-action gate.
+  # Every page is classified and authorized from Chinese OCR alone.
+  # Missing, duplicate, low-confidence, or moving targets never emit input.
+  ocr:
+    enable: true
+    idle_scan_interval: 1.0      # OCR cadence while no recovery page is active.
+    min_score: 0.80             # Allow the stylized Chinese login artwork while retaining exact page targets.
+    box_threshold: 0.30
+    confirm_frames: 2
+    max_center_drift: [24, 24]
+    max_frame_age: 5.0           # Includes cold/warm 4K OCR inference time; still requires fresh distinct frames.
+    # Each page entry describes aliases for one semantic target, not several
+    # nearby alternatives; duplicate spatial matches are rejected.
+    targets:
+      disconnect:
+        texts: ["与服务器连接发生错误"]
+        region_source: configured
+        search_region: [1341, 644, 2468, 1234]
+        match_mode: contains
+        action: enter
+      connect:
+        texts: ["连接"]
+        region_source: configured
+        search_region: [1824, 912, 2360, 1234]
+        match_mode: exact
+        action: enter              # Repeat Enter until the world page appears.
+      world:
+        texts: ["4.漂漂猪"]
+        region_source: configured
+        search_region: [1931, 322, 2629, 590]
+        match_mode: exact
+        action: click
+      channel:
+        texts: ["漂漂猪"]
+        region_source: configured
+        search_region: [1288, 751, 2092, 1127]
+        match_mode: exact
+        action: fixed_click
+      character:
+        texts: ["开始游戏"]
+        region_source: configured
+        search_region: [2468, 537, 3165, 1019]
+        match_mode: exact
+        action: click
+  # The initial server grid contains only "4.漂漂猪" and blank wooden rows.
+  # Clicking that world opens a separate panel whose OCR marker is the exact
+  # unnumbered "漂漂猪" above 20 channel cells. Only then choose a cell and
+  # double-click it.
   channel_points:
     - [1545, 1057]
     - [1786, 1057]
@@ -457,6 +491,11 @@ channel_change:
   mode: "pixel"                # 🧠 Options: "true" "pixel"
   other_player_move_thres: 10  # 📏 only work in "pixel" mode
 
+  ui_timeout: 60               # Stop and pause if channel UI does not advance.
+  game_ready_timeout: 60       # Wait for minimap/player evidence after login.
+  game_ready_confirm_frames: 2 # Require consecutive fresh gameplay frames.
+  game_ready_poll_interval: 1
+
 scheduled_channel_switching:
   # Schduel for channel swithcing
   enable: False            # Enable this feature or not
@@ -614,8 +653,8 @@ minimap:
   # 🗺️ Mini-Map
   # The minimap appears in the top-left corner of the game window.
   # It is used to estimate the player’s current location in the world.
-  # Current capture-card center sample: RGB(233,252,78) -> BGR(78,252,233).
-  player_color: [78, 252, 233]    # 🟡 BGR value of the yellow player dot on the minimap
+  # Current capture-card center sample: RGB(255,255,136) -> BGR(136,255,255).
+  player_color: [136, 255, 255]   # 🟡 BGR value of the yellow player dot on the minimap
   player_color_tolerance: 10      # Tight tolerance avoids nearby yellow artwork
   player_min_component_area: 2    # HDMI scaling can reduce the marker to 2 pixels
   other_player_color: [0, 0, 255] # 🔴 BGR value of the red other player dot on the minimap

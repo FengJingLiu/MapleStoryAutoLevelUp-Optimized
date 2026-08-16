@@ -24,6 +24,11 @@ from src.input.CaptureSource import (
     create_capture_source,
     resolve_capture_source,
 )
+from src.input.Esp32HidClient import Esp32HidClient
+from src.input.KeyBoardController import (
+    capture_point_to_absolute_hid,
+    has_calibrated_absolute_mouse,
+)
 from src.input.KeyBoardListener import KeyBoardListener
 if is_mac():
     from src.input.GameWindowCapturorForMac import GameWindowCapturor
@@ -92,10 +97,30 @@ class AutoDiceRoller:
         # Start the configured window or DirectShow capture source.
         logger.info("Starting configured capture source")
         self.capture_source = resolve_capture_source(self.cfg)
+        remote = self.cfg.get("esp32_hid", {}).get("remote_target", False)
+        if remote:
+            if self.capture_source != DIRECTSHOW_SOURCE:
+                raise ValueError(
+                    "AutoDiceRoller remote target requires DirectShow capture; "
+                    "local window clicking is forbidden"
+                )
+            if not has_calibrated_absolute_mouse(self.cfg):
+                raise ValueError(
+                    "AutoDiceRoller remote absolute mouse requires "
+                    "esp32_hid.magpie_source_rect calibration"
+                )
         self.capture = create_capture_source(
             self.cfg,
             window_capture_cls=GameWindowCapturor,
         )
+        self.input_client = None
+        if remote:
+            try:
+                self.input_client = Esp32HidClient.from_config(self.cfg)
+            except Exception:
+                self.capture.stop()
+                self.capture = None
+                raise
 
     def refresh_runtime_geometry(self, output_size):
         """Scale dice ROI geometry while preserving authored template pixels."""
@@ -160,15 +185,40 @@ class AutoDiceRoller:
         )
 
     def click_dice(self):
-        """Click only when capture coordinates belong to a local window."""
-        if self.capture_source == DIRECTSHOW_SOURCE:
-            remote = self.cfg.get("esp32_hid", {}).get(
-                "remote_target", False
+        """Click the dice through local window input or calibrated HID."""
+        remote = self.cfg.get("esp32_hid", {}).get("remote_target", False)
+        if remote:
+            if self.capture_source != DIRECTSHOW_SOURCE:
+                raise RuntimeError(
+                    "AutoDiceRoller remote target has no DirectShow capture; "
+                    "no click was sent"
+                )
+            frame = getattr(self, "img_frame", None)
+            client = getattr(self, "input_client", None)
+            if frame is None or client is None or not \
+                    has_calibrated_absolute_mouse(self.cfg):
+                raise RuntimeError(
+                    "AutoDiceRoller DirectShow recognition has no calibrated "
+                    "remote HID click path; no click was sent"
+                )
+            frame_h, frame_w = frame.shape[:2]
+            absolute_x, absolute_y = capture_point_to_absolute_hid(
+                self.cfg,
+                self.loc_dice[0],
+                self.loc_dice[1],
+                frame_w,
+                frame_h,
             )
-            target = "remote HDMI target" if remote else "local target window"
+            return client.mouse_click_at(
+                absolute_x,
+                absolute_y,
+                "left",
+                50,
+            )
+        if self.capture_source == DIRECTSHOW_SOURCE:
             raise RuntimeError(
-                "AutoDiceRoller DirectShow recognition is available, but "
-                f"clicking the {target} is not supported; no click was sent"
+                "AutoDiceRoller DirectShow recognition has no remote HID "
+                "click path; no click was sent"
             )
         window_title = getattr(
             self.capture,
@@ -176,6 +226,7 @@ class AutoDiceRoller:
             self.cfg["game_window"]["title"],
         )
         click_in_game_window(window_title, self.loc_dice)
+        return True
 
     def stop(self):
         """Release listener and capture resources, including DirectShow."""
@@ -185,6 +236,9 @@ class AutoDiceRoller:
         if getattr(self, "capture", None) is not None:
             self.capture.stop()
             self.capture = None
+        if getattr(self, "input_client", None) is not None:
+            self.input_client.close()
+            self.input_client = None
 
     def update_img_frame_debug(self):
         '''

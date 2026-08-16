@@ -6,8 +6,10 @@ from unittest.mock import Mock, call, patch
 
 import cv2
 import numpy as np
+import yaml
 
 from src.engine.MapleStoryAutoLevelUp import MapleStoryAutoBot
+from src.vision.auto_relogin_ocr import OcrTextMatch
 from src.vision.cursor_tracker import CursorTracker
 
 
@@ -41,7 +43,6 @@ class AutoReloginTests(unittest.TestCase):
                     cls.FRAME_HEIGHT,
                     cls.FRAME_WIDTH,
                 ],
-                "template_threshold": 0.03,
                 "confirm_frames": 2,
                 "confirm_seconds": 0.0,
                 "cancel_confirm_misses": 2,
@@ -53,6 +54,8 @@ class AutoReloginTests(unittest.TestCase):
                 "max_step_attempts": 5,
                 "game_ready_confirm_frames": 2,
                 "mouse_click_duration": 0.05,
+                "channel_click_count": 2,
+                "channel_double_click_interval": 0.0,
                 "remote_mouse_mode": mouse_mode,
                 "mouse_move_gain": 0.35,
                 "mouse_max_delta": 64,
@@ -74,6 +77,55 @@ class AutoReloginTests(unittest.TestCase):
                 "page_anchor_points": {
                     "disconnect": list(cls.PAGE_LOCATIONS["disconnect"]),
                     "channel": list(cls.PAGE_LOCATIONS["channel"]),
+                },
+                "ocr": {
+                    "enable": True,
+                    "idle_scan_interval": 1.0,
+                    "min_score": 0.85,
+                    "box_threshold": 0.3,
+                    "confirm_frames": 1,
+                    "max_center_drift": [24, 24],
+                    # Most state-machine tests use small integer frame tokens
+                    # and an independent mocked monotonic clock. Freshness is
+                    # covered separately in the OCR-focused test module.
+                    "max_frame_age": 10000.0,
+                    "targets": {
+                        "disconnect": {
+                            "texts": ["与服务器连接发生错误"],
+                            "region_source": "configured",
+                            "search_region": [0, 0, 400, 200],
+                            "match_mode": "contains",
+                            "action": "enter",
+                        },
+                        "connect": {
+                            "texts": ["连接"],
+                            "region_source": "configured",
+                            "search_region": [0, 0, 400, 200],
+                            "match_mode": "exact",
+                            "action": "click",
+                        },
+                        "world": {
+                            "texts": ["4.漂漂猪"],
+                            "region_source": "configured",
+                            "search_region": [0, 0, 400, 200],
+                            "match_mode": "exact",
+                            "action": "click",
+                        },
+                        "channel": {
+                            "texts": ["漂漂猪"],
+                            "region_source": "configured",
+                            "search_region": [0, 0, 400, 200],
+                            "match_mode": "exact",
+                            "action": "fixed_click",
+                        },
+                        "character": {
+                            "texts": ["开始游戏"],
+                            "region_source": "configured",
+                            "search_region": [0, 0, 400, 200],
+                            "match_mode": "exact",
+                            "action": "click",
+                        },
+                    },
                 },
             },
             "health_monitor": {"enable": True},
@@ -113,11 +165,41 @@ class AutoReloginTests(unittest.TestCase):
             suspend_automation_for_session_recovery=Mock(),
             resume_automation_after_session_recovery=Mock(),
             press_session_recovery_key=Mock(return_value=True),
+            focus_next_window_and_press_session_recovery_key=Mock(
+                return_value=True
+            ),
             move_session_recovery_mouse=Mock(return_value=True),
             click_session_recovery_mouse=Mock(return_value=True),
             click_session_recovery_point=Mock(return_value=True),
         )
         bot._locate_auto_relogin_cursor = Mock(return_value=(20, 20))
+        target_pages = {
+            tuple(target["texts"]): page
+            for page, target in bot.cfg["auto_relogin"]["ocr"][
+                "targets"
+            ].items()
+        }
+
+        def locate_ocr_target(_frame, _region, targets, **_kwargs):
+            page = target_pages[tuple(targets)]
+            x, y = cls.PAGE_LOCATIONS[page]
+            text = targets[0]
+            return OcrTextMatch(
+                text=text,
+                normalized_text=text,
+                score=0.99,
+                box=(
+                    (x - 2, y - 2), (x + 2, y - 2),
+                    (x + 2, y + 2), (x - 2, y + 2),
+                ),
+                center=(x, y),
+            )
+
+        bot._auto_relogin_ocr_locator = SimpleNamespace(
+            locate=Mock(side_effect=locate_ocr_target)
+        )
+        bot._auto_relogin_ocr_gate = None
+        bot._auto_relogin_ocr_gate_signature = None
         bot.health_monitor = SimpleNamespace(
             enabled=True,
             disable=Mock(),
@@ -193,7 +275,7 @@ class AutoReloginTests(unittest.TestCase):
 
         self.assertEqual(bot._auto_relogin_pending_page, "disconnect")
 
-    def test_channel_overlay_cannot_be_acted_as_world_page(self):
+    def test_expected_world_step_precedes_combined_channel_marker(self):
         bot = self.make_bot()
         bot._auto_relogin_state = "waiting_page"
         bot._auto_relogin_expected_page = "world"
@@ -210,7 +292,8 @@ class AutoReloginTests(unittest.TestCase):
             bot, None, frame_token=20.1, now=20.1
         ))
 
-        self.assertEqual(bot._auto_relogin_state, "failed")
+        self.assertEqual(bot._auto_relogin_state, "confirming")
+        self.assertEqual(bot._auto_relogin_pending_page, "world")
         bot.kb.move_session_recovery_mouse.assert_not_called()
         bot.kb.click_session_recovery_mouse.assert_not_called()
         bot.kb.click_session_recovery_point.assert_not_called()
@@ -268,7 +351,8 @@ class AutoReloginTests(unittest.TestCase):
             self.assertTrue(self.show_and_check(
                 bot, page, frame_token=token, now=start_time + 0.1
             ))
-            self.assertEqual(len(events), event_count + 1)
+            action_count = 2 if page == "channel" else 1
+            self.assertEqual(len(events), event_count + action_count)
             token += 1
 
         confirm_page("disconnect", 100.0)
@@ -295,10 +379,25 @@ class AutoReloginTests(unittest.TestCase):
             events,
             [
                 ("key", "enter"),
-                ("key", "enter"),
+                (
+                    "click",
+                    *self.PAGE_LOCATIONS["connect"],
+                    self.FRAME_WIDTH,
+                    self.FRAME_HEIGHT,
+                    "left",
+                    0.05,
+                ),
                 (
                     "click",
                     *self.PAGE_LOCATIONS["world"],
+                    self.FRAME_WIDTH,
+                    self.FRAME_HEIGHT,
+                    "left",
+                    0.05,
+                ),
+                (
+                    "click",
+                    *self.CHANNEL_POINT,
                     self.FRAME_WIDTH,
                     self.FRAME_HEIGHT,
                     "left",
@@ -323,6 +422,98 @@ class AutoReloginTests(unittest.TestCase):
             ],
         )
         bot.click_game_ui.assert_not_called()
+
+    def test_connect_page_can_use_ocr_authorized_enter(self):
+        bot = self.make_bot(remote=True)
+        bot.cfg["auto_relogin"]["ocr"]["targets"]["connect"][
+            "action"
+        ] = "enter"
+
+        self.assertTrue(self.show_and_check(
+            bot, "connect", frame_token=1, now=120.0
+        ))
+        self.assertTrue(self.show_and_check(
+            bot, "connect", frame_token=2, now=120.1
+        ))
+
+        bot.kb.press_session_recovery_key.assert_called_once_with("enter")
+        bot.kb.click_session_recovery_point.assert_not_called()
+        self.assertEqual(bot._auto_relogin_expected_page, "world")
+
+    def test_connect_page_repeats_enter_until_world_page_appears(self):
+        bot = self.make_bot(remote=True)
+        bot.cfg["auto_relogin"]["ocr"]["targets"]["connect"][
+            "action"
+        ] = "enter"
+        bot.cfg["auto_relogin"].update({
+            "connect_enter_retry_delay": 1.0,
+            "connect_enter_max_attempts": 30,
+        })
+
+        self.assertTrue(self.show_and_check(
+            bot, "connect", frame_token=1, now=120.0
+        ))
+        self.assertTrue(self.show_and_check(
+            bot, "connect", frame_token=2, now=120.1
+        ))
+        self.assertEqual(bot.kb.press_session_recovery_key.call_count, 1)
+
+        # A still-visible connection page is re-authorized from fresh OCR
+        # frames, but the next Enter cannot fire before its retry delay.
+        self.assertTrue(self.show_and_check(
+            bot, "connect", frame_token=3, now=120.2
+        ))
+        self.assertTrue(self.show_and_check(
+            bot, "connect", frame_token=4, now=120.3
+        ))
+        self.assertEqual(bot.kb.press_session_recovery_key.call_count, 1)
+        self.assertTrue(self.show_and_check(
+            bot, "connect", frame_token=5, now=121.2
+        ))
+        self.assertEqual(bot.kb.press_session_recovery_key.call_count, 2)
+
+        # Once the world page appears, the connection-page Enter loop stops.
+        self.assertTrue(self.show_and_check(
+            bot, "world", frame_token=6, now=121.3
+        ))
+        self.assertTrue(self.show_and_check(
+            bot, "world", frame_token=7, now=121.4
+        ))
+        self.assertEqual(bot.kb.press_session_recovery_key.call_count, 2)
+        bot.kb.focus_next_window_and_press_session_recovery_key.assert_not_called()
+        self.assertEqual(bot._auto_relogin_expected_page, "world")
+
+    def test_connect_page_can_focus_launcher_then_send_enter(self):
+        bot = self.make_bot(remote=True)
+        bot.cfg["auto_relogin"]["ocr"]["targets"]["connect"][
+            "action"
+        ] = "focus_next_enter"
+        bot.cfg["auto_relogin"].update({
+            "focus_switch_keys": ["alt", "tab"],
+            "focus_switch_hold": 0.10,
+            "focus_switch_settle_delay": 0.50,
+            "focus_enter_duration": 0.10,
+        })
+
+        self.assertTrue(self.show_and_check(
+            bot, "connect", frame_token=1, now=120.0
+        ))
+        self.assertTrue(self.show_and_check(
+            bot, "connect", frame_token=2, now=120.1
+        ))
+
+        sender = bot.kb.focus_next_window_and_press_session_recovery_key
+        sender.assert_called_once_with(
+            "enter",
+            focus_keys=["alt", "tab"],
+            focus_hold=0.10,
+            settle_delay=0.50,
+            duration=0.10,
+        )
+        bot.kb.press_session_recovery_key.assert_not_called()
+        bot.kb.click_session_recovery_point.assert_not_called()
+        self.assertEqual(bot._auto_relogin_expected_page, "world")
+        self.assertEqual(bot._auto_relogin_next_action_at, 180.1)
 
     def test_unknown_transition_frames_never_send_blind_input(self):
         bot = self.make_bot(remote=True)
@@ -387,7 +578,7 @@ class AutoReloginTests(unittest.TestCase):
                 self.assertTrue(self.show_and_check(
                     bot, allowed_page, frame_token=11, now=253.1
                 ))
-                if allowed_page in {"connect", "disconnect"}:
+                if allowed_page == "disconnect":
                     bot.kb.press_session_recovery_key.assert_called_once_with(
                         "enter"
                     )
@@ -434,9 +625,15 @@ class AutoReloginTests(unittest.TestCase):
 
         self.assertEqual(
             bot.kb.press_session_recovery_key.call_args_list,
-            [call("enter"), call("enter")],
+            [call("enter")],
         )
-        bot.kb.click_session_recovery_point.assert_not_called()
+        bot.kb.click_session_recovery_point.assert_called_once_with(
+            *self.PAGE_LOCATIONS["connect"],
+            self.FRAME_WIDTH,
+            self.FRAME_HEIGHT,
+            button="left",
+            duration=0.05,
+        )
         self.assertEqual(bot._auto_relogin_state, "waiting_page")
         self.assertEqual(bot._auto_relogin_expected_page, "world")
 
@@ -616,6 +813,8 @@ class AutoReloginTests(unittest.TestCase):
             duration=0.05,
         )
         bot.click_game_ui.assert_not_called()
+        bot.kb.move_session_recovery_mouse.assert_not_called()
+        bot.kb.click_session_recovery_mouse.assert_not_called()
 
     def test_visual_relative_click_waits_for_fresh_feedback_and_alignment(self):
         bot = self.make_bot(remote=True, mouse_mode="visual_relative")
@@ -727,7 +926,7 @@ class AutoReloginTests(unittest.TestCase):
             self.show_and_check(
                 bot, page, frame_token=now + 0.1, now=now + 0.1
             )
-            if page not in {"disconnect", "connect"}:
+            if page != "disconnect":
                 self.assertEqual(bot._auto_relogin_state, "aiming")
                 self.show_and_check(
                     bot, page, frame_token=now + 0.2, now=now + 0.2
@@ -749,7 +948,8 @@ class AutoReloginTests(unittest.TestCase):
             events,
             [
                 ("key", "enter"),
-                ("key", "enter"),
+                ("click", {"button": "left", "duration": 0.05}),
+                ("click", {"button": "left", "duration": 0.05}),
                 ("click", {"button": "left", "duration": 0.05}),
                 ("click", {"button": "left", "duration": 0.05}),
                 ("click", {"button": "left", "duration": 0.05}),
@@ -1304,56 +1504,114 @@ class AutoReloginTests(unittest.TestCase):
                 tracker = CursorTracker(image, hotspot=hotspot)
                 self.assertEqual(tracker.hotspot, hotspot)
 
+    def test_shipped_config_uses_chinese_ocr_for_all_five_pages(self):
+        root = Path(__file__).resolve().parents[1]
+        with (root / "config" / "config_default.yaml").open(
+                encoding="utf-8") as stream:
+            cfg = yaml.safe_load(stream)
+
+        auto_relogin = cfg["auto_relogin"]
+        self.assertTrue(auto_relogin["enable"])
+        self.assertTrue(auto_relogin["ocr"]["enable"])
+        self.assertNotIn("page_templates", auto_relogin)
+        self.assertNotIn("page_search_regions", auto_relogin)
+        targets = auto_relogin["ocr"]["targets"]
+        self.assertEqual(
+            set(targets),
+            {"disconnect", "connect", "world", "channel", "character"},
+        )
+        disconnect = auto_relogin["ocr"]["targets"]["disconnect"]
+        self.assertEqual(disconnect["action"], "enter")
+        self.assertEqual(disconnect["match_mode"], "contains")
+        self.assertEqual(
+            disconnect["texts"], ["与服务器连接发生错误"]
+        )
+        self.assertEqual(targets["connect"]["action"], "enter")
+        self.assertEqual(auto_relogin["connect_enter_retry_delay"], 1.0)
+        self.assertEqual(auto_relogin["connect_enter_max_attempts"], 30)
+        self.assertNotIn("focus_switch_keys", auto_relogin)
+        self.assertEqual(targets["world"]["texts"], ["4.漂漂猪"])
+        self.assertEqual(targets["channel"]["action"], "fixed_click")
+        self.assertEqual(targets["channel"]["texts"], ["漂漂猪"])
+        self.assertEqual(targets["channel"]["match_mode"], "exact")
+        self.assertEqual(auto_relogin["channel_click_count"], 2)
+        self.assertEqual(len(auto_relogin["channel_points"]), 20)
+        self.assertEqual(targets["character"]["action"], "click")
+
     def test_invalid_relogin_config_fails_during_load(self):
         valid_section = {
             "enable": True,
-            "template_threshold": 0.03,
             "confirm_frames": 2,
             "cancel_confirm_misses": 2,
             "flow_template_reference_size": [100, 200],
-            "page_templates": {
-                page: f"misc/auto_relogin_{page}_cn.png"
-                for page in self.PAGE_LOCATIONS
-            },
-            "page_search_regions": {
-                page: [0, 0, 100, 100]
-                for page in self.PAGE_LOCATIONS
-            },
-            "disconnect_confirm_point": [50, 50],
             "channel_points": [[50, 50]],
-            "page_anchor_points": {
-                "disconnect": [25, 25],
-                "channel": [25, 25],
+            "ocr": {
+                "enable": True,
+                "idle_scan_interval": 1.0,
+                "min_score": 0.85,
+                "box_threshold": 0.3,
+                "confirm_frames": 2,
+                "max_center_drift": [10, 10],
+                "max_frame_age": 1.0,
+                "targets": {
+                    "disconnect": {
+                        "texts": ["与服务器连接发生错误"],
+                        "region_source": "configured",
+                        "search_region": [0, 0, 100, 100],
+                        "match_mode": "contains",
+                        "action": "enter",
+                    },
+                    "connect": {
+                        "texts": ["连接"],
+                        "region_source": "configured",
+                        "search_region": [0, 0, 100, 100],
+                        "match_mode": "exact",
+                        "action": "click",
+                    },
+                    "world": {
+                        "texts": ["4.漂漂猪"],
+                        "region_source": "configured",
+                        "search_region": [0, 0, 100, 100],
+                        "match_mode": "exact",
+                        "action": "click",
+                    },
+                    "channel": {
+                        "texts": ["漂漂猪"],
+                        "region_source": "configured",
+                        "search_region": [0, 0, 100, 100],
+                        "match_mode": "exact",
+                        "action": "fixed_click",
+                    },
+                    "character": {
+                        "texts": ["开始游戏"],
+                        "region_source": "configured",
+                        "search_region": [0, 0, 100, 100],
+                        "match_mode": "exact",
+                        "action": "click",
+                    },
+                },
             },
             "remote_confirm_key": "enter",
         }
         invalid_sections = (
             {"enable": "False"},
-            {"enable": True, "template_threshold": float("inf")},
             {"enable": True, "confirm_frames": 1.5},
             {"enable": True, "cancel_confirm_misses": 0},
             {
                 "enable": True,
                 "flow_template_reference_size": [0, 3579],
             },
-            {
-                "enable": True,
-                "page_search_regions": {"disconnect": [1, 2, 3]},
-            },
-            {"enable": True, "disconnect_confirm_point": [1]},
             {"enable": True, "channel_points": []},
+            {"enable": True, "channel_click_count": 0},
+            {"enable": True, "channel_click_count": 3},
+            {"enable": True, "connect_enter_retry_delay": -0.1},
+            {"enable": True, "connect_enter_max_attempts": 0},
+            {"enable": True, "channel_double_click_interval": -0.01},
             {"enable": True, "remote_confirm_key": "nonsense"},
             {"enable": True, "remote_mouse_mode": "desktop_absolute"},
             {"enable": True, "remote_mouse_mode": "visual_relative"},
             {"enable": True, "mouse_max_delta": 128},
             {"enable": True, "mouse_probe_delta": 128},
-            {
-                "enable": True,
-                "page_anchor_points": {
-                    "disconnect": [10, 10],
-                    "channel": [-1, 10],
-                },
-            },
             {
                 "enable": True,
                 "remote_mouse_mode": "visual_relative",
@@ -1416,6 +1674,76 @@ class AutoReloginTests(unittest.TestCase):
                     "misc/auto_relogin_cursor_small_cn.png",
                 "mouse_cursor_rescue_deltas": [[32768, 0]],
             },
+            {"enable": True, "ocr": {"enable": "yes"}},
+            {
+                "enable": True,
+                "ocr": {
+                    **valid_section["ocr"],
+                    "min_score": 0,
+                },
+            },
+            {
+                "enable": True,
+                "ocr": {
+                    **valid_section["ocr"],
+                    "box_threshold": 2,
+                },
+            },
+            {
+                "enable": True,
+                "ocr": {
+                    **valid_section["ocr"],
+                    "confirm_frames": 0,
+                },
+            },
+            {
+                "enable": True,
+                "ocr": {
+                    **valid_section["ocr"],
+                    "max_frame_age": 0,
+                },
+            },
+            {
+                "enable": True,
+                "ocr": {
+                    **valid_section["ocr"],
+                    "max_center_drift": [-1, 10],
+                },
+            },
+            {
+                "enable": True,
+                "ocr": {
+                    **valid_section["ocr"],
+                    "targets": {},
+                },
+            },
+            {
+                "enable": True,
+                "ocr": {
+                    **valid_section["ocr"],
+                    "targets": {
+                        "disconnect": {
+                            **valid_section["ocr"]["targets"]["disconnect"],
+                            "action": "keypress",
+                        },
+                    },
+                },
+            },
+            {
+                "enable": True,
+                "ocr": {
+                    **valid_section["ocr"],
+                    "targets": {
+                        "world": {
+                            "texts": ["漂漂猪"],
+                            "region_source": "configured",
+                            "search_region": [0, 0, 100, 100],
+                            "match_mode": "contains",
+                            "action": "enter",
+                        },
+                    },
+                },
+            },
         )
         for override in invalid_sections:
             with self.subTest(override=override):
@@ -1427,6 +1755,35 @@ class AutoReloginTests(unittest.TestCase):
                     "monster_detect": {},
                     "auto_relogin": section,
                 }
+                self.assertEqual(bot.load_config(cfg), -1)
+
+    def test_invalid_absolute_mouse_geometry_fails_during_load(self):
+        invalid_sections = (
+            {
+                "absolute_desktop_rect": [0, 0, 3840, 2160],
+                "magpie_source_rect": [1235, 721, 0, 768],
+            },
+            {
+                "absolute_desktop_rect": [0, 0, 3840, 2160],
+                "magpie_source_rect": [3000, 721, 1366, 768],
+            },
+            {
+                "absolute_desktop_rect": [0, 0, 3840, 2160],
+                "magpie_source_rect": [1235, 721, True, 768],
+            },
+            {
+                "magpie_source_rect": [1235, 721, 1366, 768],
+            },
+        )
+        for section in invalid_sections:
+            with self.subTest(section=section):
+                bot = MapleStoryAutoBot.__new__(MapleStoryAutoBot)
+                cfg = {
+                    "bot": {"mode": "normal"},
+                    "monster_detect": {},
+                    "esp32_hid": section,
+                }
+
                 self.assertEqual(bot.load_config(cfg), -1)
 
     def test_run_once_checks_relogin_before_saved_minimap_geometry(self):

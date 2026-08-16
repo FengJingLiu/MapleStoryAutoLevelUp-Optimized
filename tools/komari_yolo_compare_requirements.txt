@@ -1,0 +1,5 @@
+# Installed in D:\project\komari\.venv-yolo-compare
+# ORT 1.27+ PyPI wheels require CUDA 13; this machine's PyTorch uses CUDA 12.8.
+numpy==2.5.2
+opencv-python-headless==5.0.0.93
+onnxruntime-gpu==1.26.0

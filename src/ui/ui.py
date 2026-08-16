@@ -549,7 +549,7 @@ class MainWindow(QMainWindow):
         self.button_screenshot.clicked.connect(self.toggle_screenshot_ui)
 
         # Record Button
-        self.button_record = QPushButton("⏺ Record (F3)")
+        self.button_record = QPushButton("⏺ Record Raw (F3)")
         self.button_record.setCheckable(True)
         self.button_record.clicked.connect(self.toggle_record_ui)
 
@@ -997,15 +997,26 @@ class MainWindow(QMainWindow):
             clear_debug_canvas(self.route_map_canvas) # Set debug viz to null
 
     def toggle_screenshot_ui(self):
-        self.controller.take_screenshot()
+        # F2 is available before F1.  Pass a snapshot so the controller can
+        # open a short-lived read-only capture without starting AutoBot.
+        cfg = copy.deepcopy(self.cfg)
+        game_window_cfg = cfg.setdefault("game_window", {})
+        title = self.target_window_combo.currentText().strip()
+        if title:
+            game_window_cfg["title"] = title
+        game_window_cfg["exact_match"] = \
+            self.checkbox_exact_match.isChecked()
+        game_window_cfg["auto_resize"] = \
+            self.checkbox_auto_resize.isChecked()
+        self.controller.take_screenshot(cfg)
 
     def toggle_record_ui(self):
         if self.button_record.isChecked():
-            self.button_record.setText("⏹ Stop (F3)")
+            self.button_record.setText("⏹ Stop Raw (F3)")
             self.button_record.setStyleSheet("background-color: orange;")
             self.controller.start_recording()
         else:
-            self.button_record.setText("⏺ Record (F3)")
+            self.button_record.setText("⏺ Record Raw (F3)")
             self.button_record.setStyleSheet("")
             self.controller.stop_recording()
 

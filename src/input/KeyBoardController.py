@@ -34,6 +34,148 @@ _input_recovery_lock = threading.Lock()
 _input_recovery_until = 0.0
 
 
+ABSOLUTE_MOUSE_MAX_COORDINATE = 32767
+
+
+def _capture_frame_is_absolute_desktop(cfg):
+    """Return whether capture pixels already use the remote desktop plane."""
+    section = cfg.get("esp32_hid", {}) if isinstance(cfg, dict) else {}
+    value = section.get("capture_frame_is_desktop", False) \
+        if isinstance(section, dict) else False
+    if not isinstance(value, bool):
+        raise ValueError(
+            "esp32_hid.capture_frame_is_desktop must be true or false"
+        )
+    return value
+
+
+def _absolute_mouse_rect(cfg, name):
+    """Return one configured remote-desktop rectangle, or ``None``.
+
+    Rectangles use ``[left, top, width, height]`` in physical pixels on the
+    computer receiving BLE HID input.  Width and height describe pixel counts,
+    so both must be at least two for endpoint-preserving normalization.
+    """
+    section = cfg.get("esp32_hid", {}) if isinstance(cfg, dict) else {}
+    value = section.get(name) if isinstance(section, dict) else None
+    if value is None:
+        return None
+    if not isinstance(value, (list, tuple)) or len(value) != 4 or any(
+            isinstance(component, bool) or not isinstance(component, int)
+            for component in value):
+        raise ValueError(
+            f"esp32_hid.{name} must be [left, top, width, height] integers"
+        )
+    left, top, width, height = map(int, value)
+    if width <= 1 or height <= 1:
+        raise ValueError(
+            f"esp32_hid.{name} width and height must be greater than one"
+        )
+    return left, top, width, height
+
+
+def validate_absolute_mouse_config(cfg):
+    """Validate the optional capture-to-Magpie absolute-pointer geometry."""
+    capture_frame_is_desktop = _capture_frame_is_absolute_desktop(cfg)
+    desktop = _absolute_mouse_rect(cfg, "absolute_desktop_rect")
+    source = _absolute_mouse_rect(cfg, "magpie_source_rect")
+    if capture_frame_is_desktop and desktop is None:
+        raise ValueError(
+            "esp32_hid.absolute_desktop_rect is required when "
+            "capture_frame_is_desktop is true"
+        )
+    if source is None:
+        return desktop, None
+    if desktop is None:
+        raise ValueError(
+            "esp32_hid.absolute_desktop_rect is required when "
+            "esp32_hid.magpie_source_rect is configured"
+        )
+
+    desktop_left, desktop_top, desktop_width, desktop_height = desktop
+    source_left, source_top, source_width, source_height = source
+    if not (
+        desktop_left <= source_left
+        and desktop_top <= source_top
+        and source_left + source_width <= desktop_left + desktop_width
+        and source_top + source_height <= desktop_top + desktop_height
+    ):
+        raise ValueError(
+            "esp32_hid.magpie_source_rect must lie inside "
+            "esp32_hid.absolute_desktop_rect"
+        )
+    return desktop, source
+
+
+def has_calibrated_absolute_mouse(cfg):
+    """Return whether a Magpie source client was explicitly calibrated."""
+    desktop, source = validate_absolute_mouse_config(cfg)
+    if _capture_frame_is_absolute_desktop(cfg):
+        return desktop is not None
+    return source is not None
+
+
+def capture_point_to_absolute_hid(cfg, x, y, frame_width, frame_height):
+    """Map one capture-frame point to normalized absolute HID coordinates.
+
+    Magpie displays a scaled copy of the original game client.  Its input
+    transform therefore expects the physical desktop coordinate inside that
+    source client, not the corresponding point in the 4K scaled output.  The
+    source conversion intentionally rounds to one source pixel before HID
+    normalization, matching Magpie's endpoint-preserving integer mapping.
+
+    With no configured rectangles, retain the historical full-frame mapping
+    for old/local integrations.  Production capture-card configuration uses
+    explicit calibrated rectangles and never takes that fallback.
+    """
+    try:
+        x = float(x)
+        y = float(y)
+        frame_width = int(frame_width)
+        frame_height = int(frame_height)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError("invalid capture point or frame geometry") from exc
+    if not all(math.isfinite(value) for value in (x, y)) or \
+            frame_width <= 1 or frame_height <= 1 or \
+            not 0 <= x < frame_width or not 0 <= y < frame_height:
+        raise ValueError("capture point must lie inside a non-empty frame")
+
+    desktop, source = validate_absolute_mouse_config(cfg)
+    if desktop is None:
+        return (
+            int(round(x * ABSOLUTE_MOUSE_MAX_COORDINATE /
+                      (frame_width - 1))),
+            int(round(y * ABSOLUTE_MOUSE_MAX_COORDINATE /
+                      (frame_height - 1))),
+        )
+
+    desktop_left, desktop_top, desktop_width, desktop_height = desktop
+    if _capture_frame_is_absolute_desktop(cfg) or source is None:
+        source = desktop
+    source_left, source_top, source_width, source_height = source
+
+    source_x = source_left + int(round(
+        x * (source_width - 1) / (frame_width - 1)
+    ))
+    source_y = source_top + int(round(
+        y * (source_height - 1) / (frame_height - 1)
+    ))
+    absolute_x = int(round(
+        (source_x - desktop_left) * ABSOLUTE_MOUSE_MAX_COORDINATE /
+        (desktop_width - 1)
+    ))
+    absolute_y = int(round(
+        (source_y - desktop_top) * ABSOLUTE_MOUSE_MAX_COORDINATE /
+        (desktop_height - 1)
+    ))
+    if not (
+        0 <= absolute_x <= ABSOLUTE_MOUSE_MAX_COORDINATE
+        and 0 <= absolute_y <= ABSOLUTE_MOUSE_MAX_COORDINATE
+    ):
+        raise ValueError("mapped absolute HID point lies outside the desktop")
+    return absolute_x, absolute_y
+
+
 def input_recovery_remaining():
     """Return the remaining global HID lockout after an attack."""
     with _input_recovery_lock:
@@ -124,6 +266,32 @@ def _invoke_input(method, *args):
             f"[ESP32 HID] {method} result is uncertain; not retrying: {exc}"
         )
         return True, True
+    except (OSError, RuntimeError, ValueError, ConnectionError) as exc:
+        _log_input_error(f"[ESP32 HID] {method} failed: {exc}")
+        return False, False
+
+
+def _invoke_input_confirmed(method, *args):
+    """Call a one-shot that must have a confirmed ACK before a UI sequence.
+
+    Session recovery can classify the next captured page after an uncertain
+    command. Fixed multi-step menu workflows cannot safely do that: advancing
+    would make the next absolute point land on an unknown page. They consume
+    the uncertain command without replay, but report failure so the caller
+    pauses instead of continuing.
+    """
+    client = _get_input_client()
+    if client is None:
+        _log_input_error("[ESP32 HID] Keyboard client is not connected")
+        return False, False
+    try:
+        return True, getattr(client, method)(*args)
+    except Esp32HidTapUncertainError as exc:
+        _log_input_error(
+            f"[ESP32 HID] {method} ACK is uncertain; stopping UI sequence: "
+            f"{exc}"
+        )
+        return False, False
     except (OSError, RuntimeError, ValueError, ConnectionError) as exc:
         _log_input_error(f"[ESP32 HID] {method} failed: {exc}")
         return False, False
@@ -221,6 +389,7 @@ class KeyBoardController():
     '''
     def __init__(self, cfg, connect_input=True, capture_available=True):
         self.cfg = cfg
+        validate_absolute_mouse_config(cfg)
         self.cmd_action = "none"
         self.cmd_up_down = "none"
         self.cmd_left_right = "none"
@@ -249,6 +418,7 @@ class KeyBoardController():
         self.is_enable = bool(connect_input)
         self.capture_available = bool(capture_available)
         self.session_recovery_active = False
+        self.game_ui_active = False
         self.is_need_force_heal = False
         self.is_terminated = False
         # Parameters
@@ -443,9 +613,106 @@ class KeyBoardController():
             getattr(self, "is_enable", False)
             and getattr(self, "capture_available", True)
             and not getattr(self, "session_recovery_active", False)
+            and not getattr(self, "game_ui_active", False)
             and not getattr(self, "is_terminated", False)
             and self.is_game_window_active()
         )
+
+    def suspend_automation_for_game_ui(self):
+        """Pause ordinary producers while allowing an explicit game-UI flow."""
+        if getattr(self, "session_recovery_active", False) or \
+                not getattr(self, "is_enable", False) or \
+                not getattr(self, "capture_available", True) or \
+                getattr(self, "is_terminated", False) or \
+                not self.is_game_window_active():
+            return False
+        self.game_ui_active = True
+        _input_allowed.clear()
+        with _input_transaction_lock:
+            self.game_ui_active = True
+            _input_allowed.clear()
+            with self._ensure_command_lock():
+                self.cmd_left_right = "none"
+                self.cmd_up_down = "none"
+                self.cmd_action = "none"
+                self._last_source_action = "none"
+                self.is_need_force_heal = False
+            success, _ = _invoke_input("release_all")
+            self._invalidate_facing_cache()
+            if not success:
+                # The ordinary gate was already closed before RELEASE_ALL.
+                # Keep automation visibly paused, but do not leave a hidden
+                # game_ui_active latch that no caller believes it owns.
+                self.is_enable = False
+                self.game_ui_active = False
+                _input_allowed.clear()
+            return success
+
+    def press_game_ui_key(self, key, duration=0.05):
+        """Send one key while the exclusive game-UI input gate is active."""
+        key = key.strip() if isinstance(key, str) else ""
+        if not key:
+            return False
+        with _input_transaction_lock:
+            if not getattr(self, "game_ui_active", False) or \
+                    not getattr(self, "is_enable", False) or \
+                    not getattr(self, "capture_available", True) or \
+                    getattr(self, "is_terminated", False) or \
+                    not self.is_game_window_active():
+                return False
+            duration_ms = max(1, int(round(float(duration) * 1000)))
+            success, result = _invoke_input_confirmed(
+                "tap", key, duration_ms
+            )
+            return result if success else False
+
+    def click_game_ui_point(
+        self,
+        x,
+        y,
+        frame_width,
+        frame_height,
+        button="left",
+        duration=0.05,
+    ):
+        """Click a capture-frame point during an exclusive game-UI flow."""
+        try:
+            if self.cfg.get("esp32_hid", {}).get(
+                    "remote_target", False) and not \
+                    has_calibrated_absolute_mouse(self.cfg):
+                return False
+            absolute_x, absolute_y = capture_point_to_absolute_hid(
+                self.cfg, x, y, frame_width, frame_height
+            )
+            duration_ms = max(1, int(round(float(duration) * 1000)))
+        except (TypeError, ValueError, OverflowError):
+            return False
+        with _input_transaction_lock:
+            if not getattr(self, "game_ui_active", False) or \
+                    not getattr(self, "is_enable", False) or \
+                    not getattr(self, "capture_available", True) or \
+                    getattr(self, "is_terminated", False) or \
+                    not self.is_game_window_active():
+                return False
+            success, result = _invoke_input_confirmed(
+                "mouse_click_at",
+                absolute_x,
+                absolute_y,
+                button,
+                duration_ms,
+            )
+            return result if success else False
+
+    def resume_automation_after_game_ui(self):
+        """Close the exclusive UI gate and restore ordinary input if safe."""
+        with _input_transaction_lock:
+            was_active = getattr(self, "game_ui_active", False)
+            self.game_ui_active = False
+            if self._automation_input_active():
+                _input_allowed.set()
+            else:
+                _input_allowed.clear()
+            return was_active
 
     def suspend_automation_for_session_recovery(self):
         """Stop every automatic producer while retaining an explicit TAP path.
@@ -489,6 +756,83 @@ class KeyBoardController():
             duration_ms = max(1, int(round(float(duration) * 1000)))
             success, result = _invoke_input("tap", key, duration_ms)
             return result if success else False
+
+    def focus_next_window_and_press_session_recovery_key(
+        self,
+        key,
+        *,
+        focus_keys=("alt", "tab"),
+        focus_hold=0.10,
+        settle_delay=0.50,
+        duration=0.10,
+    ):
+        """Switch the remote foreground window, then send one recovery key.
+
+        The focus chord is installed as one held HID state and released before
+        the final key is sent. A failed focus transition never advances to the
+        final key, and the cleanup path prevents a stuck modifier.
+        """
+        key = key.strip() if isinstance(key, str) else ""
+        if not key or not isinstance(focus_keys, (list, tuple)) or not \
+                focus_keys:
+            return False
+        try:
+            focus_keys = tuple(
+                item.strip() if isinstance(item, str) else ""
+                for item in focus_keys
+            )
+            usages = tuple(usage_from_text(item) for item in focus_keys)
+            usage_from_text(key)
+            focus_hold = float(focus_hold)
+            settle_delay = float(settle_delay)
+            duration = float(duration)
+        except (TypeError, ValueError, OverflowError):
+            return False
+        if any(not item for item in focus_keys) or \
+                len(set(usages)) != len(usages) or \
+                sum(usage < 0xE0 for usage in usages) > 6 or \
+                not all(math.isfinite(value) for value in (
+                    focus_hold, settle_delay, duration
+                )) or not 0.001 <= focus_hold <= 1.0 or \
+                not 0.0 <= settle_delay <= 5.0 or \
+                not 0.001 <= duration <= 1.0:
+            return False
+
+        with _input_transaction_lock:
+            if not getattr(self, "session_recovery_active", False) or \
+                    not getattr(self, "is_enable", False) or \
+                    not getattr(self, "capture_available", True) or \
+                    getattr(self, "is_terminated", False) or \
+                    not self.is_game_window_active():
+                return False
+
+            logger.info(
+                "[KeyBoardController] Session recovery focus switch: "
+                f"keys={list(focus_keys)}, then key={key!r}"
+            )
+            focus_state_may_be_held = False
+            try:
+                focus_state_may_be_held = True
+                focus_sent, _ = _invoke_input_confirmed(
+                    "set_state", focus_keys
+                )
+                if not focus_sent:
+                    return False
+                time.sleep(focus_hold)
+
+                released, _ = _invoke_input_confirmed("release_all")
+                if not released:
+                    return False
+                focus_state_may_be_held = False
+
+                if settle_delay:
+                    time.sleep(settle_delay)
+                duration_ms = max(1, int(round(duration * 1000)))
+                success, result = _invoke_input("tap", key, duration_ms)
+                return result if success else False
+            finally:
+                if focus_state_may_be_held:
+                    _invoke_input("release_all")
 
     def move_session_recovery_mouse(self, dx, dy):
         """Move the remote pointer once while regular automation is gated.
@@ -544,20 +888,16 @@ class KeyBoardController():
     ):
         """Click one capture-frame point through the gated absolute HID path."""
         try:
-            x = float(x)
-            y = float(y)
-            frame_width = int(frame_width)
-            frame_height = int(frame_height)
+            if self.cfg.get("esp32_hid", {}).get(
+                    "remote_target", False) and not \
+                    has_calibrated_absolute_mouse(self.cfg):
+                return False
+            absolute_x, absolute_y = capture_point_to_absolute_hid(
+                self.cfg, x, y, frame_width, frame_height
+            )
             duration_ms = max(1, int(round(float(duration) * 1000)))
         except (TypeError, ValueError, OverflowError):
             return False
-        if not all(math.isfinite(value) for value in (x, y)) or \
-                frame_width <= 1 or frame_height <= 1 or \
-                not 0 <= x < frame_width or not 0 <= y < frame_height:
-            return False
-
-        absolute_x = int(round(x * 32767 / (frame_width - 1)))
-        absolute_y = int(round(y * 32767 / (frame_height - 1)))
         with _input_transaction_lock:
             if not getattr(self, "session_recovery_active", False) or \
                     not getattr(self, "is_enable", False) or \
@@ -565,6 +905,16 @@ class KeyBoardController():
                     getattr(self, "is_terminated", False) or \
                     not self.is_game_window_active():
                 return False
+            logger.info(
+                "[KeyBoardController] Session recovery absolute click: "
+                f"capture=({int(round(float(x)))}, "
+                f"{int(round(float(y)))})/{frame_width}x{frame_height}, "
+                f"hid=({absolute_x}, {absolute_y}), "
+                "capture_frame_is_desktop="
+                f"{self.cfg.get('esp32_hid', {}).get('capture_frame_is_desktop')}, "
+                "source_rect="
+                f"{self.cfg.get('esp32_hid', {}).get('magpie_source_rect')}"
+            )
             success, result = _invoke_input(
                 "mouse_click_at",
                 absolute_x,

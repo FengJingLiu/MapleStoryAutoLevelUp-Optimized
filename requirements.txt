@@ -1,5 +1,7 @@
 opencv-python>=4.11,<4.12
 numpy>=2.0,<2.3
+rapidocr==3.9.2
+onnxruntime>=1.28,<2
 pyautogui>=0.9.54,<0.10
 pynput>=1.7.7,<2
 pyserial>=3.5,<4

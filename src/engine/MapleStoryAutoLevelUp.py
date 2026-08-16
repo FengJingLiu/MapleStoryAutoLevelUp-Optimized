@@ -12,6 +12,7 @@ import logging
 import os
 import datetime
 import threading
+import math
 from copy import deepcopy
 
 # Library import
@@ -49,7 +50,12 @@ from src.input.CaptureSource import (
     create_capture_source,
     resolve_capture_source,
 )
-from src.input.KeyBoardController import KeyBoardController, press_key
+from src.input.KeyBoardController import (
+    KeyBoardController,
+    has_calibrated_absolute_mouse,
+    press_key,
+    validate_absolute_mouse_config,
+)
 from src.input.Esp32HidClient import (
     RELATIVE_MOUSE_MAX_DELTA,
     usage_from_text,
@@ -64,6 +70,13 @@ from src.engine.Profiler import Profiler
 from src.engine.RuneSolver import RuneSolver
 from src.engine.FiniteStateMachine import FiniteStateMachine
 from src.vision.YoloMonsterDetector import YoloMonsterDetector
+from src.vision.auto_relogin_ocr import (
+    is_chinese_ocr_target,
+    normalize_ocr_text,
+    RapidOcrError,
+    RapidOcrTextLocator,
+    StableOcrTargetGate,
+)
 from src.vision.cursor_tracker import CursorTracker
 from src.states.hunting import HuntingState
 from src.states.finding_rune import FindingRuneState
@@ -141,6 +154,11 @@ class MapleStoryAutoBot:
         self._auto_relogin_failure_logged = False
         self._auto_relogin_fallback_frame_counter = 0
         self._auto_relogin_started_at = None
+        self._auto_relogin_next_ocr_scan_at = 0.0
+        self._auto_relogin_ocr_page_scan_token = None
+        self._auto_relogin_ocr_page_scan_matches = None
+        self._auto_relogin_ocr_page_matches = {}
+        self._reset_auto_relogin_ocr_gate()
         self._reset_auto_relogin_pointer_runtime()
         self.thread_auto_bot = None # thread for running autobot
         self.cmd_move_x = "none" # "left" "right"
@@ -242,6 +260,9 @@ class MapleStoryAutoBot:
         self._auto_relogin_disconnect_cursor_template_source = None
         self._auto_relogin_disconnect_cursor_tracker = None
         self._last_auto_relogin_template_geometry = None
+        self._auto_relogin_ocr_locator = None
+        self._auto_relogin_ocr_gate = None
+        self._auto_relogin_ocr_gate_signature = None
 
         # Database
         self.data = load_yaml("config/config_data.yaml")
@@ -464,6 +485,13 @@ class MapleStoryAutoBot:
         """Return whether HID input goes to game computer B, not this PC."""
         return self.cfg.get("esp32_hid", {}).get("remote_target", False)
 
+    def remote_absolute_mouse_calibrated(self):
+        """Return whether remote absolute clicks have explicit geometry."""
+        try:
+            return has_calibrated_absolute_mouse(self.cfg)
+        except (TypeError, ValueError):
+            return False
+
     def is_capture_card_source(self):
         """Return whether frames have no corresponding local target window."""
         capture = getattr(self, "capture", None)
@@ -485,21 +513,86 @@ class MapleStoryAutoBot:
         return cfg.get("bot", {}).get("mode") == "debug"
 
     def click_game_ui(self, coord, action):
-        """Click only when the captured window and game are on the same PC."""
+        """Click one current capture-frame coordinate on the game computer."""
+        if self.remote_keyboard_target():
+            if not self.remote_absolute_mouse_calibrated():
+                logger.error(
+                    f"[{action}] Remote absolute mouse is not calibrated"
+                )
+                return False
+            frame = getattr(self, "img_frame", None)
+            keyboard_controller = getattr(self, "kb", None)
+            if frame is None or keyboard_controller is None or not hasattr(
+                    keyboard_controller, "click_game_ui_point"):
+                logger.error(
+                    f"[{action}] Remote absolute game-UI mouse is unavailable"
+                )
+                return False
+            frame_h, frame_w = frame.shape[:2]
+            duration = self._auto_relogin_number(
+                "mouse_click_duration", 0.05, minimum=0.001
+            )
+            return bool(keyboard_controller.click_game_ui_point(
+                int(coord[0]),
+                int(coord[1]),
+                frame_w,
+                frame_h,
+                button="left",
+                duration=duration,
+            ))
+
         if self.is_capture_card_source():
             logger.warning(
                 f"[{action}] Skipped local mouse click: DirectShow capture "
                 "has no corresponding local game window"
             )
             return False
-        if self.remote_keyboard_target():
-            logger.warning(
-                f"[{action}] Skipped generic local mouse click: ESP32 is paired "
-                "to the remote game computer"
-            )
-            return False
-        click_in_game_window(self.capture.window_title, coord)
+        click_in_game_window(
+            self.capture.window_title,
+            (int(coord[0]), int(coord[1])),
+        )
         return True
+
+    def _configured_remote_ui_capture_point(self, name):
+        """Convert one legacy raw-window UI point to capture content space.
+
+        The legacy menu/channel coordinates include the Windows title bar,
+        while DirectShow frames and Magpie's scaled output contain only game
+        client pixels. Runtime scaling cannot distinguish those two domains,
+        so remote workflows derive these fixed points from the unscaled base
+        configuration and remove the authored title-bar offset first.
+        """
+        point = self.cfg.get("ui_coords", {}).get(name)
+        base_cfg = getattr(self, "_base_cfg", None)
+        frame = getattr(self, "img_frame", None)
+        if base_cfg is None or frame is None:
+            return tuple(map(int, point)) if point is not None else None
+
+        base_point = base_cfg.get("ui_coords", {}).get(name)
+        reference = base_cfg.get("game_window", {}).get(
+            "coordinate_reference_size", (700, 1296)
+        )
+        try:
+            raw_x, raw_y = map(float, base_point)
+            reference_h, reference_w = map(float, reference)
+            title_bar_height = float(base_cfg.get(
+                "game_window", {}
+            ).get("title_bar_height", 0))
+            frame_h, frame_w = frame.shape[:2]
+        except (TypeError, ValueError, AttributeError) as exc:
+            raise ValueError(
+                f"invalid configured UI coordinate: {name}"
+            ) from exc
+        content_y = raw_y - title_bar_height
+        if reference_h <= 0 or reference_w <= 0 or raw_x < 0 or \
+                content_y < 0:
+            raise ValueError(
+                f"configured UI coordinate {name} lies outside game content"
+            )
+        return (
+            int(round(raw_x * frame_w / reference_w)),
+            int(round(content_y * frame_h / reference_h)),
+        )
 
     def _auto_relogin_config(self):
         """Return the optional session-recovery configuration."""
@@ -509,9 +602,9 @@ class MapleStoryAutoBot:
     def _auto_relogin_remote_mouse_mode(self):
         """Return the configured remote click strategy.
 
-        Missing configuration retains the legacy absolute path for callers
-        that construct a partial config in tests or integrations.  The shipped
-        default explicitly selects ``visual_relative``.
+        Missing configuration and shipped profiles select the calibrated
+        absolute path. ``visual_relative`` remains an explicit compatibility
+        option for integrations that intentionally opt into cursor feedback.
         """
         return str(
             self._auto_relogin_config().get(
@@ -531,6 +624,158 @@ class MapleStoryAutoBot:
                 f"[auto_relogin] Invalid {name}={value!r}; using {default}"
             )
             return max(float(minimum), float(default))
+
+    def _auto_relogin_ocr_config(self):
+        cfg = self._auto_relogin_config().get("ocr", {})
+        return cfg if isinstance(cfg, dict) else {}
+
+    def _auto_relogin_ocr_target_config(self, page):
+        """Return a target config supported by the current input path."""
+        ocr_cfg = self._auto_relogin_ocr_config()
+        if ocr_cfg.get("enable", False) is not True:
+            return None
+        targets = ocr_cfg.get("targets", {})
+        target_cfg = targets.get(page) if isinstance(targets, dict) else None
+        if not isinstance(target_cfg, dict):
+            return None
+        # OCR supplies semantic authorization in every mouse mode. Shipped
+        # remote profiles use calibrated absolute clicks; visual-relative is
+        # retained only as an explicit compatibility transport.
+        return target_cfg
+
+    def _reset_auto_relogin_ocr_gate(self):
+        gate = getattr(self, "_auto_relogin_ocr_gate", None)
+        if gate is not None:
+            gate.reset()
+
+    def _auto_relogin_ocr_components(self):
+        """Build the lightweight gate and lazily backed OCR locator."""
+        locator = getattr(self, "_auto_relogin_ocr_locator", None)
+        if locator is None:
+            locator = RapidOcrTextLocator()
+            self._auto_relogin_ocr_locator = locator
+
+        ocr_cfg = self._auto_relogin_ocr_config()
+        confirm_frames = max(1, int(ocr_cfg.get("confirm_frames", 2)))
+        drift = self._auto_relogin_scale_vector(
+            ocr_cfg.get("max_center_drift", (24, 24)), minimum=0
+        )
+        if drift is None:
+            raise ValueError("invalid OCR center-drift configuration")
+        signature = (confirm_frames, tuple(drift))
+        gate = getattr(self, "_auto_relogin_ocr_gate", None)
+        if gate is None or signature != getattr(
+                self, "_auto_relogin_ocr_gate_signature", None):
+            gate = StableOcrTargetGate(
+                confirm_frames=confirm_frames,
+                max_center_drift=drift,
+            )
+            self._auto_relogin_ocr_gate = gate
+            self._auto_relogin_ocr_gate_signature = signature
+        return locator, gate
+
+    def _auto_relogin_ocr_frame_fresh(self, frame_token, now):
+        """Reject OCR coordinates derived from a stale or synthetic frame."""
+        if not isinstance(frame_token, tuple) or len(frame_token) != 2 or \
+                frame_token[0] != "capture":
+            return False
+        try:
+            captured_at = float(frame_token[1])
+            max_age = float(
+                self._auto_relogin_ocr_config().get("max_frame_age", 1.0)
+            )
+        except (TypeError, ValueError):
+            return False
+        return np.isfinite(captured_at) and np.isfinite(max_age) and \
+            max_age > 0 and 0 <= now - captured_at <= max_age
+
+    def _auto_relogin_ocr_search_region(
+            self, page, target_cfg, page_location):
+        """Resolve the OCR ROI in current full-frame coordinates."""
+        source = str(
+            target_cfg.get("region_source", "configured")
+        ).strip().lower()
+        if source != "configured":
+            return None
+        return self._auto_relogin_scale_region(
+            target_cfg.get("search_region")
+        )
+
+    def _locate_stable_auto_relogin_ocr_target(
+            self, page, page_location, frame_token):
+        """Return one fresh stable OCR center in current frame coordinates."""
+        target_cfg = self._auto_relogin_ocr_target_config(page)
+        if target_cfg is None:
+            return None
+        frame = getattr(self, "img_frame", None)
+        region = self._auto_relogin_ocr_search_region(
+            page, target_cfg, page_location
+        )
+        if frame is None or region is None:
+            self._fail_auto_relogin(
+                f"{page} OCR target geometry is unavailable"
+            )
+            return None
+        try:
+            locator, gate = self._auto_relogin_ocr_components()
+            scan_token = getattr(
+                self, "_auto_relogin_ocr_page_scan_token", None
+            )
+            scan_matches = getattr(
+                self, "_auto_relogin_ocr_page_matches", {}
+            )
+            current_capture_token = getattr(
+                self, "_current_capture_frame_token", None
+            )
+            scan_is_current = scan_token == frame_token or (
+                current_capture_token is None
+                and scan_token == ("frame", id(frame))
+            )
+            match = scan_matches.get(page) if (
+                scan_is_current and isinstance(scan_matches, dict)
+            ) else None
+            if match is None:
+                match = locator.locate(
+                    frame,
+                    region,
+                    target_cfg.get("texts", ()),
+                    min_score=float(
+                        self._auto_relogin_ocr_config().get(
+                            "min_score", 0.85
+                        )
+                    ),
+                    match_mode=target_cfg.get("match_mode", "exact"),
+                    box_threshold=float(
+                        self._auto_relogin_ocr_config().get(
+                            "box_threshold", 0.3
+                        )
+                    ),
+                )
+        except (RapidOcrError, TypeError, ValueError) as exc:
+            logger.error(f"[auto_relogin] {page} RapidOCR failed: {exc}")
+            self._fail_auto_relogin(f"{page} RapidOCR target detection failed")
+            return None
+
+        if not self._auto_relogin_ocr_frame_fresh(
+                frame_token, time.monotonic()):
+            gate.reset()
+            logger.warning(
+                f"[auto_relogin] Ignored stale {page} OCR target frame"
+            )
+            return None
+        point = gate.observe(page, frame_token, match)
+        if match is None:
+            logger.debug(
+                f"[auto_relogin] No unique {page} OCR target in {region}"
+            )
+            return None
+        logger.debug(
+            f"[auto_relogin] {page} OCR text={match.text!r}, "
+            f"score={match.score:.4f}, center={match.center}"
+        )
+        if point is None:
+            return None
+        return point
 
     def _reset_auto_relogin_pointer_runtime(self):
         """Clear one in-progress visual relative-pointer click session."""
@@ -581,6 +826,10 @@ class MapleStoryAutoBot:
         self._auto_relogin_failure_logged = False
         self._auto_relogin_fallback_frame_counter = 0
         self._auto_relogin_started_at = None
+        self._auto_relogin_next_ocr_scan_at = 0.0
+        self._auto_relogin_ocr_page_scan_token = None
+        self._auto_relogin_ocr_page_scan_matches = None
+        self._auto_relogin_ocr_page_matches = {}
         self._reset_auto_relogin_pointer_runtime()
 
     def _auto_relogin_enabled(self):
@@ -638,6 +887,7 @@ class MapleStoryAutoBot:
         self._auto_relogin_channel_candidates = []
         self._auto_relogin_failure_logged = False
         self._auto_relogin_started_at = time.monotonic()
+        self._reset_auto_relogin_ocr_gate()
         self._reset_auto_relogin_pointer_runtime()
 
         health_monitor = getattr(self, "health_monitor", None)
@@ -758,47 +1008,142 @@ class MapleStoryAutoBot:
             return None
         return (*top_left, *bottom_right)
 
-    def _match_auto_relogin_page(self, page):
-        """Return a verified template center for one known recovery page."""
+    def _auto_relogin_ocr_page_scan(self):
+        """Run at most one Chinese OCR inference for the current frame."""
         frame = getattr(self, "img_frame", None)
-        template = getattr(self, "_auto_relogin_templates", {}).get(page)
-        regions = self._auto_relogin_config().get("page_search_regions", {})
-        region = self._auto_relogin_scale_region(regions.get(page))
-        if frame is None or template is None or region is None:
+        if frame is None:
             return None
+        frame_token = getattr(self, "_current_capture_frame_token", None)
+        if not isinstance(frame_token, tuple) or len(frame_token) != 2:
+            frame_token = ("frame", id(frame))
+        if frame_token == getattr(
+                self, "_auto_relogin_ocr_page_scan_token", None):
+            return getattr(
+                self, "_auto_relogin_ocr_page_scan_matches", None
+            )
 
-        frame_h, frame_w = frame.shape[:2]
+        target_configs = self._auto_relogin_ocr_config().get("targets", {})
+        if not isinstance(target_configs, dict):
+            return None
+        regions = []
+        for target_cfg in target_configs.values():
+            if not isinstance(target_cfg, dict):
+                continue
+            region = self._auto_relogin_ocr_search_region(
+                "", target_cfg, None
+            )
+            if region is not None:
+                regions.append(region)
+        if not regions:
+            return None
+        scan_region = (
+            min(region[0] for region in regions),
+            min(region[1] for region in regions),
+            max(region[2] for region in regions),
+            max(region[3] for region in regions),
+        )
+
+        self._auto_relogin_ocr_page_scan_token = frame_token
+        self._auto_relogin_ocr_page_matches = {}
+        try:
+            locator, _ = self._auto_relogin_ocr_components()
+            matches = locator.recognize(
+                frame,
+                scan_region,
+                min_score=float(
+                    self._auto_relogin_ocr_config().get("min_score", 0.85)
+                ),
+                box_threshold=float(
+                    self._auto_relogin_ocr_config().get(
+                        "box_threshold", 0.3
+                    )
+                ),
+            )
+        except (RapidOcrError, TypeError, ValueError) as exc:
+            logger.error(f"[auto_relogin] Chinese page OCR failed: {exc}")
+            matches = None
+        self._auto_relogin_ocr_page_scan_matches = matches
+        return matches
+
+    def _match_auto_relogin_page(self, page):
+        """Return one unique Chinese OCR marker for a recovery page."""
+        frame = getattr(self, "img_frame", None)
+        target_cfg = self._auto_relogin_ocr_target_config(page)
+        if frame is None or target_cfg is None:
+            return None
+        region = self._auto_relogin_ocr_search_region(
+            page, target_cfg, None
+        )
+        if region is None:
+            return None
+        matches = self._auto_relogin_ocr_page_scan()
+        if matches is None:
+            return None
+        targets = tuple(
+            normalize_ocr_text(text)
+            for text in target_cfg.get("texts", ())
+        )
+        match_mode = str(
+            target_cfg.get("match_mode", "exact")
+        ).strip().lower()
         x0, y0, x1, y1 = region
-        x0 = max(0, min(int(x0), frame_w))
-        x1 = max(0, min(int(x1), frame_w))
-        y0 = max(0, min(int(y0), frame_h))
-        y1 = max(0, min(int(y1), frame_h))
-        template_h, template_w = template.shape[:2]
-        if x1 - x0 < template_w or y1 - y0 < template_h:
+        candidates = []
+        for match in matches:
+            center_x, center_y = match.center
+            if not (x0 <= center_x < x1 and y0 <= center_y < y1):
+                continue
+            if match_mode == "exact":
+                accepted = match.normalized_text in targets
+            else:
+                accepted = any(
+                    target in match.normalized_text for target in targets
+                )
+            if accepted:
+                candidates.append(match)
+        if len(candidates) != 1:
             return None
-
-        roi = frame[y0:y1, x0:x1]
-        location, score, _ = find_pattern_sqdiff(roi, template)
-        threshold = self._auto_relogin_number(
-            "template_threshold", 0.03, minimum=0.0
-        )
-        if score >= threshold:
-            return None
-        center = (
-            x0 + int(location[0]) + template_w // 2,
-            y0 + int(location[1]) + template_h // 2,
-        )
+        match = candidates[0]
+        self._auto_relogin_ocr_page_matches[page] = match
         logger.debug(
-            f"[auto_relogin] Matched {page} page at {center} "
-            f"with score {score:.5f}"
+            f"[auto_relogin] OCR classified {page}: text={match.text!r}, "
+            f"score={match.score:.4f}, center={match.center}"
         )
-        return center
+        return match.center
+
+    def _auto_relogin_page_order(self):
+        """Prefer the expected OCR page without hiding unexpected pages."""
+        state = getattr(self, "_auto_relogin_state", "idle")
+        preferred = []
+        if state == "waiting_page":
+            expected = getattr(self, "_auto_relogin_expected_page", None)
+            preferred.extend(("disconnect", "character"))
+            preferred.extend((
+                expected,
+                getattr(self, "_auto_relogin_last_action_page", None),
+            ))
+        elif state == "confirming":
+            pending = getattr(self, "_auto_relogin_pending_page", None)
+            preferred.extend(("disconnect", "character"))
+            preferred.extend((
+                pending,
+                getattr(self, "_auto_relogin_expected_page", None),
+            ))
+        elif state == "waiting_game":
+            preferred.extend(("character", "disconnect"))
+
+        # More-specific overlays stay ahead of labels visible behind them.
+        preferred.extend((
+            "disconnect", "character", "channel", "world", "connect"
+        ))
+        ordered = []
+        for page in preferred:
+            if page is not None and page not in ordered:
+                ordered.append(page)
+        return tuple(ordered)
 
     def _find_known_auto_relogin_page(self):
-        """Find the most specific page for manual/failure-state gating."""
-        # The disconnect dialog is modal and can cover any older page. After
-        # it, prefer overlays/more-specific pages over their visible parents.
-        for page in ("disconnect", "character", "channel", "world", "connect"):
+        """Classify the current recovery page using Chinese OCR only."""
+        for page in self._auto_relogin_page_order():
             location = self._match_auto_relogin_page(page)
             if location is not None:
                 return page, location
@@ -807,6 +1152,7 @@ class MapleStoryAutoBot:
     def _begin_auto_relogin_confirmation(
             self, page, location, now, frame_token):
         if getattr(self, "_auto_relogin_pending_page", None) != page:
+            self._reset_auto_relogin_ocr_gate()
             current_state = getattr(self, "_auto_relogin_state", "idle")
             if current_state != "confirming":
                 self._auto_relogin_confirmation_return_state = current_state
@@ -855,8 +1201,50 @@ class MapleStoryAutoBot:
             return bool(keyboard_controller.press_session_recovery_key(key))
         return bool(press_key(key))
 
-    def _send_auto_relogin_click(self, point, action):
+    def _send_auto_relogin_focus_next_key(self):
+        """Focus the next remote window before sending the confirmed key."""
+        cfg = self._auto_relogin_config()
+        key = str(cfg.get("remote_confirm_key", "enter")).strip()
+        sender = getattr(
+            self.kb,
+            "focus_next_window_and_press_session_recovery_key",
+            None,
+        )
+        if not key or not callable(sender):
+            logger.error(
+                "[auto_relogin] Remote launcher focus switching is unavailable"
+            )
+            return False
+        focus_keys = cfg.get("focus_switch_keys", ("alt", "tab"))
+        logger.info(
+            "[auto_relogin] Switching focus to the launcher before sending "
+            f"{key!r}"
+        )
+        return bool(sender(
+            key,
+            focus_keys=focus_keys,
+            focus_hold=self._auto_relogin_number(
+                "focus_switch_hold", 0.10, minimum=0.001
+            ),
+            settle_delay=self._auto_relogin_number(
+                "focus_switch_settle_delay", 0.50, minimum=0.0
+            ),
+            duration=self._auto_relogin_number(
+                "focus_enter_duration", 0.10, minimum=0.001
+            ),
+        ))
+
+    def _send_auto_relogin_click(
+            self, point, action, *, click_count=1, click_interval=0.0):
+        """Send one bounded click sequence to a capture-frame point."""
         if point is None or getattr(self, "is_terminated", False):
+            return False
+        if isinstance(click_count, bool) or not isinstance(click_count, int) or \
+                click_count < 1:
+            return False
+        try:
+            click_interval = max(0.0, float(click_interval))
+        except (TypeError, ValueError, OverflowError):
             return False
         if self.remote_keyboard_target():
             keyboard_controller = self.kb
@@ -871,20 +1259,34 @@ class MapleStoryAutoBot:
             duration = self._auto_relogin_number(
                 "mouse_click_duration", 0.05, minimum=0.001
             )
-            return bool(keyboard_controller.click_session_recovery_point(
-                int(point[0]),
-                int(point[1]),
-                frame_w,
-                frame_h,
-                button="left",
-                duration=duration,
-            ))
+            for click_index in range(click_count):
+                if click_index and click_interval:
+                    time.sleep(click_interval)
+                if getattr(self, "is_terminated", False) or not bool(
+                        keyboard_controller.click_session_recovery_point(
+                            int(point[0]),
+                            int(point[1]),
+                            frame_w,
+                            frame_h,
+                            button="left",
+                            duration=duration,
+                        )):
+                    return False
+            return True
 
         title_bar_height = int(
             self.cfg.get("game_window", {}).get("title_bar_height", 0)
         )
-        local_point = (int(point[0]), int(point[1]) + title_bar_height)
-        return bool(self.click_game_ui(local_point, action))
+        local_point = (
+            int(point[0]), int(point[1]) + title_bar_height
+        )
+        for click_index in range(click_count):
+            if click_index and click_interval:
+                time.sleep(click_interval)
+            if getattr(self, "is_terminated", False) or not bool(
+                    self.click_game_ui(local_point, action)):
+                return False
+        return True
 
     def _next_auto_relogin_channel_point(self):
         candidates = getattr(self, "_auto_relogin_channel_candidates", None)
@@ -1534,6 +1936,7 @@ class MapleStoryAutoBot:
             classified_page, _ = self._find_known_auto_relogin_page()
             next_page = {
                 "disconnect": "connect",
+                "connect": "world",
                 "world": "channel",
                 "channel": "character",
             }.get(page)
@@ -1778,12 +2181,25 @@ class MapleStoryAutoBot:
 
             next_page = {
                 "disconnect": "connect",
+                "connect": "world",
                 "world": "channel",
                 "channel": "character",
             }.get(page)
             duration = self._auto_relogin_number(
                 "mouse_click_duration", 0.05, minimum=0.001
             )
+            click_count = 1
+            click_interval = 0.0
+            if page == "channel":
+                click_count = max(
+                    1,
+                    int(round(self._auto_relogin_number(
+                        "channel_click_count", 1, minimum=1
+                    ))),
+                )
+                click_interval = self._auto_relogin_number(
+                    "channel_double_click_interval", 0.08, minimum=0.0
+                )
             dispatch_at = self._auto_relogin_dispatch_time(pointer=True)
             if dispatch_at is None:
                 return False
@@ -1806,9 +2222,17 @@ class MapleStoryAutoBot:
             self._auto_relogin_has_attempted_input = True
             self._auto_relogin_last_action_page = page
             self._auto_relogin_expected_page = next_page
-            sent = bool(keyboard_controller.click_session_recovery_mouse(
-                button="left", duration=duration
-            ))
+            sent = True
+            for click_index in range(click_count):
+                if click_index and click_interval:
+                    time.sleep(click_interval)
+                sent = bool(
+                    keyboard_controller.click_session_recovery_mouse(
+                        button="left", duration=duration
+                    )
+                )
+                if not sent:
+                    break
             completed_at = time.monotonic()
             if not sent:
                 self._fail_auto_relogin(
@@ -1842,8 +2266,23 @@ class MapleStoryAutoBot:
         self._auto_relogin_action_attempts = attempts
         self._auto_relogin_last_action_page = page
         self._auto_relogin_last_action_at = now
-        self._auto_relogin_next_action_at = now + \
-            self._auto_relogin_number("retry_cooldown", 3.0)
+        retry_delay = self._auto_relogin_number("retry_cooldown", 3.0)
+        target_cfg = self._auto_relogin_ocr_target_config(page)
+        target_action = str(
+            target_cfg.get("action", "")
+        ).strip().lower() if isinstance(target_cfg, dict) else ""
+        if page == "connect" and target_action == "enter":
+            retry_delay = self._auto_relogin_number(
+                "connect_enter_retry_delay", 1.0, minimum=0.0
+            )
+        elif target_action == "focus_next_enter":
+            # Repeating Alt+Tab would toggle back to the prior window. Treat
+            # the acknowledged launcher handoff as a one-shot and wait for the
+            # successor until the normal step timeout fails closed.
+            retry_delay = self._auto_relogin_number(
+                "step_timeout", 60.0, minimum=1.0
+            )
+        self._auto_relogin_next_action_at = now + retry_delay
         self._auto_relogin_pending_page = None
         self._auto_relogin_confirmation_return_state = None
         self._auto_relogin_pending_location = None
@@ -1852,6 +2291,7 @@ class MapleStoryAutoBot:
         self._auto_relogin_confirm_started_at = None
         self._auto_relogin_last_confirm_frame_token = None
         self._auto_relogin_step_started_at = now
+        self._reset_auto_relogin_ocr_gate()
         self._reset_auto_relogin_pointer_runtime()
 
         if page == "character":
@@ -1871,7 +2311,8 @@ class MapleStoryAutoBot:
             )
         return True
 
-    def _execute_auto_relogin_page_action(self, page, location, now):
+    def _execute_auto_relogin_page_action(
+            self, page, location, now, frame_token=None):
         """Act only on a visually confirmed page, then wait for its successor."""
         if not self._auto_relogin_control_available():
             logger.warning(
@@ -1882,10 +2323,20 @@ class MapleStoryAutoBot:
             return False
 
         attempts = getattr(self, "_auto_relogin_action_attempts", {})
+        attempt_limit_name = "max_step_attempts"
+        if page == "connect":
+            connect_target = self._auto_relogin_ocr_target_config(page)
+            connect_action = str(
+                connect_target.get("action", "")
+            ).strip().lower() if isinstance(connect_target, dict) else ""
+            if connect_action == "enter":
+                attempt_limit_name = "connect_enter_max_attempts"
         max_attempts = max(
             1,
             int(round(self._auto_relogin_number(
-                "max_step_attempts", 5, minimum=1
+                attempt_limit_name,
+                30 if attempt_limit_name == "connect_enter_max_attempts" else 5,
+                minimum=1,
             ))),
         )
         if attempts.get(page, 0) >= max_attempts:
@@ -1900,28 +2351,65 @@ class MapleStoryAutoBot:
         }.get(page)
         point = None
         action = None
-        if page in {"disconnect", "connect"}:
-            # Both the disconnect confirmation dialog and the account
-            # connection page accept the currently focused action with Enter.
-            # Keeping these pages keyboard-only also avoids unnecessary cursor
-            # recovery on multi-monitor/DPI-scaled remote machines.
-            pass
-        elif page == "world":
-            point = location
-            action = "auto_relogin_select_world"
-        elif page == "channel":
-            point = self._next_auto_relogin_channel_point()
-            point = self._auto_relogin_anchor_adjusted_point(
-                page, point, location
+        click_count = 1
+        click_interval = 0.0
+        ocr_target_cfg = self._auto_relogin_ocr_target_config(page)
+        uses_ocr_target = ocr_target_cfg is not None
+        ocr_action = str(
+            ocr_target_cfg.get("action", "click")
+        ).strip().lower() if uses_ocr_target else None
+        uses_ocr_click = uses_ocr_target and ocr_action == "click"
+        uses_ocr_enter = uses_ocr_target and ocr_action == "enter"
+        uses_ocr_focus_next_enter = uses_ocr_target and \
+            ocr_action == "focus_next_enter"
+        uses_ocr_fixed_click = uses_ocr_target and \
+            ocr_action == "fixed_click"
+        if not uses_ocr_target:
+            self._fail_auto_relogin(
+                f"{page} has no configured Chinese OCR target"
             )
-            action = "auto_relogin_select_channel"
-        elif page == "character":
-            point = location
-            action = "auto_relogin_start_game"
-        else:
             return False
 
-        if page not in {"disconnect", "connect"} and \
+        semantic_point = self._locate_stable_auto_relogin_ocr_target(
+            page, location, frame_token
+        )
+        if semantic_point is None:
+            return False
+        logger.info(
+            f"[auto_relogin] {page} OCR target confirmed at "
+            f"capture={semantic_point}"
+        )
+        if uses_ocr_click:
+            point = semantic_point
+            action = {
+                "connect": "auto_relogin_connect",
+                "world": "auto_relogin_select_world",
+                "character": "auto_relogin_start_game",
+            }.get(page, f"auto_relogin_{page}")
+        elif uses_ocr_fixed_click and page == "channel":
+            point = self._next_auto_relogin_channel_point()
+            action = "auto_relogin_select_channel"
+            click_count = max(
+                1,
+                int(round(self._auto_relogin_number(
+                    "channel_click_count", 1, minimum=1
+                ))),
+            )
+            click_interval = self._auto_relogin_number(
+                "channel_double_click_interval", 0.08, minimum=0.0
+            )
+        elif not uses_ocr_enter and not uses_ocr_focus_next_enter:
+            return False
+
+        if point is not None:
+            click_label = "double-click" if click_count == 2 else \
+                f"{click_count}-click"
+            logger.info(
+                f"[auto_relogin] {page} action point={point}, "
+                f"input={click_label}"
+            )
+
+        if not uses_ocr_enter and not uses_ocr_focus_next_enter and \
                 self.remote_keyboard_target() and \
                 self._auto_relogin_remote_mouse_mode() == "visual_relative":
             return self._begin_auto_relogin_pointer_action(
@@ -1931,12 +2419,23 @@ class MapleStoryAutoBot:
         # A serial timeout can mean the HID command executed but its ACK was
         # lost. Remember dispatch before calling the transport so a page change
         # can never be mistaken for a harmless one-frame false positive.
+        # Consume the two-frame OCR authorization before touching the
+        # transport. A missing ACK must be retried from fresh OCR frames.
+        self._reset_auto_relogin_ocr_gate()
         if self._auto_relogin_dispatch_time(pointer=False) is None:
             return False
         self._auto_relogin_has_attempted_input = True
-        sent = self._send_auto_relogin_key() \
-            if page in {"disconnect", "connect"} else \
-            self._send_auto_relogin_click(point, action)
+        if uses_ocr_enter:
+            sent = self._send_auto_relogin_key()
+        elif uses_ocr_focus_next_enter:
+            sent = self._send_auto_relogin_focus_next_key()
+        else:
+            sent = self._send_auto_relogin_click(
+                point,
+                action,
+                click_count=click_count,
+                click_interval=click_interval,
+            )
         completed_at = time.monotonic()
 
         if not sent:
@@ -1956,6 +2455,7 @@ class MapleStoryAutoBot:
     def _fail_auto_relogin(self, reason):
         """Fail closed after bounded retries while allowing manual recovery."""
         self._auto_relogin_state = "failed"
+        self._reset_auto_relogin_ocr_gate()
         self._reset_auto_relogin_pointer_runtime()
         self._auto_relogin_ready_count = 0
         self._auto_relogin_last_ready_frame_token = None
@@ -2013,7 +2513,7 @@ class MapleStoryAutoBot:
         )
 
     def _check_auto_relogin_screen(self):
-        """Advance the screenshot-confirmed five-page recovery flow.
+        """Advance the Chinese-OCR-confirmed five-page recovery flow.
 
         Returning ``True`` means recovery owns the frame, so gameplay systems
         must remain stopped. Only ``waiting_game`` yields unknown frames to the
@@ -2030,6 +2530,24 @@ class MapleStoryAutoBot:
         frame_token = self._auto_relogin_frame_token(now)
 
         if state == "idle":
+            next_scan_at = getattr(
+                self, "_auto_relogin_next_ocr_scan_at", 0.0
+            )
+            if now < next_scan_at:
+                return False
+            scan_interval = self._auto_relogin_ocr_config().get(
+                "idle_scan_interval", 1.0
+            )
+            try:
+                scan_interval = max(0.1, float(scan_interval))
+            except (TypeError, ValueError):
+                scan_interval = 1.0
+            self._auto_relogin_next_ocr_scan_at = now + scan_interval
+            # Avoid running OCR continuously during ordinary gameplay.  A
+            # missing live minimap is only a cheap trigger; the Chinese OCR
+            # target still provides all recovery-page authorization.
+            if self._auto_relogin_current_gameplay_evidence() is not None:
+                return False
             page, location = self._find_known_auto_relogin_page()
             if page is None or location is None:
                 return False
@@ -2043,6 +2561,17 @@ class MapleStoryAutoBot:
             # Automatic input stays stopped after a bounded failure. Known
             # login pages remain owned by recovery, while an unknown frame is
             # allowed through so manual recovery can prove gameplay readiness.
+            next_scan_at = getattr(
+                self, "_auto_relogin_next_ocr_scan_at", 0.0
+            )
+            if now < next_scan_at:
+                return True
+            self._auto_relogin_next_ocr_scan_at = now + max(
+                0.1,
+                float(self._auto_relogin_ocr_config().get(
+                    "idle_scan_interval", 1.0
+                )),
+            )
             page, _ = self._find_known_auto_relogin_page()
             return page is not None
 
@@ -2160,6 +2689,7 @@ class MapleStoryAutoBot:
         if location is None:
             if frame_token != getattr(
                     self, "_auto_relogin_last_confirm_frame_token", None):
+                self._reset_auto_relogin_ocr_gate()
                 self._auto_relogin_confirm_miss_count = getattr(
                     self, "_auto_relogin_confirm_miss_count", 0
                 ) + 1
@@ -2209,6 +2739,7 @@ class MapleStoryAutoBot:
             page,
             getattr(self, "_auto_relogin_pending_location", location),
             now,
+            frame_token,
         )
         return True
 
@@ -2353,6 +2884,12 @@ class MapleStoryAutoBot:
             )
             return -1
 
+        try:
+            validate_absolute_mouse_config(cfg)
+        except ValueError as exc:
+            logger.error(f"[load_config] {exc}")
+            return -1
+
         auto_relogin_cfg = cfg.get("auto_relogin")
         if auto_relogin_cfg is not None:
             if not isinstance(auto_relogin_cfg, dict):
@@ -2376,6 +2913,13 @@ class MapleStoryAutoBot:
                 "max_step_attempts": (1.0, True),
                 "game_ready_confirm_frames": (1.0, True),
                 "mouse_click_duration": (0.001, False),
+                "connect_enter_retry_delay": (0.0, False),
+                "connect_enter_max_attempts": (1.0, True),
+                "focus_switch_hold": (0.001, False),
+                "focus_switch_settle_delay": (0.0, False),
+                "focus_enter_duration": (0.001, False),
+                "channel_click_count": (1.0, True),
+                "channel_double_click_interval": (0.0, False),
                 "cursor_min_score": (0.0, False),
                 "cursor_uniqueness_margin": (0.0, False),
                 "cursor_mask_erode_pixels": (0.0, True),
@@ -2397,7 +2941,6 @@ class MapleStoryAutoBot:
                 "mouse_page_miss_limit": (1.0, True),
                 "mouse_stall_limit": (1.0, True),
                 "mouse_hover_template_correlation": (0.0, False),
-                "template_threshold": (0.0, False),
             }
             for field_name, (minimum, integer_only) in numeric_fields.items():
                 if field_name not in auto_relogin_cfg:
@@ -2414,16 +2957,6 @@ class MapleStoryAutoBot:
                         f"finite {kind} >= {minimum:g}"
                     )
                     return -1
-            threshold = auto_relogin_cfg.get("template_threshold", 0.03)
-            if isinstance(threshold, bool) or not isinstance(
-                    threshold, (int, float)) or not np.isfinite(threshold) or \
-                    not 0.0 < float(threshold) <= 1.0:
-                logger.error(
-                    "[load_config] auto_relogin.template_threshold must be "
-                    "a finite number in (0, 1]"
-                )
-                return -1
-
             remote_mouse_mode = str(auto_relogin_cfg.get(
                 "remote_mouse_mode", "absolute"
             )).strip().lower()
@@ -2431,6 +2964,16 @@ class MapleStoryAutoBot:
                 logger.error(
                     "[load_config] auto_relogin.remote_mouse_mode must be "
                     "absolute or visual_relative"
+                )
+                return -1
+            if auto_relogin_cfg.get("enable", False) and \
+                    cfg.get("esp32_hid", {}).get("remote_target", False) and \
+                    remote_mouse_mode == "absolute" and not \
+                    has_calibrated_absolute_mouse(cfg):
+                logger.error(
+                    "[load_config] Remote absolute auto_relogin requires "
+                    "capture_frame_is_desktop or magpie_source_rect "
+                    "calibration"
                 )
                 return -1
             bounded_unit_fields = (
@@ -2459,6 +3002,12 @@ class MapleStoryAutoBot:
             if int(auto_relogin_cfg.get("mouse_probe_delta", 8)) > 127:
                 logger.error(
                     "[load_config] auto_relogin.mouse_probe_delta must be <= 127"
+                )
+                return -1
+            if int(auto_relogin_cfg.get("channel_click_count", 1)) > 2:
+                logger.error(
+                    "[load_config] auto_relogin.channel_click_count must be "
+                    "1 or 2"
                 )
                 return -1
 
@@ -2498,50 +3047,197 @@ class MapleStoryAutoBot:
                     ) and 0 <= value[0] < reference_w \
                     and 0 <= value[1] < reference_h
 
-            page_templates = auto_relogin_cfg.get("page_templates")
-            page_regions = auto_relogin_cfg.get("page_search_regions")
             if auto_relogin_cfg.get("enable", False):
-                if not isinstance(page_templates, dict) or any(
-                        not isinstance(page_templates.get(page), str)
-                        or not page_templates[page].strip()
-                        for page in required_pages):
+                ocr_cfg = auto_relogin_cfg.get("ocr", {})
+                if not isinstance(ocr_cfg, dict) or not isinstance(
+                        ocr_cfg.get("enable", False), bool):
                     logger.error(
-                        "[load_config] auto_relogin.page_templates must define "
-                        "non-empty paths for all five recovery pages"
+                        "[load_config] auto_relogin.ocr must be a mapping "
+                        "with a boolean enable value"
                     )
                     return -1
-                if not isinstance(page_regions, dict):
+                if not ocr_cfg.get("enable", False):
                     logger.error(
-                        "[load_config] auto_relogin.page_search_regions must "
-                        "be a mapping"
+                        "[load_config] Enabled auto_relogin requires Chinese "
+                        "OCR; template page detection is not supported"
                     )
                     return -1
-                for page in required_pages:
-                    region = page_regions.get(page)
-                    if not isinstance(region, (list, tuple)) or \
-                            len(region) != 4 or any(
-                                isinstance(coord, bool)
-                                or not isinstance(coord, int)
-                                for coord in region
-                            ) or not (
-                                0 <= region[0] < region[2] <= reference_w
-                                and 0 <= region[1] < region[3] <= reference_h
-                            ):
+                if ocr_cfg.get("enable", False):
+                    idle_scan_interval = ocr_cfg.get(
+                        "idle_scan_interval", 1.0
+                    )
+                    if isinstance(idle_scan_interval, bool) or not isinstance(
+                            idle_scan_interval, (int, float)) or not np.isfinite(
+                                idle_scan_interval
+                            ) or float(idle_scan_interval) < 0.1:
                         logger.error(
-                            "[load_config] auto_relogin.page_search_regions."
-                            f"{page} must be [x0, y0, x1, y1] inside the "
-                            "flow reference frame"
+                            "[load_config] auto_relogin.ocr."
+                            "idle_scan_interval must be a finite number >= 0.1"
                         )
                         return -1
-                confirm_point = auto_relogin_cfg.get(
-                    "disconnect_confirm_point"
-                )
-                if not valid_flow_point(confirm_point):
-                    logger.error(
-                        "[load_config] auto_relogin.disconnect_confirm_point "
-                        "must be [x, y] inside the flow reference frame"
+                    min_score = ocr_cfg.get("min_score", 0.85)
+                    if isinstance(min_score, bool) or not isinstance(
+                            min_score, (int, float)) or not np.isfinite(
+                                min_score
+                            ) or not 0.0 < float(min_score) <= 1.0:
+                        logger.error(
+                            "[load_config] auto_relogin.ocr.min_score must "
+                            "be a finite number in (0, 1]"
+                        )
+                        return -1
+                    box_threshold = ocr_cfg.get("box_threshold", 0.3)
+                    if isinstance(box_threshold, bool) or not isinstance(
+                            box_threshold, (int, float)) or not np.isfinite(
+                                box_threshold
+                            ) or not 0.0 < float(box_threshold) <= 1.0:
+                        logger.error(
+                            "[load_config] auto_relogin.ocr.box_threshold "
+                            "must be a finite number in (0, 1]"
+                        )
+                        return -1
+                    max_frame_age = ocr_cfg.get("max_frame_age", 1.0)
+                    if isinstance(max_frame_age, bool) or not isinstance(
+                            max_frame_age, (int, float)) or not np.isfinite(
+                                max_frame_age
+                            ) or float(max_frame_age) <= 0.0:
+                        logger.error(
+                            "[load_config] auto_relogin.ocr.max_frame_age "
+                            "must be a positive finite number"
+                        )
+                        return -1
+                    ocr_confirm_frames = ocr_cfg.get("confirm_frames", 2)
+                    if isinstance(ocr_confirm_frames, bool) or not isinstance(
+                            ocr_confirm_frames, int) or \
+                            ocr_confirm_frames < 1:
+                        logger.error(
+                            "[load_config] auto_relogin.ocr.confirm_frames "
+                            "must be a positive integer"
+                        )
+                        return -1
+                    center_drift = ocr_cfg.get(
+                        "max_center_drift", (24, 24)
                     )
-                    return -1
+                    if not isinstance(center_drift, (list, tuple)) or \
+                            len(center_drift) != 2 or any(
+                                isinstance(value, bool)
+                                or not isinstance(value, int)
+                                or value < 0
+                                for value in center_drift
+                            ):
+                        logger.error(
+                            "[load_config] auto_relogin.ocr."
+                            "max_center_drift must be [non-negative x, y]"
+                        )
+                        return -1
+                    ocr_targets = ocr_cfg.get("targets")
+                    if not isinstance(ocr_targets, dict) or not ocr_targets:
+                        logger.error(
+                            "[load_config] auto_relogin.ocr.targets must be "
+                            "a non-empty mapping"
+                        )
+                        return -1
+                    missing_targets = required_pages.difference(ocr_targets)
+                    if missing_targets:
+                        logger.error(
+                            "[load_config] auto_relogin.ocr.targets must "
+                            "define all five recovery pages; missing "
+                            f"{sorted(missing_targets)}"
+                        )
+                        return -1
+                    for page, target_cfg in ocr_targets.items():
+                        if page not in required_pages or not isinstance(
+                                target_cfg, dict):
+                            logger.error(
+                                "[load_config] auto_relogin.ocr.targets keys "
+                                "must be recovery pages with mapping values"
+                            )
+                            return -1
+                        target_texts = target_cfg.get("texts")
+                        if not isinstance(target_texts, (list, tuple)) or \
+                                not target_texts or any(
+                                    not isinstance(text, str)
+                                    or not text.strip()
+                                    for text in target_texts
+                                ):
+                            logger.error(
+                                "[load_config] auto_relogin.ocr.targets."
+                                f"{page}.texts must contain non-empty strings"
+                            )
+                            return -1
+                        if any(
+                                not is_chinese_ocr_target(text)
+                                for text in target_texts):
+                            logger.error(
+                                "[load_config] auto_relogin.ocr.targets."
+                                f"{page}.texts must contain Chinese Han text "
+                                "and no Hangul/kana"
+                            )
+                            return -1
+                        if str(target_cfg.get(
+                                "region_source", "configured"
+                                )).strip().lower() != "configured":
+                            logger.error(
+                                "[load_config] auto_relogin.ocr.targets."
+                                f"{page}.region_source must be configured; "
+                                "page templates are disabled"
+                            )
+                            return -1
+                        target_region = target_cfg.get("search_region")
+                        if not isinstance(target_region, (list, tuple)) or \
+                                len(target_region) != 4 or any(
+                                    isinstance(coord, bool)
+                                    or not isinstance(coord, int)
+                                    for coord in target_region
+                                ) or not (
+                                    0 <= target_region[0] < target_region[2]
+                                    <= reference_w
+                                    and 0 <= target_region[1]
+                                    < target_region[3] <= reference_h
+                                ):
+                            logger.error(
+                                "[load_config] auto_relogin.ocr.targets."
+                                f"{page}.search_region must be inside the "
+                                "flow reference frame"
+                            )
+                            return -1
+                        if str(target_cfg.get(
+                                "match_mode", "exact"
+                                )).strip().lower() not in {
+                                    "exact", "contains"
+                                }:
+                            logger.error(
+                                "[load_config] auto_relogin.ocr.targets."
+                                f"{page}.match_mode must be exact or contains"
+                            )
+                            return -1
+                        target_action = str(target_cfg.get(
+                            "action", "click"
+                        )).strip().lower()
+                        if target_action not in {
+                                "click", "enter", "fixed_click",
+                                "focus_next_enter"}:
+                            logger.error(
+                                "[load_config] auto_relogin.ocr.targets."
+                                f"{page}.action must be click, enter, "
+                                "fixed_click, or focus_next_enter"
+                            )
+                            return -1
+                        allowed_actions = {
+                            "disconnect": {"enter"},
+                            "connect": {
+                                "click", "enter", "focus_next_enter"
+                            },
+                            "world": {"click"},
+                            "channel": {"fixed_click"},
+                            "character": {"click"},
+                        }[page]
+                        if target_action not in allowed_actions:
+                            logger.error(
+                                "[load_config] auto_relogin.ocr.targets."
+                                f"{page}.action must be one of "
+                                f"{sorted(allowed_actions)}"
+                            )
+                            return -1
                 channel_points = auto_relogin_cfg.get("channel_points")
                 if not isinstance(channel_points, (list, tuple)) or \
                         not channel_points or any(
@@ -2551,16 +3247,6 @@ class MapleStoryAutoBot:
                     logger.error(
                         "[load_config] auto_relogin.channel_points must be a "
                         "non-empty list of [x, y] points inside the flow frame"
-                    )
-                    return -1
-                page_anchors = auto_relogin_cfg.get("page_anchor_points")
-                if not isinstance(page_anchors, dict) or any(
-                        not valid_flow_point(page_anchors.get(page))
-                        for page in ("disconnect", "channel")
-                        ):
-                    logger.error(
-                        "[load_config] auto_relogin.page_anchor_points must "
-                        "define valid disconnect and channel [x, y] anchors"
                     )
                     return -1
                 if remote_mouse_mode == "visual_relative":
@@ -2700,6 +3386,36 @@ class MapleStoryAutoBot:
                 logger.error(
                     "[load_config] Invalid auto_relogin.remote_confirm_key "
                     f"{remote_confirm_key!r}: {exc}"
+                )
+                return -1
+            focus_switch_keys = auto_relogin_cfg.get(
+                "focus_switch_keys", ("alt", "tab")
+            )
+            if not isinstance(focus_switch_keys, (list, tuple)) or not \
+                    focus_switch_keys or len(focus_switch_keys) > 7 or any(
+                        not isinstance(key, str) or not key.strip()
+                        for key in focus_switch_keys
+                    ):
+                logger.error(
+                    "[load_config] auto_relogin.focus_switch_keys must be a "
+                    "non-empty list of at most seven key names"
+                )
+                return -1
+            try:
+                focus_usages = [
+                    usage_from_text(key.strip()) for key in focus_switch_keys
+                ]
+            except ValueError as exc:
+                logger.error(
+                    "[load_config] Invalid auto_relogin.focus_switch_keys: "
+                    f"{exc}"
+                )
+                return -1
+            if len(set(focus_usages)) != len(focus_usages) or sum(
+                    usage < 0xE0 for usage in focus_usages) > 6:
+                logger.error(
+                    "[load_config] auto_relogin.focus_switch_keys contains "
+                    "duplicate keys or more than six ordinary keys"
                 )
                 return -1
         for field_name in ("min_box_width", "min_box_height"):
@@ -2928,31 +3644,30 @@ class MapleStoryAutoBot:
                 "health, buff, login, and channel workflows are disabled"
             )
         if cfg.get("esp32_hid", {}).get("remote_target", False):
-            # Session recovery has a dedicated foreground-gated remote mouse
-            # path. Legacy multi-window workflows still depend on local window
-            # coordinates and therefore remain unavailable.
+            # Every remote game-UI click is routed through the configured
+            # capture-to-desktop absolute HID transform.
             relogin_mouse_mode = str(cfg.get("auto_relogin", {}).get(
                 "remote_mouse_mode", "absolute"
             )).strip().lower()
+            calibrated = has_calibrated_absolute_mouse(cfg)
             logger.info(
-                "[load_config] Remote HID mode: legacy local-mouse workflows "
-                "are disabled; auto_relogin mouse mode="
-                f"{relogin_mouse_mode}"
+                "[load_config] Remote HID mode: absolute game-UI mouse="
+                f"{'calibrated' if calibrated else 'disabled'}, "
+                f"auto_relogin mouse mode={relogin_mouse_mode}"
             )
-            for section_name in ("channel_change", "scheduled_channel_switching"):
-                section = cfg.get(section_name, {})
-                if section.get("enable", False):
-                    logger.warning(
-                        f"[load_config] Disabled {section_name}.enable: "
-                        "that workflow still requires local window mouse input"
-                    )
-                    section["enable"] = False
-
-            if cfg.get("watchdog", {}).get("last_attack_timeout_action") == "change_channel":
+            if not calibrated:
                 logger.warning(
-                    "[load_config] Watchdog channel changes are unavailable in "
-                    "remote capture-card mode"
+                    "[load_config] Remote absolute game-UI workflows are "
+                    "disabled: esp32_hid.magpie_source_rect is not calibrated"
                 )
+                for section_name in (
+                        "channel_change", "scheduled_channel_switching"):
+                    section = cfg.get(section_name, {})
+                    if section.get("enable", False):
+                        logger.warning(
+                            f"[load_config] Disabled {section_name}.enable"
+                        )
+                        section["enable"] = False
 
         # Parse color code in config
         self.color_code = {
@@ -3163,23 +3878,6 @@ class MapleStoryAutoBot:
         self._auto_relogin_disconnect_cursor_tracker = None
         self._last_auto_relogin_template_geometry = None
         if cfg.get("auto_relogin", {}).get("enable", False):
-            for page, template_path in cfg["auto_relogin"][
-                    "page_templates"].items():
-                if page not in {
-                        "disconnect", "connect", "world", "channel",
-                        "character"}:
-                    continue
-                try:
-                    template = load_image(template_path)
-                except (FileNotFoundError, OSError, ValueError) as exc:
-                    logger.error(
-                        "[load_config] Unable to load auto-relogin template "
-                        f"for {page}: {exc}"
-                    )
-                    return -1
-                self._auto_relogin_template_sources[page] = template.copy()
-                self._auto_relogin_templates[page] = template.copy()
-
             if str(cfg["auto_relogin"].get(
                     "remote_mouse_mode", "absolute"
                     )).strip().lower() == "visual_relative":
@@ -3646,6 +4344,7 @@ class MapleStoryAutoBot:
         if geometry_key == getattr(
                 self, "_last_auto_relogin_template_geometry", None):
             return
+        self._reset_auto_relogin_ocr_gate()
 
         scaled_templates = {}
         for page, source in sources.items():
@@ -3935,27 +4634,23 @@ class MapleStoryAutoBot:
 
     def start_record(self):
         '''
-        Start record
+        Start recording unprocessed capture frames.
         '''
-        # Prepare video writer if need to record
-        if not self.is_show_debug_window:
-            self.enable_viz()
-
         # Make sure video/ exist
         os.makedirs("video", exist_ok=True)
         timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-        path = os.path.join("video", f"{timestamp}.mp4")
+        path = os.path.join("video", f"{timestamp}_raw.mp4")
 
         self._video_record_path = path
         self._video_record_size = None
         self.video_writer = None
-        frame = getattr(self, "img_frame_debug", None)
-        if frame is None:
-            frame = getattr(self, "img_frame", None)
+        frame = getattr(self, "frame", None)
         if frame is not None:
             self._open_video_writer_for_frame(frame)
 
-        logger.info(f"[start_record] Record video to {path}")
+        logger.info(
+            f"[start_record] Record raw capture frames to {path}"
+        )
 
     def _open_video_writer_for_frame(self, frame):
         """Open the pending recorder with the actual current frame size."""
@@ -3972,6 +4667,17 @@ class MapleStoryAutoBot:
         fourcc = cv2.VideoWriter_fourcc(*'mp4v')
         self.video_writer = cv2.VideoWriter(path, fourcc, 10, frame_size)
         self._video_record_size = frame_size
+
+    def _write_raw_video_frame(self, frame):
+        """Write one capture-source frame before pipeline processing."""
+        if getattr(self, "_video_record_path", None) is None or frame is None:
+            return False
+        if getattr(self, "video_writer", None) is None:
+            self._open_video_writer_for_frame(frame)
+        if getattr(self, "video_writer", None) is None:
+            return False
+        self.video_writer.write(frame)
+        return True
 
     def stop_record(self):
         '''
@@ -4307,9 +5013,9 @@ class MapleStoryAutoBot:
         """Classify the tiger hood directly below a fresh smile marker.
 
         The smile provides a unique Hero anchor.  Appearance matching is then
-        restricted to that anchor: a climbing hood enters ladder state and a
-        standing head leaves it.  An inconclusive frame deliberately keeps the
-        previous state instead of falling back to screen-motion heuristics.
+        restricted to that anchor.  A climbing-hood match enters ladder state;
+        every other result is treated as flat ground, so stale climbing state
+        can never survive a fresh non-climbing frame.
         """
         appearance_cfg = self.cfg.get("nametag", {}).get("appearance", {})
         templates = getattr(self, "nametag_appearance_templates", [])
@@ -4322,16 +5028,8 @@ class MapleStoryAutoBot:
             strict_anchor=True,
         )
         match = getattr(self, "last_appearance_match", None)
-        if matched_player is None or not match:
-            return None
-
-        pose = str(match.get("pose", "")).lower()
-        if pose == "climbing":
-            new_state = True
-        elif pose == "standing":
-            new_state = False
-        else:
-            return None
+        pose = str((match or {}).get("pose", "")).lower()
+        new_state = matched_player is not None and pose == "climbing"
 
         previous_state = bool(getattr(self, "is_on_ladder", False))
         self.is_on_ladder = new_state
@@ -4339,18 +5037,25 @@ class MapleStoryAutoBot:
             self._ladder_route_exit_confirmed_at = None
         elif previous_state:
             # Route geometry may be a couple of minimap pixels away from the
-            # physical platform. Only a fresh climbing -> standing transition
+            # physical platform. Only a fresh climbing -> ground transition
             # may authorize handing control from Up/Down to that platform.
             self._ladder_route_exit_confirmed_at = time.monotonic()
         if not new_state:
-            # A fresh standing pose means the character has physically left
-            # the rope/ladder, so platform movement may take over again.
+            # A fresh frame without the climbing hood means the character is
+            # on flat ground, so platform movement may take over again.
             self._reset_ladder_route_hold()
         if previous_state != new_state:
+            if match:
+                evidence = (
+                    f"pose={pose or 'unknown'},"
+                    f"score={float(match['score']):.3f}"
+                )
+            else:
+                evidence = "climbing-template-not-matched"
             logger.info(
                 "[ladder] Smile-anchored tiger pose changed state to "
-                f"{'climbing' if new_state else 'standing'} "
-                f"(score={match['score']:.3f})"
+                f"{'climbing' if new_state else 'ground'} "
+                f"({evidence})"
             )
         return new_state
 
@@ -5489,7 +6194,7 @@ class MapleStoryAutoBot:
 
     def _apply_ladder_route_hold(
             self, color_code_up_down=None, *, allow_restore=True):
-        """Keep the selected vertical direction until a standing pose arrives.
+        """Keep the selected vertical direction until ground is classified.
 
         Route lookup is intentionally local and can miss a vertical pixel for
         one frame near a platform junction. Cache only the dedicated pure
@@ -5548,7 +6253,7 @@ class MapleStoryAutoBot:
         return player_y >= bottom - tolerance
 
     def _has_recent_ladder_route_exit_confirmation(self):
-        """Return True briefly after a visual climbing -> standing change."""
+        """Return True briefly after a visual climbing -> ground change."""
         confirmed_at = getattr(
             self, "_ladder_route_exit_confirmed_at", None
         )
@@ -7996,48 +8701,174 @@ class MapleStoryAutoBot:
         '''
         ensure_is_in_party
         '''
-        if self.is_capture_card_source():
+        remote = self.remote_keyboard_target()
+        if remote and not self.remote_absolute_mouse_calibrated():
+            logger.error(
+                "[ensure_is_in_party] Remote absolute mouse is not calibrated"
+            )
+            return False
+        if self.is_capture_card_source() and not remote:
             logger.info(
                 "[ensure_is_in_party] Disabled for DirectShow capture: no "
                 "local game window is available"
             )
             return False
-        if self.remote_keyboard_target():
-            logger.info(
-                "[ensure_is_in_party] Disabled in remote keyboard-only mode"
+        owns_remote_gate = False
+        party_opened = False
+        workflow_succeeded = False
+        close_succeeded = True
+        if remote:
+            keyboard_controller = getattr(self, "kb", None)
+            if keyboard_controller is None or not hasattr(
+                    keyboard_controller, "suspend_automation_for_game_ui"):
+                logger.error(
+                    "[ensure_is_in_party] Exclusive remote UI input is "
+                    "unavailable"
+                )
+                return False
+            if not getattr(keyboard_controller, "game_ui_active", False):
+                owns_remote_gate = bool(
+                    keyboard_controller.suspend_automation_for_game_ui()
+                )
+                if not owns_remote_gate:
+                    return False
+
+        def press_party_key():
+            key = self.cfg["key"]["party"]
+            if remote:
+                return bool(self.kb.press_game_ui_key(key))
+            return bool(press_key(key))
+
+        try:
+            # Open the party window only after all ordinary gameplay producers
+            # have been stopped on the remote machine.
+            if not press_party_key():
+                return False
+            party_opened = True
+            time.sleep(0.5)
+
+            self.img_frame = self.get_img_frame()
+            loc_enable, score_enable, _ = find_pattern_sqdiff(
+                self.img_frame, self.img_create_party_enable
             )
-            return False
 
-        # open party window
-        press_key(self.cfg["key"]["party"])
+            lang = self.cfg["system"]["language"]
+            thres = self.cfg['party_red_bar'][
+                f'create_party_button_{lang}_thres'
+            ]
+            if score_enable < thres:
+                logger.info(
+                    "[ensure_is_in_party] Find party enable button("
+                    f"{round(score_enable, 2)})"
+                )
+                h, w = self.img_create_party_enable.shape[:2]
+                point = (
+                    loc_enable[0] + w // 2,
+                    loc_enable[1] + h // 2,
+                )
+                if not remote:
+                    point = (
+                        point[0],
+                        point[1] + int(self.cfg["game_window"].get(
+                            "title_bar_height", 0
+                        )),
+                    )
+                if not self.click_game_ui(
+                    point,
+                    "ensure_is_in_party",
+                ):
+                    return False
+            else:
+                logger.info(
+                    "[ensure_is_in_party] Cannot find create party button. "
+                    "Maybe player already in party."
+                )
+            workflow_succeeded = True
+        finally:
+            if party_opened:
+                close_succeeded = press_party_key()
+            if not close_succeeded and hasattr(self.kb, "disable"):
+                # Never resume combat while the party dialog may still own
+                # keyboard focus after a failed close command.
+                self.kb.disable()
+            elif remote and owns_remote_gate and not workflow_succeeded and \
+                    hasattr(self.kb, "disable"):
+                # A standalone remote party workflow must also fail closed if
+                # its open/click stage was rejected, even when the close TAP
+                # succeeded. A nested channel workflow is guarded by its owner.
+                self.kb.disable()
+            if owns_remote_gate:
+                self.kb.resume_automation_after_game_ui()
+        return workflow_succeeded and close_succeeded
 
-        # Wait party window to show up
-        time.sleep(0.5)
+    def _wait_for_channel_gameplay_ready(self):
+        """Wait for consecutive fresh minimap/player evidence after login."""
+        channel_cfg = self.cfg.get("channel_change", {})
 
-        # Update image frame
-        self.img_frame = self.get_img_frame()
+        def positive_number(name, default, minimum):
+            try:
+                value = float(channel_cfg.get(name, default))
+            except (TypeError, ValueError, OverflowError):
+                value = float(default)
+            if not math.isfinite(value):
+                value = float(default)
+            return max(float(minimum), value)
 
-        # Find the 'create party' button
-        loc_enable, score_enable, _ = find_pattern_sqdiff(
-                        self.img_frame, self.img_create_party_enable)
+        timeout = positive_number("game_ready_timeout", 60.0, 1.0)
+        poll_interval = positive_number(
+            "game_ready_poll_interval", 1.0, 0.05
+        )
+        required_frames = max(
+            1,
+            int(round(positive_number(
+                "game_ready_confirm_frames", 2.0, 1.0
+            ))),
+        )
+        deadline = time.monotonic() + timeout
+        ready_count = 0
+        last_frame_token = object()
 
-        lang = self.cfg["system"]["language"]
-        thres = self.cfg['party_red_bar'][f'create_party_button_{lang}_thres']
-        if score_enable < thres:
-            logger.info(f"[ensure_is_in_party] Find party enable button({round(score_enable, 2)})")
-            h, w = self.img_create_party_enable.shape[:2]
-            self.click_game_ui(
-                (loc_enable[0] + w // 2,
-                 loc_enable[1] + h // 2 + self.cfg['game_window']['title_bar_height']),
-                "ensure_is_in_party",
-            )
-        else:
-            logger.info("[ensure_is_in_party] Cannot find create party button."
-                        "Maybe player already in party.")
+        while not self.is_terminated:
+            if time.monotonic() >= deadline:
+                logger.error(
+                    "[channel_change] Timed out waiting for gameplay evidence"
+                )
+                return False
+            try:
+                self.img_frame = self.get_img_frame()
+                frame_token = getattr(
+                    self, "_current_capture_frame_token", None
+                )
+                if frame_token is None:
+                    # A cached frame without a capture timestamp cannot prove
+                    # that gameplay survived another independent observation.
+                    ready_count = 0
+                    time.sleep(poll_interval)
+                    continue
+                if frame_token == last_frame_token:
+                    time.sleep(poll_interval)
+                    continue
+                last_frame_token = frame_token
 
-        # close party window
-        press_key(self.cfg["key"]["party"])
-        return True
+                if self._auto_relogin_current_gameplay_evidence() is None:
+                    ready_count = 0
+                else:
+                    ready_count += 1
+                    if ready_count >= required_frames:
+                        logger.info(
+                            "[channel_change] Gameplay evidence confirmed"
+                        )
+                        return True
+            except Exception as exc:
+                ready_count = 0
+                logger.warning(
+                    "[channel_change] Gameplay readiness check failed: "
+                    f"{exc}"
+                )
+            time.sleep(poll_interval)
+
+        logger.info("[channel_change] Cancelled during shutdown")
+        return False
 
     def channel_change(self):
         '''
@@ -8045,73 +8876,154 @@ class MapleStoryAutoBot:
         '''
         logger.info("[channel_change] Start")
 
-        if self.is_capture_card_source():
+        remote = self.remote_keyboard_target()
+        if remote and not self.remote_absolute_mouse_calibrated():
+            logger.error(
+                "[channel_change] Remote absolute mouse is not calibrated"
+            )
+            return False
+        if self.is_capture_card_source() and not remote:
             logger.error(
                 "[channel_change] Disabled for DirectShow capture: no local "
                 "game window is available"
             )
             return False
-        if self.remote_keyboard_target():
-            logger.error(
-                "[channel_change] Disabled in capture-card mode: changing "
-                "channels requires mouse HID support on game computer B"
+        owns_remote_gate = False
+        workflow_succeeded = False
+        if remote:
+            keyboard_controller = getattr(self, "kb", None)
+            if keyboard_controller is None or not hasattr(
+                    keyboard_controller, "suspend_automation_for_game_ui"):
+                logger.error(
+                    "[channel_change] Exclusive remote UI input is unavailable"
+                )
+                return False
+            owns_remote_gate = bool(
+                keyboard_controller.suspend_automation_for_game_ui()
             )
-            return False
+            if not owns_remote_gate:
+                return False
 
-        window_title = self.capture.window_title
-        ui_coords = self.cfg["ui_coords"]
-        click_in_game_window(window_title, ui_coords["menu"])
-        time.sleep(1)
-        click_in_game_window(window_title, ui_coords["channel"])
-        time.sleep(1)
-        click_in_game_window(window_title, ui_coords["random_channel"])
-        time.sleep(1)
-        click_in_game_window(window_title, ui_coords["random_channel_confirm"])
-        time.sleep(1)
+        try:
+            ui_coords = self.cfg["ui_coords"]
+            for name, delay in (
+                    ("menu", 1),
+                    ("channel", 1),
+                    ("random_channel", 1),
+                    ("random_channel_confirm", 1)):
+                point = self._configured_remote_ui_capture_point(name) \
+                    if remote else ui_coords[name]
+                if not self.click_game_ui(
+                        point, f"channel_change_{name}"):
+                    return False
+                time.sleep(delay)
 
-        loc_login_button = None
-        while loc_login_button is None and not self.is_terminated:
             try:
-                self.img_frame = self.get_img_frame()
-                loc_login_button = self.get_login_button_location()
-                if loc_login_button is None:
-                    logger.info("Waiting for login button to show up...")
-            except Exception as e:
-                logger.warning(f"Exception occurred while waiting for login button: {e}")
-                if not is_mac() and self.cfg["game_window"].get("auto_resize", True):
-                    resize_window(
-                        window_title,
-                        width=self.cfg["game_window"].get("resize_width", 1296),
-                        height=self.cfg["game_window"].get("resize_height", 759),
+                ui_timeout = float(self.cfg.get(
+                    "channel_change", {}
+                ).get("ui_timeout", 60.0))
+            except (TypeError, ValueError, OverflowError):
+                ui_timeout = 60.0
+            ui_deadline = time.monotonic() + max(1.0, ui_timeout)
+            loc_login_button = None
+            while loc_login_button is None and not self.is_terminated:
+                if time.monotonic() >= ui_deadline:
+                    logger.error(
+                        "[channel_change] Timed out waiting for login button"
                     )
-                logger.info("Retrying login button detection...")
+                    return False
+                try:
+                    self.img_frame = self.get_img_frame()
+                    loc_login_button = self.get_login_button_location()
+                    if loc_login_button is None:
+                        logger.info("Waiting for login button to show up...")
+                except Exception as exc:
+                    logger.warning(
+                        "Exception occurred while waiting for login button: "
+                        f"{exc}"
+                    )
+                    if not remote and not is_mac() and self.cfg[
+                            "game_window"].get("auto_resize", True):
+                        resize_window(
+                            self.capture.window_title,
+                            width=self.cfg["game_window"].get(
+                                "resize_width", 1296
+                            ),
+                            height=self.cfg["game_window"].get(
+                                "resize_height", 759
+                            ),
+                        )
+                    logger.info("Retrying login button detection...")
+                time.sleep(3)
 
+            if self.is_terminated:
+                logger.info("[channel_change] Cancelled during shutdown")
+                return False
+
+            logger.info(f"login_button button found: {loc_login_button}")
             time.sleep(3)
+            login_click_point = loc_login_button
+            if not remote:
+                login_click_point = (
+                    int(loc_login_button[0]),
+                    int(loc_login_button[1]) + int(
+                        self.cfg["game_window"].get(
+                            "title_bar_height", 0
+                        )
+                    ),
+                )
+            if not self.click_game_ui(
+                    login_click_point, "channel_change_login"):
+                return False
+            time.sleep(2)
+            select_character_point = \
+                self._configured_remote_ui_capture_point(
+                    "select_character"
+                ) if remote else ui_coords["select_character"]
+            if not self.click_game_ui(
+                    select_character_point,
+                    "channel_change_select_character"):
+                return False
+            time.sleep(5)
 
-        if self.is_terminated:
-            logger.info("[channel_change] Cancelled during shutdown")
-            return False
+            if remote:
+                # Keep the exclusive remote gate across loading and party UI
+                # cleanup. Reopening it here lets background buffs race with
+                # the login screen before ensure_is_in_party owns the gate.
+                if not self._wait_for_channel_gameplay_ready():
+                    return False
+                self.kb.set_command("none none none")
+                self.kb.release_all_key()
+                if not self.ensure_is_in_party():
+                    logger.error(
+                        "[channel_change] Party UI cleanup failed; gameplay "
+                        "remains paused"
+                    )
+                    return False
 
-        logger.info(f"login_button button found: {loc_login_button}")
+            workflow_succeeded = True
+        finally:
+            if owns_remote_gate:
+                if not workflow_succeeded:
+                    # A partially completed menu workflow must not resume
+                    # movement or attacks into an unknown screen.
+                    self.kb.disable()
+                self.kb.resume_automation_after_game_ui()
 
-        time.sleep(3)  # wait the screen to be brighter
-
-        # Click login button
-        click_in_game_window(window_title, loc_login_button)
-        time.sleep(2)
-
-        # Click "Select Character"
-        click_in_game_window(window_title, ui_coords["select_character"])
-        time.sleep(5)
-
-        self.kb.enable()
-        self.kb.set_command("none none none")
-        self.kb.release_all_key()
-
-        self.ensure_is_in_party() # Make sure player is in party
+        if not remote:
+            self.kb.enable()
+            self.kb.set_command("none none none")
+            self.kb.release_all_key()
+            if not self.ensure_is_in_party():
+                logger.error(
+                    "[channel_change] Party UI cleanup failed; gameplay "
+                    "remains paused"
+                )
+                self.kb.disable()
+                return False
 
         self.fsm.set_init_state("hunting")
-        self.t_last_attack = time.time() # Update timer
+        self.t_last_attack = time.time()
         return True
 
     def _stop_components(self):
@@ -8347,7 +9259,7 @@ class MapleStoryAutoBot:
                 f"score({score})"
             )
             return (x0 + loc[0] + w // 2,
-                    y0 + loc[1] + h // 2 + self.cfg['game_window']['title_bar_height'])
+                    y0 + loc[1] + h // 2)
         else:
             return None
 
@@ -8448,10 +9360,10 @@ class MapleStoryAutoBot:
             )
         )
         if vertical_destination_reached:
-            # The visual standing transition is the physical arrival signal;
+            # The visual ground transition is the physical arrival signal;
             # route geometry only selects the adjacent platform afterwards.
             logger.info(
-                "[ladder] Standing pose confirmed at route endpoint; "
+                "[ladder] Ground state confirmed at route endpoint; "
                 "platform route resumed"
             )
             self._reset_ladder_route_hold()
@@ -8812,6 +9724,11 @@ class MapleStoryAutoBot:
         else:
             self.img_frame = img_frame
 
+        # F3 records the exact capture snapshot held in ``self.frame``. This
+        # happens before OCR, cropping, resizing, or debug overlays and also
+        # covers login/recovery frames that return early later in this method.
+        self._write_raw_video_frame(getattr(self, "frame", None))
+
         # If recovery was already active, its dedicated keyboard gate prevents
         # ordinary gameplay input, so a newly restored capture can be reopened
         # immediately. On the first login frame, defer reopening until after
@@ -9052,7 +9969,8 @@ class MapleStoryAutoBot:
             self.is_need_change_channel(loc_other_players):
             self.kb.set_command("none none none")
             self.kb.release_all_key()
-            self.kb.disable()
+            if not self.remote_keyboard_target():
+                self.kb.disable()
             time.sleep(1)
             self.channel_change()
             self.red_dot_center_prev = None
@@ -9062,7 +9980,8 @@ class MapleStoryAutoBot:
             self.is_time_to_change_channel():
             self.kb.set_command("none none none")
             self.kb.release_all_key()
-            self.kb.disable()
+            if not self.remote_keyboard_target():
+                self.kb.disable()
             time.sleep(1)
             self.channel_change()
             return 0
@@ -9079,12 +9998,12 @@ class MapleStoryAutoBot:
             cfg_action = self.cfg["watchdog"]["last_attack_timeout_action"]
             if cfg_action == "change_channel":
                 logger.info("[Attack Timeout] Change channel!")
-                if self.remote_keyboard_target():
+                if self.remote_keyboard_target() and not \
+                        self.remote_absolute_mouse_calibrated():
                     logger.warning(
-                        "[Attack Timeout] Skipped channel change: the remote "
-                        "ESP32 firmware does not provide mouse HID"
+                        "[Attack Timeout] Skipped channel change: remote "
+                        "absolute mouse is not calibrated"
                     )
-                    # Do not retry an unavailable mouse operation every frame.
                     self.t_last_attack = time.time()
                 else:
                     self.channel_change()
@@ -9124,13 +10043,6 @@ class MapleStoryAutoBot:
 
         # Print text on debug image
         self.update_info_on_img_frame_debug()
-
-        # Save debug window to video
-        if getattr(self, "_video_record_path", None) is not None and \
-                self.video_writer is None:
-            self._open_video_writer_for_frame(self.img_frame_debug)
-        if self.video_writer:
-            self.video_writer.write(self.img_frame_debug)
 
         # Resize img_route_debug for better visualization
         if self.cfg["bot"]["mode"] == "normal":

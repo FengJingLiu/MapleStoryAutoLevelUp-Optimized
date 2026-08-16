@@ -267,6 +267,20 @@ def test_keeps_minimap_route_and_route_jump_logic_in_map_time_coordinates():
     assert scaled["minimap"] == cfg["minimap"]
 
 
+def test_keeps_absolute_mouse_rectangles_in_remote_desktop_coordinates():
+    cfg = {
+        "game_window": {"coordinate_reference_size": [700, 1296]},
+        "esp32_hid": {
+            "absolute_desktop_rect": [0, 0, 3840, 2160],
+            "magpie_source_rect": [1235, 721, 1366, 768],
+        },
+    }
+
+    scaled = scale_runtime_pixel_config(cfg, [1400, 3888])
+
+    assert scaled["esp32_hid"] == cfg["esp32_hid"]
+
+
 def test_uses_legacy_reference_by_default_and_accepts_partial_config():
     cfg = {"aoe_skill": {"range_x": 1296, "range_y": 700}}
 
@@ -435,3 +449,33 @@ def test_video_writer_uses_current_frame_width_and_height():
     )
     assert bot.video_writer is writer
     assert bot._video_record_size == (3579, 2013)
+
+
+def test_start_record_uses_unprocessed_capture_frame_without_enabling_viz():
+    bot = MapleStoryAutoBot.__new__(MapleStoryAutoBot)
+    raw = np.zeros((2160, 3840, 3), dtype=np.uint8)
+    bot.frame = raw
+    bot.img_frame = np.ones((700, 1296, 3), dtype=np.uint8)
+    bot.img_frame_debug = np.full((700, 1296, 3), 2, dtype=np.uint8)
+    bot.enable_viz = Mock()
+    bot._open_video_writer_for_frame = Mock()
+
+    with patch("src.engine.MapleStoryAutoLevelUp.os.makedirs"):
+        bot.start_record()
+
+    bot.enable_viz.assert_not_called()
+    bot._open_video_writer_for_frame.assert_called_once_with(raw)
+    assert bot._video_record_path.endswith("_raw.mp4")
+
+
+def test_raw_video_writer_receives_capture_frame_unchanged():
+    bot = MapleStoryAutoBot.__new__(MapleStoryAutoBot)
+    raw = np.arange(4 * 8 * 3, dtype=np.uint8).reshape(4, 8, 3)
+    writer = Mock()
+    bot._video_record_path = "video/raw.mp4"
+    bot._video_record_size = (8, 4)
+    bot.video_writer = writer
+
+    assert bot._write_raw_video_frame(raw)
+
+    writer.write.assert_called_once_with(raw)

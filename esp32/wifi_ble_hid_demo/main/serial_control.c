@@ -385,9 +385,13 @@ static command_result_t handle_command(char *line)
             ++count;
         }
 
-        esp_err_t err = count == 0
-                            ? ble_keyboard_release_all()
-                            : ble_keyboard_set_state(usages, count);
+        /*
+         * STATE replaces keyboard state only.  Treating an empty STATE as
+         * RELEASE_ALL also re-emitted the last absolute mouse report, so the
+         * normal movement/attack loop could keep pulling the pointer back to
+         * the most recent MOUSE_CLICK_AT position.
+         */
+        esp_err_t err = ble_keyboard_set_state(usages, count);
         if (err != ESP_OK) {
             (void)send_error_for_hid_result(err);
             return COMMAND_REJECTED;

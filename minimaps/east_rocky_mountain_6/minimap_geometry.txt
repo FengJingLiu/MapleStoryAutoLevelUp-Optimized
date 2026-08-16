@@ -1,9 +1,9 @@
 # MapleStoryAutoLevelUp minimap capture geometry
 # minimap_rect is the border-free interior: x, y, width, height
 version=1
-frame_height=2013
-frame_width=3579
-x=19
-y=189
-width=318
-height=245
+frame_height=2160
+frame_width=3840
+x=20
+y=203
+width=341
+height=262

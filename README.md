@@ -169,40 +169,26 @@ the ESP32 connection for detection-only debugging. With `remote_target: True`,
 computer A's foreground window is intentionally ignored because MapleStory is
 assumed to stay in front on B. Pausing, disconnecting, and exiting release every
 held key; stale capture video also suspends input until fresh frames return.
-General remote mouse workflows such as party-window handling, in-game channel
-switching, and local window activation remain disabled. Session recovery is a
-scoped exception: after each page has been visually confirmed, it locates the
-  captured hand cursor and uses small relative ESP32 `MOUSE_MOVE` steps. Before
-  any click, a probe/steering move must produce a fresh captured cursor motion
-  in the commanded direction; a static cursor-like UI sprite is never enough.
-  Only two consecutive aligned frames may then issue a current-position
-  `MOUSE_CLICK`. It does not require `MOUSE_ABS=1`. The
-configured five-step flow is:
+Session recovery is a scoped remote-input exception. Every page is authorized
+by stable Chinese RapidOCR results, and game UI clicks use calibrated absolute
+ESP32 HID coordinates mapped from the GC573 4K frame back into Magpie's source
+window. The configured five-step flow is:
 
 1. Match the disconnect dialog, then send `Enter`.
-2. Match the connection page, then send `Enter`.
-3. Match the world page, then click the center of the **Piaopiao Pig** template.
-4. Match the channel page, then choose one of the configured 20 channel points
-   at random.
-5. Match the character page, then click the center of the **Start Game**
-   template.
+2. Match the connection page, send `Alt+Tab` to focus the already-running
+   `launcher3.0` window, then send `Enter`.
+3. Match exact world text `4.漂漂猪`, then click its OCR center.
+4. Match the unnumbered `漂漂猪` channel-panel marker, then double-click one of
+   the configured 20 channel points at random.
+5. Match exact character-page text `开始游戏`, then click its OCR center.
 
 Gameplay control resumes only after fresh minimap player dots are confirmed in
-consecutive frames. Each action is gated by its own page template; if the next
-page or fresh gameplay evidence does not appear before its timeout, recovery
-fails closed and leaves gameplay input suspended for manual recovery. The
-configuration now uses the DirectShow 4K reference
-(`flow_template_reference_size: [2160, 3840]`, height then width), but the
-bundled PNG files remain legacy assets. `auto_relogin.enable` therefore stays
-`False` until the listed templates, cursor hotspots, coordinates, and page
-anchors have been recorded again from native 4K frames. Page overlays are
-classified before acting (including channel-over-world and modal disconnect
-priority), while fixed channel points follow the current matched page anchor.
-Weak/ambiguous cursor matches, stale frames, page loss, capture resizing,
-movement stalls, and all timeouts fail closed
-without clicking. This flow recovers an already authenticated session; it does
-not enter credentials or handle launchers, CAPTCHA, two-factor prompts, or
-unexpected pages. Firmware and setup instructions are in `esp32/README.md`.
+consecutive frames. Missing or ambiguous OCR, stale frames, failed HID sends,
+and all timeouts fail closed and leave gameplay input suspended for manual
+recovery. This flow recovers an already authenticated session and can focus the
+known running launcher, but it does not enter credentials or handle CAPTCHA,
+two-factor prompts, launcher updates, or unexpected pages. Firmware and setup
+instructions are in `esp32/README.md`.
 
 DirectShow has no clickable desktop window, and computer A's desktop position
 is not used for remote clicks. Game-PC scaling may change how far one relative

@@ -44,10 +44,11 @@ py ..\tools\esp32_hid_sender.py --serial-port COM6 mouse-click-at 16384 16384 le
 py ..\tools\esp32_hid_sender.py --serial-port COM6 scroll -3
 ```
 
-`MOUSE_ABS=1` is required only for the manual `MOUSE_CLICK_AT` command or the
-explicit legacy absolute recovery mode. Default visual-relative session
-recovery uses `MOUSE_MOVE` plus current-position `MOUSE_CLICK`. Without a
-subcommand, the sender starts an interactive prompt.
+`MOUSE_ABS=1` is required for `MOUSE_CLICK_AT` and for calibrated game-UI
+clicks. The current machine selects absolute session recovery in
+`config_custom.yaml`. The visual-relative path remains available as an
+explicit compatibility fallback. Without a subcommand, the sender starts an
+interactive prompt.
 
 ## Protocol and safety
 
@@ -69,7 +70,19 @@ Taps, relative moves, and mouse clicks are one-shot commands: the client never
 replays one after an uncertain ACK and sends only the idempotent `RELEASE_ALL`
 cleanup instead. Relative movement is re-observed from the next capture frame.
 
-The PotPlayer window's monitor on computer A does not affect visual-relative
-recovery. Manual absolute HID coordinates still map according to computer B's
-Windows display topology and should not be derived directly from a PotPlayer
-capture frame.
+Absolute HID coordinates map to computer B's physical Windows desktop. The
+GC573 frame contains Magpie's fullscreen 3840x2160 output, but Magpie forwards
+pointer input through the original 1366x768 source client. Recovery therefore
+maps capture pixels back into that physical source rectangle before
+normalization to `0..32767`:
+
+```yaml
+esp32_hid:
+  capture_frame_is_desktop: false
+  absolute_desktop_rect: [0, 0, 3840, 2160]
+  magpie_source_rect: [1235, 721, 1366, 768]
+```
+
+Recalibrate `magpie_source_rect` whenever the source game window moves or
+resizes. The rectangle belongs to computer B's physical desktop; never derive
+it from the PotPlayer window position on computer A.

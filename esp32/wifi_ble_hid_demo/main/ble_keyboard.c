@@ -615,17 +615,23 @@ esp_err_t ble_keyboard_release_all(void)
     }
 
     xSemaphoreTake(s_report_mutex, portMAX_DELAY);
+    const bool relative_mouse_release_required = s_mouse_buttons != 0;
+    const bool absolute_mouse_release_required =
+        s_absolute_mouse_position_valid &&
+        (s_mouse_buttons != 0 || s_absolute_mouse_release_pending);
     s_modifier = 0;
     memset(s_keys, 0, sizeof(s_keys));
     s_mouse_buttons = 0;
     esp_err_t err = ESP_OK;
     if (ready_unlocked()) {
         err = send_report_locked();
-        esp_err_t mouse_err = send_mouse_report_locked(0, 0, 0);
-        if (err == ESP_OK) {
-            err = mouse_err;
+        if (relative_mouse_release_required) {
+            esp_err_t mouse_err = send_mouse_report_locked(0, 0, 0);
+            if (err == ESP_OK) {
+                err = mouse_err;
+            }
         }
-        if (s_absolute_mouse_position_valid) {
+        if (absolute_mouse_release_required) {
             esp_err_t absolute_mouse_err = send_absolute_mouse_report_locked();
             if (err == ESP_OK) {
                 err = absolute_mouse_err;

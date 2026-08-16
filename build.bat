@@ -3,5 +3,6 @@ pyinstaller --noconsole --onefile src/main.py -p . ^
   --hidden-import=pkg_resources.py2_warn ^
   --hidden-import=pkg_resources.extern ^
   --collect-submodules serial ^
+  --additional-hooks-dir=pyinstaller_hooks ^
   --collect-all ultralytics ^
   --add-data "models\yolo\mob_1024_best.pt;models\yolo"

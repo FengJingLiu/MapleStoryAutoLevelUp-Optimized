@@ -13,6 +13,9 @@ CONFIG_BT_NIMBLE_SVC_HID_MAX_INSTANCES=1
 CONFIG_BT_NIMBLE_SVC_HID_MAX_RPTS=4
 CONFIG_FREERTOS_HZ=1000
 
+# BLE/HID initialization exceeds the ESP-IDF default app_main stack on ESP32-S3.
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
+
 # Keep application logs on UART0. USB Serial/JTAG is reserved for the command
 # protocol so responses never mix with ESP-IDF log lines.
 CONFIG_ESP_CONSOLE_UART_DEFAULT=y

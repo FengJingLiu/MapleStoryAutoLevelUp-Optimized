@@ -77,6 +77,8 @@ class KeyboardControllerEsp32RoutingTests(unittest.TestCase):
         controller.capture_available = True
         controller.is_terminated = False
         controller.session_recovery_active = False
+        controller.game_ui_active = False
+        controller.cfg = {}
         controller.is_need_force_heal = True
         controller.cmd_left_right = "left"
         controller.cmd_up_down = "up"
@@ -136,6 +138,46 @@ class KeyboardControllerEsp32RoutingTests(unittest.TestCase):
 
         controller_module._input_client.tap.assert_not_called()
 
+    def test_session_recovery_focuses_next_window_before_enter(self):
+        controller = self.make_session_recovery_controller()
+        controller.session_recovery_active = True
+
+        with patch.object(controller_module.time, "sleep") as sleep:
+            self.assertTrue(
+                controller.focus_next_window_and_press_session_recovery_key(
+                    "enter",
+                    focus_keys=["alt", "tab"],
+                    focus_hold=0.10,
+                    settle_delay=0.50,
+                    duration=0.10,
+                )
+            )
+
+        controller_module._input_client.set_state.assert_called_once_with(
+            ("alt", "tab")
+        )
+        controller_module._input_client.release_all.assert_called_once_with()
+        controller_module._input_client.tap.assert_called_once_with(
+            "enter", 100
+        )
+        self.assertEqual(sleep.call_args_list, [call(0.10), call(0.50)])
+
+    def test_failed_focus_switch_releases_keys_and_never_sends_enter(self):
+        controller = self.make_session_recovery_controller()
+        controller.session_recovery_active = True
+        controller_module._input_client.set_state.side_effect = RuntimeError(
+            "ERR INVALID_KEY_OR_ARGUMENT"
+        )
+
+        self.assertFalse(
+            controller.focus_next_window_and_press_session_recovery_key(
+                "enter"
+            )
+        )
+
+        controller_module._input_client.release_all.assert_called_once_with()
+        controller_module._input_client.tap.assert_not_called()
+
     def test_session_recovery_click_normalizes_capture_point(self):
         controller = self.make_session_recovery_controller()
         controller.session_recovery_active = True
@@ -160,6 +202,94 @@ class KeyboardControllerEsp32RoutingTests(unittest.TestCase):
             "left",
             50,
         )
+
+    def test_session_recovery_click_applies_calibrated_magpie_geometry(self):
+        controller = self.make_session_recovery_controller()
+        controller.session_recovery_active = True
+        controller.cfg = {
+            "esp32_hid": {
+                "absolute_desktop_rect": [0, 0, 3840, 2160],
+                "magpie_source_rect": [1235, 721, 1366, 768],
+            }
+        }
+        controller_module._input_client.mouse_click_at.return_value = (
+            "OK MOUSE_CLICK_AT 18129 17408 0x01 50ms"
+        )
+
+        self.assertTrue(controller.click_session_recovery_point(
+            2500, 1200, 3840, 2160
+        ))
+
+        controller_module._input_client.mouse_click_at.assert_called_once_with(
+            18129,
+            17408,
+            "left",
+            50,
+        )
+
+    def test_calibrated_absolute_geometry_preserves_frame_endpoints(self):
+        cfg = {
+            "esp32_hid": {
+                "absolute_desktop_rect": [0, 0, 3840, 2160],
+                "magpie_source_rect": [1235, 721, 1366, 768],
+            }
+        }
+
+        self.assertEqual(
+            controller_module.capture_point_to_absolute_hid(
+                cfg, 0, 0, 3840, 2160
+            ),
+            (10541, 10943),
+        )
+        self.assertEqual(
+            controller_module.capture_point_to_absolute_hid(
+                cfg, 3839, 2159, 3840, 2160
+            ),
+            (22192, 22583),
+        )
+        self.assertEqual(
+            controller_module.capture_point_to_absolute_hid(
+                cfg, 2200, 800, 3840, 2160
+            ),
+            (17216, 15253),
+        )
+        self.assertEqual(
+            controller_module.capture_point_to_absolute_hid(
+                cfg, 3000, 1500, 3840, 2160
+            ),
+            (19648, 19032),
+        )
+
+    def test_invalid_magpie_geometry_fails_closed_before_hid_send(self):
+        controller = self.make_session_recovery_controller()
+        controller.session_recovery_active = True
+        invalid_sections = (
+            {
+                "absolute_desktop_rect": [0, 0, 3840, 2160],
+                "magpie_source_rect": [1235, 721, 0, 768],
+            },
+            {
+                "absolute_desktop_rect": [0, 0, 3840, 2160],
+                "magpie_source_rect": [3000, 721, 1366, 768],
+            },
+            {
+                "absolute_desktop_rect": [0, 0, 3840, 2160],
+                "magpie_source_rect": [1235, 721, True, 768],
+            },
+            {
+                "magpie_source_rect": [1235, 721, 1366, 768],
+            },
+        )
+        for section in invalid_sections:
+            with self.subTest(section=section):
+                controller.cfg = {"esp32_hid": section}
+                controller_module._input_client.reset_mock()
+
+                self.assertFalse(controller.click_session_recovery_point(
+                    2500, 1200, 3840, 2160
+                ))
+
+                controller_module._input_client.mouse_click_at.assert_not_called()
 
     def test_session_recovery_click_is_consumed_when_ack_is_uncertain(self):
         controller = self.make_session_recovery_controller()
@@ -277,6 +407,100 @@ class KeyboardControllerEsp32RoutingTests(unittest.TestCase):
 
         controller_module._input_client.mouse_move.assert_not_called()
         controller_module._input_client.mouse_click.assert_not_called()
+
+    def test_exclusive_game_ui_gate_allows_only_explicit_absolute_input(self):
+        controller_module._input_allowed.set()
+        controller = self.make_session_recovery_controller()
+        controller.cfg = {
+            "esp32_hid": {
+                "absolute_desktop_rect": [0, 0, 3840, 2160],
+                "magpie_source_rect": [1235, 721, 1366, 768],
+            }
+        }
+        controller_module._input_client.mouse_click_at.return_value = (
+            "OK MOUSE_CLICK_AT 18129 17408 0x01 50ms"
+        )
+
+        self.assertTrue(controller.suspend_automation_for_game_ui())
+        self.assertTrue(controller.game_ui_active)
+        self.assertFalse(controller_module._input_allowed.is_set())
+        self.assertFalse(controller_module.press_key("left"))
+        self.assertTrue(controller.press_game_ui_key("p"))
+        self.assertTrue(controller.click_game_ui_point(
+            2500, 1200, 3840, 2160
+        ))
+
+        controller_module._input_client.tap.assert_called_once_with("p", 50)
+        controller_module._input_client.mouse_click_at.assert_called_once_with(
+            18129, 17408, "left", 50
+        )
+        self.assertTrue(controller.resume_automation_after_game_ui())
+        self.assertFalse(controller.game_ui_active)
+        self.assertTrue(controller_module._input_allowed.is_set())
+
+    def test_game_ui_absolute_click_requires_exclusive_gate(self):
+        controller = self.make_session_recovery_controller()
+
+        self.assertFalse(controller.click_game_ui_point(
+            100, 200, 3840, 2160
+        ))
+        self.assertFalse(controller.press_game_ui_key("p"))
+
+        controller_module._input_client.mouse_click_at.assert_not_called()
+        controller_module._input_client.tap.assert_not_called()
+
+    def test_uncertain_game_ui_ack_stops_fixed_sequence(self):
+        controller = self.make_session_recovery_controller()
+        controller.game_ui_active = True
+        controller_module._input_client.tap.side_effect = (
+            Esp32HidTapUncertainError("tap response lost")
+        )
+        controller_module._input_client.mouse_click_at.side_effect = (
+            Esp32HidTapUncertainError("click response lost")
+        )
+
+        self.assertFalse(controller.press_game_ui_key("p"))
+        self.assertFalse(controller.click_game_ui_point(
+            100, 200, 3840, 2160
+        ))
+
+        controller_module._input_client.tap.assert_called_once_with("p", 50)
+        controller_module._input_client.mouse_click_at.assert_called_once_with(
+            854,
+            3035,
+            "left",
+            50,
+        )
+
+    def test_remote_game_ui_click_requires_magpie_calibration(self):
+        controller = self.make_session_recovery_controller()
+        controller.game_ui_active = True
+        controller.cfg = {
+            "esp32_hid": {
+                "remote_target": True,
+                "absolute_desktop_rect": [0, 0, 3840, 2160],
+                "magpie_source_rect": None,
+            }
+        }
+
+        self.assertFalse(controller.click_game_ui_point(
+            100, 200, 3840, 2160
+        ))
+
+        controller_module._input_client.mouse_click_at.assert_not_called()
+
+    def test_failed_game_ui_suspension_stays_paused_without_hidden_latch(self):
+        controller_module._input_allowed.set()
+        controller = self.make_session_recovery_controller()
+        controller_module._input_client.release_all.side_effect = RuntimeError(
+            "serial unavailable"
+        )
+
+        self.assertFalse(controller.suspend_automation_for_game_ui())
+
+        self.assertFalse(controller.is_enable)
+        self.assertFalse(controller.game_ui_active)
+        self.assertFalse(controller_module._input_allowed.is_set())
 
     def test_movement_axes_are_sent_as_one_atomic_state(self):
         controller_module._input_allowed.set()

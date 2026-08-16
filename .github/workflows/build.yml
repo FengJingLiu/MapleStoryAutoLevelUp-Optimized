@@ -30,7 +30,7 @@ jobs:
 
     - name: Build EXE
       run: |
-        pyinstaller --noconsole --onefile src/main.py -p . -n MapleStoryAutoLevelUp --icon=media/icon.ico --hidden-import=pkg_resources.py2_warn --hidden-import=pkg_resources.extern --collect-submodules serial --collect-all ultralytics --add-data "models/yolo/mob_1024_best.pt;models/yolo"
+        pyinstaller --noconsole --onefile src/main.py -p . -n MapleStoryAutoLevelUp --icon=media/icon.ico --hidden-import=pkg_resources.py2_warn --hidden-import=pkg_resources.extern --collect-submodules serial --additional-hooks-dir=pyinstaller_hooks --collect-all ultralytics --add-data "models/yolo/mob_1024_best.pt;models/yolo"
 
     - name: Package files into zip
       run: |

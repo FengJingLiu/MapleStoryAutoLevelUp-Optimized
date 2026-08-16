@@ -14,6 +14,7 @@ from pynput import keyboard
 from src.input.KeyBoardListener import KeyBoardListener, normalize_key_name
 from src.input.Esp32KeyForwarder import Esp32KeyForwarder
 from src.utils.common import find_pattern_sqdiff, mask_route_colors
+from src.utils.minimap_geometry import save_minimap_geometry
 from tools.routeRecorder import (
     RouteRecorder,
     fill_empty_canvas_pixels,
@@ -33,6 +34,8 @@ class RouteRecorderKeyTests(unittest.TestCase):
             map_dir.mkdir()
             map_data = b"saved stitched map"
             (map_dir / "map.png").write_bytes(map_data)
+            geometry_data = b"saved geometry"
+            (map_dir / "minimap_geometry.txt").write_bytes(geometry_data)
             (map_dir / "route1.png").write_bytes(b"route one")
             (map_dir / "route-old.PNG").write_bytes(b"route old")
             (map_dir / "notes.txt").write_text("keep", encoding="utf-8")
@@ -42,12 +45,77 @@ class RouteRecorderKeyTests(unittest.TestCase):
             )
 
             self.assertEqual((map_dir / "map.png").read_bytes(), map_data)
+            self.assertEqual(
+                (map_dir / "minimap_geometry.txt").read_bytes(),
+                geometry_data,
+            )
             self.assertFalse((map_dir / "route1.png").exists())
             self.assertFalse((map_dir / "route-old.PNG").exists())
             self.assertEqual(
                 (map_dir / "notes.txt").read_text(encoding="utf-8"),
                 "keep",
             )
+
+    def test_full_rerecord_clears_only_recorder_owned_files(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            map_dir = Path(temp_dir) / "east_rocky_mountain_6"
+            map_dir.mkdir()
+            (map_dir / "map.png").write_bytes(b"legacy map")
+            (map_dir / "minimap_geometry.txt").write_text(
+                "legacy geometry", encoding="utf-8"
+            )
+            (map_dir / "route1.png").write_bytes(b"legacy route")
+            (map_dir / "route-old.PNG").write_bytes(b"legacy route")
+            (map_dir / "notes.txt").write_text("keep", encoding="utf-8")
+
+            self.assertTrue(
+                prepare_route_output_directory(
+                    map_dir, confirm=lambda _: "rebuild"
+                )
+            )
+
+            self.assertFalse((map_dir / "map.png").exists())
+            self.assertFalse((map_dir / "minimap_geometry.txt").exists())
+            self.assertFalse((map_dir / "route1.png").exists())
+            self.assertFalse((map_dir / "route-old.PNG").exists())
+            self.assertEqual(
+                (map_dir / "notes.txt").read_text(encoding="utf-8"),
+                "keep",
+            )
+
+    def test_empty_existing_directory_starts_without_prompt(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            map_dir = Path(temp_dir) / "east_rocky_mountain_6"
+            map_dir.mkdir()
+
+            self.assertTrue(prepare_route_output_directory(
+                map_dir,
+                confirm=lambda _: self.fail("empty directory must not prompt"),
+            ))
+
+    def test_incompatible_geometry_keeps_routes_until_explicit_rebuild(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            map_dir = Path(temp_dir) / "east_rocky_mountain_6"
+            map_dir.mkdir()
+            map_path = map_dir / "map.png"
+            route_path = map_dir / "route1.png"
+            map_path.write_bytes(b"legacy map")
+            route_path.write_bytes(b"legacy route")
+            save_minimap_geometry(
+                map_dir,
+                frame_size=(2013, 3579),
+                minimap_rect=(19, 189, 318, 245),
+            )
+
+            self.assertFalse(prepare_route_output_directory(
+                map_dir,
+                confirm=lambda _: "routes",
+                expected_frame_size=(2160, 3840),
+            ))
+
+            self.assertEqual(map_path.read_bytes(), b"legacy map")
+            self.assertEqual(route_path.read_bytes(), b"legacy route")
+            self.assertTrue((map_dir / "minimap_geometry.txt").exists())
 
     def test_declining_route_cleanup_leaves_directory_untouched(self):
         with tempfile.TemporaryDirectory() as temp_dir:

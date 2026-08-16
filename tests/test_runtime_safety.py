@@ -600,7 +600,7 @@ class AutoBotLifecycleTests(unittest.TestCase):
             ("left", "up", "none"),
         )
 
-        # A fresh standing pose is the physical arrival signal.
+        # A fresh ground classification is the physical arrival signal.
         bot.is_on_ladder = False
         bot.update_cmd_by_route()
         self.assertEqual(
@@ -1590,15 +1590,22 @@ class AutoBotLifecycleTests(unittest.TestCase):
         self.assertIsNone(bot._ladder_route_move_y)
         self.assertEqual(bot._ladder_route_exit_confirmed_at, 100.0)
 
-    def test_inconclusive_smile_anchored_pose_keeps_ladder_state(self):
+    def test_missing_climb_pose_is_classified_as_ground(self):
         bot = self._make_appearance_bot("appearance_climb.png")
         bot.img_frame_gray[:] = 0
         bot.is_on_ladder = True
+        bot._ladder_route_move_y = "up"
 
-        state = bot._update_ladder_state_from_smile_pose((55, 47))
+        with patch(
+            "src.engine.MapleStoryAutoLevelUp.time.monotonic",
+            return_value=101.0,
+        ):
+            state = bot._update_ladder_state_from_smile_pose((55, 47))
 
-        self.assertIsNone(state)
-        self.assertTrue(bot.is_on_ladder)
+        self.assertFalse(state)
+        self.assertFalse(bot.is_on_ladder)
+        self.assertIsNone(bot._ladder_route_move_y)
+        self.assertEqual(bot._ladder_route_exit_confirmed_at, 101.0)
 
     def test_nametag_entry_recovers_from_head_when_all_text_is_hidden(self):
         project_root = Path(__file__).resolve().parents[1]
@@ -2370,20 +2377,120 @@ class AutoBotLifecycleTests(unittest.TestCase):
         bot.capture.stop.assert_called_once_with()
         bot.health_monitor.stop.assert_called_once_with()
 
-    def test_remote_mode_skips_party_mouse_workflow_entirely(self):
+    def test_remote_party_workflow_uses_exclusive_absolute_input(self):
         bot = MapleStoryAutoBot.__new__(MapleStoryAutoBot)
         bot.cfg = {
-            "esp32_hid": {"remote_target": True},
+            "esp32_hid": {
+                "remote_target": True,
+                "absolute_desktop_rect": [0, 0, 3840, 2160],
+                "magpie_source_rect": [1235, 721, 1366, 768],
+            },
             "key": {"party": "p"},
+            "system": {"language": "cn"},
+            "party_red_bar": {"create_party_button_cn_thres": 0.2},
         }
+        bot.kb = SimpleNamespace(
+            game_ui_active=False,
+            suspend_automation_for_game_ui=Mock(return_value=True),
+            press_game_ui_key=Mock(return_value=True),
+            resume_automation_after_game_ui=Mock(return_value=True),
+            disable=Mock(),
+        )
+        bot.img_create_party_enable = np.zeros((10, 20, 3), dtype=np.uint8)
+        frame = np.zeros((2160, 3840, 3), dtype=np.uint8)
+        bot.click_game_ui = Mock(return_value=True)
 
         with patch(
             "src.engine.MapleStoryAutoLevelUp.press_key"
-        ) as press, patch.object(bot, "get_img_frame") as get_frame:
-            self.assertFalse(bot.ensure_is_in_party())
+        ) as press, patch.object(
+            bot, "get_img_frame", return_value=frame
+        ) as get_frame, patch(
+            "src.engine.MapleStoryAutoLevelUp.find_pattern_sqdiff",
+            return_value=((30, 40), 0.1, None),
+        ), patch("src.engine.MapleStoryAutoLevelUp.time.sleep"):
+            self.assertTrue(bot.ensure_is_in_party())
 
         press.assert_not_called()
-        get_frame.assert_not_called()
+        get_frame.assert_called_once_with()
+        bot.kb.suspend_automation_for_game_ui.assert_called_once_with()
+        self.assertEqual(
+            bot.kb.press_game_ui_key.call_args_list,
+            [call("p"), call("p")],
+        )
+        bot.click_game_ui.assert_called_once_with(
+            (40, 45), "ensure_is_in_party"
+        )
+        bot.kb.resume_automation_after_game_ui.assert_called_once_with()
+        bot.kb.disable.assert_not_called()
+
+    def test_remote_party_close_failure_keeps_gameplay_paused(self):
+        bot = MapleStoryAutoBot.__new__(MapleStoryAutoBot)
+        bot.cfg = {
+            "esp32_hid": {
+                "remote_target": True,
+                "absolute_desktop_rect": [0, 0, 3840, 2160],
+                "magpie_source_rect": [1235, 721, 1366, 768],
+            },
+            "key": {"party": "p"},
+            "system": {"language": "cn"},
+            "party_red_bar": {"create_party_button_cn_thres": 0.2},
+        }
+        bot.kb = SimpleNamespace(
+            game_ui_active=False,
+            suspend_automation_for_game_ui=Mock(return_value=True),
+            press_game_ui_key=Mock(side_effect=[True, False]),
+            resume_automation_after_game_ui=Mock(return_value=True),
+            disable=Mock(),
+        )
+        bot.img_create_party_enable = np.zeros((10, 20, 3), dtype=np.uint8)
+        frame = np.zeros((2160, 3840, 3), dtype=np.uint8)
+        bot.click_game_ui = Mock(return_value=True)
+
+        with patch.object(
+            bot, "get_img_frame", return_value=frame
+        ), patch(
+            "src.engine.MapleStoryAutoLevelUp.find_pattern_sqdiff",
+            return_value=((30, 40), 0.3, None),
+        ), patch("src.engine.MapleStoryAutoLevelUp.time.sleep"):
+            self.assertFalse(bot.ensure_is_in_party())
+
+        bot.kb.disable.assert_called_once_with()
+        bot.kb.resume_automation_after_game_ui.assert_called_once_with()
+
+    def test_remote_party_click_failure_keeps_gameplay_paused(self):
+        bot = MapleStoryAutoBot.__new__(MapleStoryAutoBot)
+        bot.cfg = {
+            "esp32_hid": {
+                "remote_target": True,
+                "absolute_desktop_rect": [0, 0, 3840, 2160],
+                "magpie_source_rect": [1235, 721, 1366, 768],
+            },
+            "key": {"party": "p"},
+            "system": {"language": "cn"},
+            "party_red_bar": {"create_party_button_cn_thres": 0.2},
+        }
+        bot.kb = SimpleNamespace(
+            game_ui_active=False,
+            suspend_automation_for_game_ui=Mock(return_value=True),
+            press_game_ui_key=Mock(side_effect=[True, True]),
+            resume_automation_after_game_ui=Mock(return_value=True),
+            disable=Mock(),
+        )
+        bot.img_create_party_enable = np.zeros((10, 20, 3), dtype=np.uint8)
+        frame = np.zeros((2160, 3840, 3), dtype=np.uint8)
+        bot.click_game_ui = Mock(return_value=False)
+
+        with patch.object(
+            bot, "get_img_frame", return_value=frame
+        ), patch(
+            "src.engine.MapleStoryAutoLevelUp.find_pattern_sqdiff",
+            return_value=((30, 40), 0.1, None),
+        ), patch("src.engine.MapleStoryAutoLevelUp.time.sleep"):
+            self.assertFalse(bot.ensure_is_in_party())
+
+        bot.kb.press_game_ui_key.assert_has_calls([call("p"), call("p")])
+        bot.kb.disable.assert_called_once_with()
+        bot.kb.resume_automation_after_game_ui.assert_called_once_with()
 
     def test_party_red_bar_mask_uses_screen_minimap_size(self):
         bot = MapleStoryAutoBot.__new__(MapleStoryAutoBot)

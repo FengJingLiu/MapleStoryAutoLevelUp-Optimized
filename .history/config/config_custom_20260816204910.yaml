@@ -8,6 +8,12 @@ directional_aoe:
 directional_attack:
   range_x: 400
   range_y: 50
+esp32_hid:
+  magpie_source_rect:
+  - 1235
+  - 721
+  - 1366
+  - 768
 game_window:
   auto_resize: false
   preserve_native_resolution: true
