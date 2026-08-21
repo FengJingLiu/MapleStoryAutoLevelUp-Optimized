@@ -10,7 +10,6 @@ eng_to_cn:
   east_rocky_mountain_6: 東部岩石山脈6
   dangerous_croko_i: 危險的鱷魚1
   dangerous_croko_ii: 危險的鱷魚2
-  forest_floor: 森林的底层
   # monster
   zombie_lupin: 天使猴
   black_axe_stump: 黑斧木妖
@@ -77,4 +76,3 @@ map_mobs_mapping:
   east_rocky_mountain_6: [cold_eye, wind_single_eye_beast, blue_perfume]
   dangerous_croko_i: [wild_kargo, fire_boar]
   dangerous_croko_ii: [wild_kargo, fire_boar]
-  forest_floor: [wild_kargo, fire_boar, zombie_mushroom]

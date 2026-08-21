@@ -341,6 +341,56 @@ class YoloMonsterEngineIntegrationTests(unittest.TestCase):
             bot.last_overhead_marker_match["status"], "not-found,cached"
         )
 
+    def test_yolo_hero_reacquires_stable_far_single_without_cache_gap(self):
+        original = self._hero((20, 20), 0.9)
+        far_first = self._hero((120, 20), 0.91)
+        far_second = self._hero((122, 21), 0.92)
+        bot = self._make_yolo_hero_bot([original])
+        bot.cfg["nametag"]["overhead_marker"]["max_stale_frames"] = -1
+        bot.yolo_hero_detector.detect.side_effect = [
+            [original],
+            [original],
+            [far_first],
+            [far_second],
+        ]
+
+        self.assertIsNone(bot.get_player_location_by_yolo())
+        self.assertEqual(bot.get_player_location_by_yolo(), (30, 40))
+        bot._current_capture_frame_token = 2
+        self.assertEqual(bot.get_player_location_by_yolo(), (30, 40))
+        self.assertEqual(
+            bot.last_overhead_marker_match["status"],
+            "reacquire-pending,cached",
+        )
+        self.assertEqual(bot.pending_overhead_marker_count, 1)
+        bot._current_capture_frame_token = 3
+        self.assertEqual(bot.get_player_location_by_yolo(), (132, 41))
+        self.assertEqual(
+            bot.last_overhead_marker_match["status"], "reacquired"
+        )
+
+    def test_yolo_hero_does_not_reacquire_multiple_far_candidates(self):
+        original = self._hero((20, 20), 0.9)
+        far_left = self._hero((120, 20), 0.91)
+        far_right = self._hero((140, 20), 0.92)
+        bot = self._make_yolo_hero_bot([original])
+        bot.cfg["nametag"]["overhead_marker"]["max_stale_frames"] = -1
+        bot.yolo_hero_detector.detect.side_effect = [
+            [original],
+            [original],
+            [far_left, far_right],
+        ]
+
+        self.assertIsNone(bot.get_player_location_by_yolo())
+        self.assertEqual(bot.get_player_location_by_yolo(), (30, 40))
+        bot._current_capture_frame_token = 2
+        self.assertEqual(bot.get_player_location_by_yolo(), (30, 40))
+        self.assertEqual(
+            bot.last_overhead_marker_match["status"],
+            "not-found-local,cached",
+        )
+        self.assertEqual(bot.pending_overhead_marker_count, 0)
+
     @staticmethod
     def _make_pet_filter_bot(frame, pet_template):
         bot = MapleStoryAutoBot.__new__(MapleStoryAutoBot)
@@ -490,6 +540,61 @@ class YoloMonsterEngineIntegrationTests(unittest.TestCase):
         ])
 
         self.assertEqual(filtered, [exact_threshold, large])
+
+    def test_fresh_hero_box_filters_overlapping_cross_class_mob(self):
+        bot = MapleStoryAutoBot.__new__(MapleStoryAutoBot)
+        bot.yolo_monster_detector = Mock()
+        bot.yolo_hero_detector = bot.yolo_monster_detector
+        bot._current_capture_frame_token = 123
+        bot.last_yolo_hero_detection = {
+            "position": (100, 80),
+            "size": (100, 80),
+            "confidence": 0.92,
+            "frame_token": 123,
+        }
+        bot.img_frame_debug = None
+        duplicate_mob = {
+            "name": "mob",
+            "position": (95, 95),
+            "size": (100, 90),
+            "confidence": 0.70,
+        }
+        nearby_real_mob = {
+            "name": "mob",
+            "position": (170, 95),
+            "size": (100, 90),
+            "confidence": 0.90,
+        }
+
+        filtered = bot.filter_yolo_hero_class_conflicts([
+            duplicate_mob,
+            nearby_real_mob,
+        ])
+
+        self.assertEqual(filtered, [nearby_real_mob])
+
+    def test_cached_hero_box_does_not_filter_current_mob(self):
+        bot = MapleStoryAutoBot.__new__(MapleStoryAutoBot)
+        bot.yolo_monster_detector = Mock()
+        bot.yolo_hero_detector = bot.yolo_monster_detector
+        bot._current_capture_frame_token = 124
+        bot.last_yolo_hero_detection = {
+            "position": (100, 80),
+            "size": (100, 80),
+            "confidence": 0.92,
+            "frame_token": 123,
+        }
+        mob = {
+            "name": "mob",
+            "position": (100, 80),
+            "size": (100, 80),
+            "confidence": 0.90,
+        }
+
+        self.assertEqual(
+            bot.filter_yolo_hero_class_conflicts([mob]),
+            [mob],
+        )
 
     def test_yolo_box_area_replaces_template_area_for_attack_overlap(self):
         bot = MapleStoryAutoBot.__new__(MapleStoryAutoBot)

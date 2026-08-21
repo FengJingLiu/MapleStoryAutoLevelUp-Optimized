@@ -5112,12 +5112,13 @@ class MapleStoryAutoBot:
         if detector is None or frame is None:
             return None
 
-        def record_miss(status):
+        def record_miss(status, *, reset_pending=True, match=None):
             self.overhead_marker_miss_count = getattr(
                 self, "overhead_marker_miss_count", 0
             ) + 1
-            self.pending_overhead_marker_location = None
-            self.pending_overhead_marker_count = 0
+            if reset_pending:
+                self.pending_overhead_marker_location = None
+                self.pending_overhead_marker_count = 0
             max_stale_frames = int(marker_cfg.get("max_stale_frames", -1))
             retain_without_limit = max_stale_frames < 0
             use_cached_location = (
@@ -5132,6 +5133,7 @@ class MapleStoryAutoBot:
             )
             self.last_overhead_marker_match = {
                 "status": f"{status},cached" if use_cached_location else status,
+                **({} if match is None else match),
             }
             cache_expired = (
                 not retain_without_limit
@@ -5157,6 +5159,31 @@ class MapleStoryAutoBot:
                 return self.loc_overhead_marker_player
             self.has_valid_overhead_marker_location = False
             return None
+
+        def confirm_global_candidate(candidate):
+            confirm_frames = max(
+                1, int(marker_cfg.get("global_confirm_frames", 2))
+            )
+            if confirm_frames <= 1:
+                return True
+
+            pending = getattr(
+                self, "pending_overhead_marker_location", None
+            )
+            confirm_radius = max(
+                1, int(marker_cfg.get("global_confirm_radius", 24))
+            )
+            if pending is not None and max(
+                abs(candidate["player"][0] - pending[0]),
+                abs(candidate["player"][1] - pending[1]),
+            ) <= confirm_radius:
+                self.pending_overhead_marker_count = getattr(
+                    self, "pending_overhead_marker_count", 0
+                ) + 1
+            else:
+                self.pending_overhead_marker_count = 1
+            self.pending_overhead_marker_location = candidate["player"]
+            return self.pending_overhead_marker_count >= confirm_frames
 
         if marker_cfg.get("require_minimap_player", True):
             minimap_source = getattr(self, "img_minimap_source", None)
@@ -5248,46 +5275,36 @@ class MapleStoryAutoBot:
                 ) <= local_radius
             ]
             if not local_candidates:
-                return record_miss("not-found-local")
-            best_match = min(local_candidates, key=lambda item: (
-                max(
-                    abs(item["player"][0] - selection_anchor[0]),
-                    abs(item["player"][1] - selection_anchor[1]),
-                ),
-                -item["confidence"],
-            ))
-            match_scope = selection_scope
+                if len(candidates) != 1:
+                    return record_miss("not-found-local")
+                best_match = candidates[0]
+                if not confirm_global_candidate(best_match):
+                    return record_miss(
+                        "reacquire-pending",
+                        reset_pending=False,
+                        match=best_match,
+                    )
+                match_scope = "reacquired"
+            else:
+                best_match = min(local_candidates, key=lambda item: (
+                    max(
+                        abs(item["player"][0] - selection_anchor[0]),
+                        abs(item["player"][1] - selection_anchor[1]),
+                    ),
+                    -item["confidence"],
+                ))
+                match_scope = selection_scope
         else:
             if marker_cfg.get("require_unique_global", True) and \
                     len(candidates) != 1:
                 return record_miss("ambiguous")
             best_match = max(candidates, key=lambda item: item["confidence"])
-            confirm_frames = max(
-                1, int(marker_cfg.get("global_confirm_frames", 2))
-            )
-            if confirm_frames > 1:
-                pending = getattr(
-                    self, "pending_overhead_marker_location", None
-                )
-                confirm_radius = max(
-                    1, int(marker_cfg.get("global_confirm_radius", 24))
-                )
-                if pending is not None and max(
-                    abs(best_match["player"][0] - pending[0]),
-                    abs(best_match["player"][1] - pending[1]),
-                ) <= confirm_radius:
-                    self.pending_overhead_marker_count = getattr(
-                        self, "pending_overhead_marker_count", 0
-                    ) + 1
-                else:
-                    self.pending_overhead_marker_count = 1
-                self.pending_overhead_marker_location = best_match["player"]
-                if self.pending_overhead_marker_count < confirm_frames:
-                    self.last_overhead_marker_match = {
-                        "status": "pending",
-                        **best_match,
-                    }
-                    return None
+            if not confirm_global_candidate(best_match):
+                self.last_overhead_marker_match = {
+                    "status": "pending",
+                    **best_match,
+                }
+                return None
 
         self.loc_overhead_marker_player = best_match["player"]
         self.has_valid_overhead_marker_location = True
@@ -5303,6 +5320,9 @@ class MapleStoryAutoBot:
             "position": best_match["position"],
             "size": best_match["size"],
             "confidence": best_match["confidence"],
+            "frame_token": getattr(
+                self, "_current_capture_frame_token", None
+            ),
         }
         self._draw_debug_rectangle(
             best_match["position"],
@@ -8533,10 +8553,61 @@ class MapleStoryAutoBot:
             inference_confidence=detector.confidence,
             cache_key=getattr(self, "_current_capture_frame_token", None),
         )
+        monsters = self.filter_yolo_hero_class_conflicts(monsters)
         monsters = self.filter_yolo_detections_by_box_size(monsters)
         monsters = self.filter_pet_yolo_detections(monsters)
         self.draw_monster_detections(monsters, (x0, y0), (x1, y1))
         return monsters
+
+    def filter_yolo_hero_class_conflicts(self, monsters):
+        """Remove a mob box duplicating this frame's accepted Hero box.
+
+        Ultralytics NMS is class-aware by default, so one visual object can
+        survive once as ``hero`` and again as ``mob``.  Only a freshly
+        accepted Hero detection is authoritative here; an indefinitely cached
+        Hero box must never hide a real monster after the camera has moved.
+        """
+        if not monsters or getattr(
+                self, "yolo_hero_detector", None) is not getattr(
+                    self, "yolo_monster_detector", None):
+            return monsters
+
+        frame_token = getattr(self, "_current_capture_frame_token", None)
+        hero = getattr(self, "last_yolo_hero_detection", None)
+        if frame_token is None or not isinstance(hero, dict) or \
+                hero.get("frame_token") != frame_token:
+            return monsters
+
+        hero_box = detection_to_box(hero)
+        hero_area = max(0, hero_box[2] - hero_box[0]) * max(
+            0, hero_box[3] - hero_box[1]
+        )
+        if hero_area <= 0:
+            return monsters
+
+        kept = []
+        for monster in monsters:
+            monster_box = detection_to_box(monster)
+            monster_area = max(0, monster_box[2] - monster_box[0]) * max(
+                0, monster_box[3] - monster_box[1]
+            )
+            inter_area = intersection_area(hero_box, monster_box)
+            union_area = hero_area + monster_area - inter_area
+            iou = inter_area / max(1, union_area)
+            if iou < 0.5:
+                kept.append(monster)
+                continue
+
+            self._draw_debug_rectangle(
+                monster["position"],
+                monster["size"],
+                (255, 0, 255),
+                f"Hero conflict filtered: {iou:.2f}",
+                thickness=1,
+                text_height=0.45,
+            )
+
+        return kept
 
     def filter_yolo_detections_by_box_size(self, monsters):
         """Discard detections smaller than either configured box dimension."""
