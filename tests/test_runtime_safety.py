@@ -455,16 +455,23 @@ class AutoBotLifecycleTests(unittest.TestCase):
         bot.cfg = {
             "route": {
                 "search_range": 10,
+                "ladder_alignment_tolerance": 2,
                 "jump_up_settle_delay": 0.6,
                 "portal_sweep_edge_margin": 2,
                 "portal_sweep_exit_distance": 10,
                 "portal_sweep_repeat_interval": 0.2,
                 "portal_sweep_max_duration": 6.0,
                 "rope_climb_detection_range": 10,
+                "rope_climb_target_color": [0, 191, 255],
+                "rope_climb_arrow_bind_distance": 3,
                 "rope_climb_runup_distance": 4,
                 "rope_climb_align_tolerance": 1,
+                "rope_climb_align_hold_distance": 6,
+                "rope_climb_align_brake_delay": 0.10,
+                "rope_climb_align_crossing_tolerance": 3,
                 "rope_climb_settle_delay": 0.15,
                 "rope_climb_runup_ms": 180,
+                "rope_climb_running_prediction_margin": 4,
                 "rope_climb_position_timeout": 0.9,
                 "rope_climb_retry_interval": 0.9,
                 "rope_climb_min_progress": 3,
@@ -473,6 +480,8 @@ class AutoBotLifecycleTests(unittest.TestCase):
                 "rope_climb_landing_tolerance": 2,
                 "rope_climb_max_attempts": 4,
                 "rope_climb_max_duration": 15.0,
+                "rope_climb_failure_rearm_delay": 1.5,
+                "rope_climb_failed_route_recovery_distance": 2,
             },
             "teleport": {
                 "is_use_teleport_to_walk": False,
@@ -565,6 +574,181 @@ class AutoBotLifecycleTests(unittest.TestCase):
         self.assertFalse(color_code["exact_action"])
         self.assertEqual(color_code_up_down["command"], "none up none")
         self.assertEqual(color_code_up_down["distance"], 4)
+
+    def test_ground_ladder_route_aligns_x_before_pressing_up(self):
+        bot = self._route_color_bot()
+        bot.loc_player_global = (4, 10)
+        bot.img_route[4:17, 10] = (127, 127, 127)
+
+        bot.update_cmd_by_route()
+
+        self.assertEqual(
+            (bot.cmd_move_x, bot.cmd_move_y, bot.cmd_action),
+            ("right", "none", "none"),
+        )
+        self.assertIsNone(bot._ladder_route_move_y)
+
+        bot.loc_player_global = (9, 10)
+        bot.update_cmd_by_route()
+
+        self.assertEqual(
+            (bot.cmd_move_x, bot.cmd_move_y, bot.cmd_action),
+            ("none", "up", "none"),
+        )
+
+    def test_ground_ladder_route_aligns_from_right_before_pressing_up(self):
+        bot = self._route_color_bot()
+        bot.loc_player_global = (16, 10)
+        bot.img_route[4:17, 10] = (127, 127, 127)
+
+        bot.update_cmd_by_route()
+
+        self.assertEqual(
+            (bot.cmd_move_x, bot.cmd_move_y, bot.cmd_action),
+            ("left", "none", "none"),
+        )
+
+    def test_disconnected_goal_continues_same_route_loop(self):
+        bot = self._route_color_bot()
+        route1 = bot.img_route
+        route1[10, 10] = (255, 255, 0)
+        route1[9, 10] = (127, 127, 127)
+        route2 = np.zeros_like(route1)
+        bot.img_routes = [route1, route2]
+
+        bot.update_cmd_by_route()
+        self.assertEqual(bot.cmd_action, "goal")
+        bot.check_reach_goal()
+
+        self.assertEqual(bot.idx_routes, 0)
+        self.assertEqual(bot.cmd_action, "none")
+        self.assertIsNotNone(bot._route_loop_goal_key)
+
+        # While still on the goal blob, suppress it and use the adjacent
+        # route stroke so a closed loop can continue.
+        bot.update_cmd_by_route()
+        self.assertEqual(
+            (bot.cmd_move_x, bot.cmd_move_y, bot.cmd_action),
+            ("none", "up", "none"),
+        )
+
+    def test_goal_switches_when_next_route_has_local_continuation(self):
+        bot = self._route_color_bot()
+        route1 = bot.img_route
+        route1[10, 10] = (255, 255, 0)
+        route2 = np.zeros_like(route1)
+        route2[10, 10] = (0, 0, 255)
+        bot.img_routes = [route1, route2]
+
+        bot.update_cmd_by_route()
+        bot.check_reach_goal()
+
+        self.assertEqual(bot.idx_routes, 1)
+        self.assertEqual(bot.cmd_action, "none")
+        self.assertIsNone(bot._route_loop_goal_key)
+
+    def test_failed_rope_does_not_recover_into_overlapping_next_route(self):
+        bot = self._route_color_bot()
+        route1 = bot.img_route
+        self._draw_rope_guide(bot, start=(10, 10), end=(18, 10))
+        route2 = np.zeros_like(route1)
+        route2[10, 10] = (0, 0, 255)
+        bot.img_routes = [route1, route2]
+        target = bot._find_rope_climb_targets(route1)[0]
+        bot._rope_climb_failed_key = bot._rope_climb_component_key(
+            0, target
+        )
+        bot._rope_climb_failed_position = bot.loc_player_global
+
+        bot.update_cmd_by_route()
+
+        self.assertEqual(bot.idx_routes, 0)
+        self.assertIs(bot.img_route, route1)
+        self.assertEqual(
+            (bot.cmd_move_x, bot.cmd_move_y, bot.cmd_action),
+            ("none", "none", "none"),
+        )
+
+    def test_failed_rope_rearms_nearby_after_cooldown_without_route_switch(self):
+        bot = self._route_color_bot()
+        route1 = bot.img_route
+        self._draw_rope_guide(bot, start=(10, 10), end=(18, 10))
+        route2 = np.zeros_like(route1)
+        route2[10, 10] = (0, 0, 255)
+        bot.img_routes = [route1, route2]
+        target = bot._find_rope_climb_targets(route1)[0]
+        failed_key = bot._rope_climb_component_key(0, target)
+        bot._rope_climb_failed_key = failed_key
+        bot._rope_climb_failed_position = bot.loc_player_global
+        bot._rope_climb_failed_at = 100.0
+
+        with patch(
+            "src.engine.MapleStoryAutoLevelUp.time.monotonic",
+            return_value=101.6,
+        ):
+            bot.update_cmd_by_route()
+
+        self.assertEqual(bot.idx_routes, 0)
+        self.assertIs(bot.img_route, route1)
+        self.assertTrue(bot._rope_climb_active)
+        self.assertEqual(bot._rope_climb_state["key"], failed_key)
+        self.assertIsNone(bot._rope_climb_failed_key)
+        self.assertIsNone(bot._rope_climb_failed_position)
+        self.assertIsNone(bot._rope_climb_failed_at)
+
+    def test_failed_rope_releases_to_overlapped_route_after_cooldown(self):
+        bot = self._route_color_bot()
+        route1 = np.zeros((21, 40, 3), dtype=np.uint8)
+        bot.img_route = route1
+        bot.img_routes = [route1]
+        self._draw_rope_guide(bot, start=(25, 10), end=(33, 10))
+        route2 = np.zeros_like(route1)
+        route2[10, 10] = (0, 0, 255)
+        bot.img_routes = [route1, route2]
+        target = bot._find_rope_climb_targets(route1)[0]
+        failed_key = bot._rope_climb_component_key(0, target)
+        bot._rope_climb_failed_key = failed_key
+        bot._rope_climb_failed_position = bot.loc_player_global
+        bot._rope_climb_failed_at = 100.0
+
+        with patch(
+            "src.engine.MapleStoryAutoLevelUp.time.monotonic",
+            return_value=101.6,
+        ):
+            bot.update_cmd_by_route()
+
+        self.assertEqual(bot.idx_routes, 1)
+        self.assertIs(bot.img_route, route2)
+        self.assertEqual(
+            (bot.cmd_move_x, bot.cmd_move_y, bot.cmd_action),
+            ("right", "none", "none"),
+        )
+
+    def test_failed_rope_does_not_recover_to_merely_nearby_route(self):
+        bot = self._route_color_bot()
+        route1 = np.zeros((21, 40, 3), dtype=np.uint8)
+        bot.img_route = route1
+        self._draw_rope_guide(bot, start=(25, 10), end=(33, 10))
+        route2 = np.zeros_like(route1)
+        route2[10, 13] = (0, 0, 255)
+        bot.img_routes = [route1, route2]
+        target = bot._find_rope_climb_targets(route1)[0]
+        bot._rope_climb_failed_key = bot._rope_climb_component_key(0, target)
+        bot._rope_climb_failed_position = bot.loc_player_global
+        bot._rope_climb_failed_at = 100.0
+
+        with patch(
+            "src.engine.MapleStoryAutoLevelUp.time.monotonic",
+            return_value=101.6,
+        ):
+            bot.update_cmd_by_route()
+
+        self.assertEqual(bot.idx_routes, 0)
+        self.assertIs(bot.img_route, route1)
+        self.assertEqual(
+            (bot.cmd_move_x, bot.cmd_move_y, bot.cmd_action),
+            ("none", "none", "none"),
+        )
 
     def test_exact_action_has_priority_over_ladder_complement(self):
         bot = self._route_color_bot()
@@ -776,6 +960,32 @@ class AutoBotLifecycleTests(unittest.TestCase):
         self.assertTrue(color_code["rope_climb"])
         self.assertEqual(color_code["target_center"], (12, 10))
 
+    def test_explicit_rope_arrow_fixes_target_from_both_sides(self):
+        for player_x in (10, 20):
+            with self.subTest(player_x=player_x):
+                bot = self._route_color_bot()
+                bot.loc_player_global = (player_x, 10)
+                self._draw_rope_guide(bot, start=(12, 10), end=(18, 10))
+                bot.img_route[10, 18] = (0, 191, 255)
+
+                color_code, _ = bot.get_nearest_color_code()
+
+                self.assertTrue(color_code["rope_climb"])
+                self.assertEqual(color_code["target_center"], (18, 10))
+                self.assertTrue(color_code["explicit_rope_target"])
+
+    def test_explicit_rope_arrow_can_load_before_runtime_cfg_assignment(self):
+        bot = self._route_color_bot()
+        route_cfg = bot.cfg["route"]
+        self._draw_rope_guide(bot, start=(12, 10), end=(18, 10))
+        bot.img_route[10, 18] = (0, 191, 255)
+        bot.cfg = None
+
+        targets = bot._find_rope_climb_targets(bot.img_route, route_cfg)
+
+        self.assertEqual(len(targets), 1)
+        self.assertEqual(targets[0]["rope_target"], (18, 10))
+
     def test_exact_point_action_has_priority_over_nearby_rope_guide(self):
         bot = self._route_color_bot()
         self._draw_rope_guide(bot, start=(11, 10), end=(18, 10))
@@ -815,6 +1025,52 @@ class AutoBotLifecycleTests(unittest.TestCase):
         self.assertEqual(bot._rope_climb_state["start_x"], 14)
         self.assertEqual(bot.cmd_action, "rope_align_right")
 
+    def test_rope_runway_holds_then_brakes_and_accepts_small_overshoot(self):
+        bot = self._route_color_bot()
+        bot.img_route = np.zeros((21, 40, 3), dtype=np.uint8)
+        bot.img_routes = [bot.img_route]
+        self._draw_rope_guide(bot, start=(11, 10), end=(30, 10))
+
+        with patch(
+            "src.engine.MapleStoryAutoLevelUp.time.monotonic",
+            return_value=100.0,
+        ):
+            bot.update_cmd_by_route()
+
+        self.assertEqual(bot._rope_climb_state["start_x"], 26)
+        self.assertEqual(bot.cmd_move_x, "right")
+        self.assertEqual(bot.cmd_action, "rope_hold")
+
+        # Entering the fine-alignment radius releases the held direction for
+        # one capture interval instead of immediately adding another pulse.
+        bot.loc_player_global = (21, 10)
+        with patch(
+            "src.engine.MapleStoryAutoLevelUp.time.monotonic",
+            return_value=100.1,
+        ):
+            bot.update_cmd_by_route()
+        self.assertEqual(bot.cmd_move_x, "none")
+        self.assertEqual(bot.cmd_action, "rope_hold")
+
+        bot.loc_player_global = (23, 10)
+        with patch(
+            "src.engine.MapleStoryAutoLevelUp.time.monotonic",
+            return_value=100.21,
+        ):
+            bot.update_cmd_by_route()
+        self.assertEqual(bot.cmd_action, "rope_align_right")
+
+        # A sampled crossing just beyond the runway is good enough. Reversing
+        # here would produce the visible left/right small-step oscillation.
+        bot.loc_player_global = (28, 10)
+        with patch(
+            "src.engine.MapleStoryAutoLevelUp.time.monotonic",
+            return_value=100.3,
+        ):
+            bot.update_cmd_by_route()
+        self.assertEqual(bot._rope_climb_state["phase"], "settle")
+        self.assertEqual(bot.cmd_action, "rope_hold")
+
     def test_rope_guide_keeps_same_direction_run_until_mount_point(self):
         bot = self._route_color_bot()
         bot.kb.cmd_left_right_last = "right"
@@ -845,6 +1101,41 @@ class AutoBotLifecycleTests(unittest.TestCase):
         self.assertEqual(bot.cmd_move_x, "right")
         self.assertEqual(bot.cmd_move_y, "up")
         self.assertEqual(bot.cmd_action, "rope_mount_right")
+
+    def test_fast_rope_approach_predicts_runway_crossing_one_frame_early(self):
+        bot = self._route_color_bot()
+        bot.img_route = np.zeros((21, 40, 3), dtype=np.uint8)
+        bot.img_routes = [bot.img_route]
+        bot.loc_player_global = (30, 10)
+        bot.kb.cmd_left_right_last = "left"
+        self._draw_rope_guide(bot, start=(12, 10), end=(22, 10))
+
+        with patch(
+            "src.engine.MapleStoryAutoLevelUp.time.monotonic",
+            return_value=100.0,
+        ):
+            bot.update_cmd_by_route()
+
+        self.assertEqual(bot._rope_climb_state["target"], (12, 10))
+        self.assertEqual(bot._rope_climb_state["start_x"], 16)
+        self.assertEqual(
+            bot._rope_climb_state["phase"], "running_approach"
+        )
+
+        # Six minimap pixels of motion in one frame would cross the x=16
+        # runway on the next frame. Trigger now at x=24 instead of waiting
+        # until the already-moving Hero has overshot it.
+        bot.loc_player_global = (24, 10)
+        with patch(
+            "src.engine.MapleStoryAutoLevelUp.time.monotonic",
+            return_value=100.1,
+        ):
+            bot.update_cmd_by_route()
+
+        self.assertEqual(bot._rope_climb_state["phase"], "mount_request")
+        self.assertEqual(bot.cmd_move_x, "left")
+        self.assertEqual(bot.cmd_move_y, "up")
+        self.assertEqual(bot.cmd_action, "rope_mount_left")
 
     def test_rope_runway_settles_then_keeps_mount_request_visible(self):
         bot = self._route_color_bot()
@@ -2225,6 +2516,7 @@ class AutoBotLifecycleTests(unittest.TestCase):
             "bot": {"mode": "debug"},
             "health_monitor": {"enable": True},
             "esp32_hid": {"remote_target": True},
+            "rune_solver": {"enable": False},
         }
         bot.fsm = Mock()
         bot.loop = Mock()
@@ -2248,7 +2540,7 @@ class AutoBotLifecycleTests(unittest.TestCase):
             "src.engine.MapleStoryAutoLevelUp.Profiler",
         ), patch(
             "src.engine.MapleStoryAutoLevelUp.RuneSolver",
-        ), patch(
+        ) as rune_solver_cls, patch(
             "src.engine.MapleStoryAutoLevelUp.threading.Thread"
         ) as thread_cls:
             bot.start()
@@ -2259,6 +2551,8 @@ class AutoBotLifecycleTests(unittest.TestCase):
             capture_available=False,
         )
         health.start.assert_not_called()
+        rune_solver_cls.assert_not_called()
+        self.assertIsNone(bot.rune_solver)
         bot.fsm.set_init_state.assert_called_once_with("debug")
         thread_cls.return_value.start.assert_called_once_with()
 

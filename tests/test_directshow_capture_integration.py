@@ -245,6 +245,13 @@ class AutoDiceDirectShowTests(unittest.TestCase):
 
 
 class RuneDirectShowSafetyTests(unittest.TestCase):
+    def test_missing_rune_setting_defaults_to_no_detection(self):
+        bot = SimpleNamespace(cfg={}, rune_solver=None)
+
+        state = HuntingState("hunting", bot)
+
+        self.assertIsNone(state.check_transitions())
+
     def test_disabled_rune_solver_never_matches_legacy_templates(self):
         rune_solver = Mock()
         bot = SimpleNamespace(

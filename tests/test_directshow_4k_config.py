@@ -52,7 +52,7 @@ def test_native_relogin_uses_ocr_only_by_default():
 
     targets = cfg["ocr"]["targets"]
     assert set(targets) == {
-        "disconnect", "connect", "world", "channel", "character",
+        "disconnect", "connect", "world", "channel", "queue", "character",
     }
     for target in targets.values():
         x0, y0, x1, y1 = target["search_region"]
@@ -70,6 +70,22 @@ def test_native_relogin_uses_ocr_only_by_default():
     assert len(cfg["channel_points"]) == 20
 
 
+def test_default_uses_shared_hero_and_mob_yolo():
+    cfg = load_yaml("config_default.yaml")
+    marker = cfg["nametag"]["overhead_marker"]
+
+    assert marker["enable"] is True
+    assert marker["backend"] == "yolo"
+    assert marker["yolo"]["class_name"] == "hero"
+    assert marker["yolo"]["confidence"] == 0.85
+    assert marker["max_stale_frames"] == -1
+    assert cfg["monster_detect"]["model_path"].endswith(
+        "yolov8n_1024_rect_hero_mob_16000_v6_best.pt"
+    )
+    assert cfg["monster_detect"]["min_box_width"] == 20
+    assert cfg["monster_detect"]["min_box_height"] == 20
+
+
 def test_custom_capture_and_absolute_mouse_use_4k_reference():
     cfg = override_cfg(
         load_yaml("config_default.yaml"),
@@ -82,6 +98,13 @@ def test_custom_capture_and_absolute_mouse_use_4k_reference():
     assert cfg["nametag"]["medal"]["enable"] is False
     assert cfg["nametag"]["appearance"]["enable"] is False
     assert cfg["nametag"]["overhead_marker"]["enable"] is True
+    assert cfg["nametag"]["overhead_marker"]["backend"] == "yolo"
+    assert cfg["monster_detect"]["model_path"] == \
+        "models/yolo/yolov8n_1024_rect_hero_mob_16000_v6_best.pt"
+    assert cfg["monster_detect"]["class_name"] == "mob"
+    assert cfg["monster_detect"]["confidence"] == 0.6
+    assert cfg["monster_detect"]["min_box_width"] == 40
+    assert cfg["monster_detect"]["min_box_height"] == 40
     assert cfg["nametag"]["pet"]["enable"] is False
     assert cfg["esp32_hid"]["absolute_desktop_rect"] == [0, 0, 3840, 2160]
     # The capture card sees Magpie's scaled output, so points must map back to

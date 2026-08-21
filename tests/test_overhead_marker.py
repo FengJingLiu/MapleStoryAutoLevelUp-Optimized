@@ -38,7 +38,6 @@ class OverheadMarkerTests(unittest.TestCase):
                     "player_offset": (18, 71),
                     "local_search_radius": 90,
                     "global_confirm_frames": confirm_frames,
-                    "lost_timeout_s": 2.0,
                     "require_unique_local": True,
                     "require_unique_global": True,
                 },
@@ -161,39 +160,82 @@ class OverheadMarkerTests(unittest.TestCase):
             self._expected_player(bot, second_location),
         )
 
-    def test_last_smile_position_expires_only_after_two_seconds(self):
-        marker_location = (220, 80)
-        bot = self._make_bot((marker_location,), confirm_frames=1)
-        expected = self._expected_player(bot, marker_location)
+    def test_cold_miss_without_history_returns_none(self):
+        bot = self._make_bot((), confirm_frames=2)
+
+        self.assertIsNone(bot.get_player_location_by_overhead_marker())
+        self.assertFalse(bot.has_valid_overhead_marker_location)
+
+    def test_last_smile_position_is_reused_until_next_detection(self):
+        first_location = (220, 80)
+        second_location = (450, 190)
+        bot = self._make_bot((first_location,), confirm_frames=2)
+        first_expected = self._expected_player(bot, first_location)
         with patch(
             "src.engine.MapleStoryAutoLevelUp.time.monotonic",
             return_value=100.0,
         ):
-            self.assertEqual(
-                bot.get_player_location_by_overhead_marker(), expected
-            )
-
-        bot.img_frame[:] = (45, 65, 85)
-        bot.img_frame_gray = cv2.cvtColor(
-            bot.img_frame, cv2.COLOR_BGR2GRAY
-        )
-        with patch(
-            "src.engine.MapleStoryAutoLevelUp.time.monotonic",
-            return_value=102.0,
-        ):
-            self.assertEqual(
-                bot.get_player_location_by_overhead_marker(), expected
-            )
-            self.assertTrue(bot.has_valid_overhead_marker_location)
-
-        with patch(
-            "src.engine.MapleStoryAutoLevelUp.time.monotonic",
-            return_value=102.001,
-        ):
             self.assertIsNone(
                 bot.get_player_location_by_overhead_marker()
             )
-            self.assertFalse(bot.has_valid_overhead_marker_location)
+        with patch(
+            "src.engine.MapleStoryAutoLevelUp.time.monotonic",
+            return_value=101.0,
+        ):
+            self.assertEqual(
+                bot.get_player_location_by_overhead_marker(), first_expected
+            )
+        self.assertEqual(bot.t_last_overhead_marker_detected, 101.0)
+
+        self._set_marker_locations(bot, ())
+        with patch(
+            "src.engine.MapleStoryAutoLevelUp.time.monotonic",
+            return_value=10_000.0,
+        ):
+            self.assertEqual(
+                bot.get_player_location_by_overhead_marker(), first_expected
+            )
+            self.assertTrue(bot.has_valid_overhead_marker_location)
+            self.assertEqual(
+                bot.last_overhead_marker_match["status"],
+                "not-found,cached",
+            )
+            self.assertEqual(bot.t_last_overhead_marker_detected, 101.0)
+
+        self._set_marker_locations(bot, (second_location,))
+        second_expected = self._expected_player(bot, second_location)
+        with patch(
+            "src.engine.MapleStoryAutoLevelUp.time.monotonic",
+            return_value=10_001.0,
+        ):
+            self.assertEqual(
+                bot.get_player_location_by_overhead_marker(), first_expected
+            )
+            self.assertEqual(
+                bot.last_overhead_marker_match["status"], "pending,cached"
+            )
+            self.assertEqual(bot.t_last_overhead_marker_detected, 101.0)
+
+        with patch(
+            "src.engine.MapleStoryAutoLevelUp.time.monotonic",
+            return_value=10_002.0,
+        ):
+            self.assertEqual(
+                bot.get_player_location_by_overhead_marker(), second_expected
+            )
+            self.assertEqual(
+                bot.loc_overhead_marker_player, second_expected
+            )
+            self.assertEqual(bot.t_last_overhead_marker_detected, 10_002.0)
+
+        self._set_marker_locations(bot, ())
+        with patch(
+            "src.engine.MapleStoryAutoLevelUp.time.monotonic",
+            return_value=20_000.0,
+        ):
+            self.assertEqual(
+                bot.get_player_location_by_overhead_marker(), second_expected
+            )
 
     def test_enabled_smile_does_not_fall_back_to_nametag(self):
         bot = self._make_bot((), confirm_frames=1)

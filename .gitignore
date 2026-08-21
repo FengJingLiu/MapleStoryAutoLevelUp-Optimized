@@ -1,4 +1,5 @@
 build/
+datasets/
 
 # Ignore ad-hoc images and recordings by default. The allow-list below keeps
 # recognition templates, map assets, UI resources, and test fixtures versioned.

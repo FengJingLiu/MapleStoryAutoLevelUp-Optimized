@@ -99,25 +99,39 @@ class MapleStoryAutoBot:
         self.idx_routes = 0 # Index of route map
         self.monsters_info = {} # monster information
         self.yolo_monster_detector = None
+        self.yolo_hero_detector = None
+        self.yolo_inference_class_names = ("mob",)
         self.monsters = [] # monster detected in current frame
-        self.close_hp_bar_candidates = {"left": [], "right": []}
         self.fps = 0 # Frame per second
         self.red_dot_center_prev = None # previous other player location in minimap
-        self.video_writer = None # For video recording feature
+        # F3 writes the source capture and the rendered diagnostic canvas to
+        # separate files.  ``video_writer`` keeps its historical name and is
+        # the raw-stream writer; the second writer owns annotated frames.
+        self.video_writer = None # Raw video recording writer
         self._video_record_path = None
         self._video_record_size = None
+        self.annotated_video_writer = None
+        self._annotated_video_record_path = None
+        self._annotated_video_record_size = None
+        self._annotated_record_frame_pending = False
+        self._video_record_lock = threading.RLock()
         self.color_code = {} # For color code instruction
         self.color_code_up_down = {} # Color code only contain 'up' and 'down'
         self._ladder_route_move_y = None
         self._ladder_route_exit_confirmed_at = None
+        self._route_loop_goal_key = None
+        self._route_loop_goal_warned_keys = set()
         self._stationary_jump_targets_by_route = []
         self._rope_climb_targets_by_route = []
         self._rope_climb_state = None
         self._rope_climb_active = False
+        self._rope_climb_combat_deferred = False
+        self._rope_climb_combat_deferred_at = None
         self._rope_climb_completed_key = None
         self._rope_climb_failed_key = None
         self._rope_climb_completed_position = None
         self._rope_climb_failed_position = None
+        self._rope_climb_failed_at = None
         self._stationary_jump_proximity_active = False
         self._portal_sweep_active = False
         self._portal_sweep_key = None
@@ -140,6 +154,7 @@ class MapleStoryAutoBot:
         self._auto_relogin_confirm_miss_count = 0
         self._auto_relogin_ready_count = 0
         self._auto_relogin_next_action_at = 0.0
+        self._auto_relogin_page_next_action_at = {}
         self._auto_relogin_last_action_at = None
         self._auto_relogin_last_action_page = None
         self._auto_relogin_has_attempted_input = False
@@ -189,6 +204,9 @@ class MapleStoryAutoBot:
         self.pending_overhead_marker_count = 0
         self.t_last_overhead_marker_detected = None
         self.last_overhead_marker_match = None
+        self.last_single_yolo_hero_location = None
+        self.last_single_yolo_hero_frame_token = None
+        self.last_yolo_hero_detection = None
         self.screen_player_location_valid = False
         self.loc_party_red_bar = (0, 0) # party red bar location on game screen
         self.loc_minimap = (0, 0) # minimap location on game screen
@@ -812,6 +830,7 @@ class MapleStoryAutoBot:
         self._auto_relogin_confirm_miss_count = 0
         self._auto_relogin_ready_count = 0
         self._auto_relogin_next_action_at = 0.0
+        self._auto_relogin_page_next_action_at = {}
         self._auto_relogin_last_action_at = None
         self._auto_relogin_last_action_page = None
         self._auto_relogin_has_attempted_input = False
@@ -837,6 +856,14 @@ class MapleStoryAutoBot:
             not self.is_debug_mode() and \
             not getattr(self, "is_disable_control", False) and \
             not getattr(getattr(self, "capture", None), "is_static_frame", False)
+
+    def _auto_relogin_reactive_pages(self):
+        """Return whether recovery reacts to any current OCR page.
+
+        This is the shipped behavior.  The ordered state machine is retained
+        only as a compatibility path for older integrations and focused tests.
+        """
+        return self._auto_relogin_config().get("reactive_pages", True) is True
 
     def _auto_relogin_frame_token(self, fallback):
         """Identify the capture source frame so cached frames do not confirm."""
@@ -915,7 +942,8 @@ class MapleStoryAutoBot:
                 keyboard_controller.release_all_key()
 
         logger.warning(
-            "[auto_relogin] Login screen detected; gameplay input suspended"
+            "[auto_relogin] Minimap unavailable; gameplay input suspended "
+            "and continuous OCR recovery started"
         )
 
     def _restore_health_after_auto_relogin(self):
@@ -1111,29 +1139,41 @@ class MapleStoryAutoBot:
         return match.center
 
     def _auto_relogin_page_order(self):
-        """Prefer the expected OCR page without hiding unexpected pages."""
+        """Return OCR-page priority for the current recovery mode."""
+        if self._auto_relogin_reactive_pages():
+            # These are specificity/overlay priorities, not login-flow order.
+            # The numbered world label remains visible after its channel grid
+            # opens, and the queue dialog leaves that channel marker visible
+            # behind it. More-specific overlays must win when both exist.
+            return (
+                "disconnect", "queue", "character", "channel", "world",
+                "connect"
+            )
+
+        # Compatibility mode preserves the former expected-page preference.
         state = getattr(self, "_auto_relogin_state", "idle")
         preferred = []
         if state == "waiting_page":
             expected = getattr(self, "_auto_relogin_expected_page", None)
-            preferred.extend(("disconnect", "character"))
+            preferred.extend(("disconnect", "queue", "character"))
             preferred.extend((
                 expected,
                 getattr(self, "_auto_relogin_last_action_page", None),
             ))
         elif state == "confirming":
             pending = getattr(self, "_auto_relogin_pending_page", None)
-            preferred.extend(("disconnect", "character"))
+            preferred.extend(("disconnect", "queue", "character"))
             preferred.extend((
                 pending,
                 getattr(self, "_auto_relogin_expected_page", None),
             ))
         elif state == "waiting_game":
-            preferred.extend(("character", "disconnect"))
+            preferred.extend(("queue", "character", "disconnect"))
 
         # More-specific overlays stay ahead of labels visible behind them.
         preferred.extend((
-            "disconnect", "character", "channel", "world", "connect"
+            "disconnect", "queue", "character", "channel", "world",
+            "connect"
         ))
         ordered = []
         for page in preferred:
@@ -2259,8 +2299,27 @@ class MapleStoryAutoBot:
             f"target {target}, error {error}",
         )
 
+    def _begin_auto_relogin_queue_wait(self, now):
+        """Hold recovery without input until the queue overlay disappears."""
+        self._auto_relogin_state = "waiting_queue"
+        self._auto_relogin_pending_page = None
+        self._auto_relogin_pending_location = None
+        self._auto_relogin_confirmation_return_state = None
+        self._auto_relogin_confirm_count = 0
+        self._auto_relogin_confirm_miss_count = 0
+        self._auto_relogin_confirm_started_at = None
+        self._auto_relogin_last_confirm_frame_token = None
+        self._auto_relogin_step_started_at = now
+        self._reset_auto_relogin_ocr_gate()
+        self._reset_auto_relogin_pointer_runtime()
+        logger.info(
+            "[auto_relogin] Login queue confirmed; waiting without input "
+            "until the character page appears"
+        )
+        return True
+
     def _complete_auto_relogin_page_action(self, page, now, next_page):
-        """Record one consumed page action and wait for its successor."""
+        """Record one consumed page action and continue recovery scanning."""
         attempts = getattr(self, "_auto_relogin_action_attempts", {})
         attempts[page] = attempts.get(page, 0) + 1
         self._auto_relogin_action_attempts = attempts
@@ -2282,7 +2341,17 @@ class MapleStoryAutoBot:
             retry_delay = self._auto_relogin_number(
                 "step_timeout", 60.0, minimum=1.0
             )
-        self._auto_relogin_next_action_at = now + retry_delay
+        if self._auto_relogin_reactive_pages():
+            page_cooldowns = getattr(
+                self, "_auto_relogin_page_next_action_at", {}
+            )
+            page_cooldowns[page] = now + retry_delay
+            self._auto_relogin_page_next_action_at = page_cooldowns
+            # A new page can act immediately; only this same page is cooled
+            # down.  The legacy global value remains clear in reactive mode.
+            self._auto_relogin_next_action_at = 0.0
+        else:
+            self._auto_relogin_next_action_at = now + retry_delay
         self._auto_relogin_pending_page = None
         self._auto_relogin_confirmation_return_state = None
         self._auto_relogin_pending_location = None
@@ -2294,7 +2363,15 @@ class MapleStoryAutoBot:
         self._reset_auto_relogin_ocr_gate()
         self._reset_auto_relogin_pointer_runtime()
 
-        if page == "character":
+        if self._auto_relogin_reactive_pages():
+            self._auto_relogin_state = "waiting_page"
+            self._auto_relogin_expected_page = None
+            self._auto_relogin_waiting_game_started_at = None
+            logger.info(
+                f"[auto_relogin] {page} action sent; continuing OCR page "
+                "detection until the minimap returns"
+            )
+        elif page == "character":
             self._auto_relogin_state = "waiting_game"
             self._auto_relogin_expected_page = None
             self._auto_relogin_waiting_game_started_at = now
@@ -2319,7 +2396,15 @@ class MapleStoryAutoBot:
                 "[auto_relogin] Recovery input skipped while control is paused"
             )
             return False
-        if now < getattr(self, "_auto_relogin_next_action_at", 0.0):
+        reactive_pages = self._auto_relogin_reactive_pages()
+        next_action_at = (
+            getattr(self, "_auto_relogin_page_next_action_at", {}).get(
+                page, 0.0
+            )
+            if reactive_pages
+            else getattr(self, "_auto_relogin_next_action_at", 0.0)
+        )
+        if now < next_action_at:
             return False
 
         attempts = getattr(self, "_auto_relogin_action_attempts", {})
@@ -2339,7 +2424,7 @@ class MapleStoryAutoBot:
                 minimum=1,
             ))),
         )
-        if attempts.get(page, 0) >= max_attempts:
+        if not reactive_pages and attempts.get(page, 0) >= max_attempts:
             self._fail_auto_relogin(f"{page} page attempts were exhausted")
             return False
 
@@ -2364,6 +2449,7 @@ class MapleStoryAutoBot:
             ocr_action == "focus_next_enter"
         uses_ocr_fixed_click = uses_ocr_target and \
             ocr_action == "fixed_click"
+        uses_ocr_wait = uses_ocr_target and ocr_action == "wait"
         if not uses_ocr_target:
             self._fail_auto_relogin(
                 f"{page} has no configured Chinese OCR target"
@@ -2379,6 +2465,8 @@ class MapleStoryAutoBot:
             f"[auto_relogin] {page} OCR target confirmed at "
             f"capture={semantic_point}"
         )
+        if uses_ocr_wait:
+            return self._begin_auto_relogin_queue_wait(now)
         if uses_ocr_click:
             point = semantic_point
             action = {
@@ -2444,8 +2532,17 @@ class MapleStoryAutoBot:
             # only its configured successor if the command actually executed.
             self._auto_relogin_last_action_page = page
             self._auto_relogin_expected_page = next_page
-            self._auto_relogin_next_action_at = completed_at + \
-                self._auto_relogin_number("input_retry_delay", 1.0)
+            retry_at = completed_at + self._auto_relogin_number(
+                "input_retry_delay", 1.0
+            )
+            if reactive_pages:
+                page_cooldowns = getattr(
+                    self, "_auto_relogin_page_next_action_at", {}
+                )
+                page_cooldowns[page] = retry_at
+                self._auto_relogin_page_next_action_at = page_cooldowns
+            else:
+                self._auto_relogin_next_action_at = retry_at
             logger.warning(f"[auto_relogin] {page} action was not sent")
             return False
         return self._complete_auto_relogin_page_action(
@@ -2453,7 +2550,24 @@ class MapleStoryAutoBot:
         )
 
     def _fail_auto_relogin(self, reason):
-        """Fail closed after bounded retries while allowing manual recovery."""
+        """Reset one recovery step, or fail the legacy ordered flow."""
+        if self._auto_relogin_reactive_pages():
+            self._auto_relogin_state = "waiting_page"
+            self._auto_relogin_pending_page = None
+            self._auto_relogin_pending_location = None
+            self._auto_relogin_confirmation_return_state = None
+            self._auto_relogin_confirm_count = 0
+            self._auto_relogin_confirm_miss_count = 0
+            self._auto_relogin_confirm_started_at = None
+            self._auto_relogin_last_confirm_frame_token = None
+            self._reset_auto_relogin_ocr_gate()
+            self._reset_auto_relogin_pointer_runtime()
+            logger.warning(
+                f"[auto_relogin] Recovery step reset: {reason}; continuing "
+                "OCR page detection until the minimap returns"
+            )
+            return
+
         self._auto_relogin_state = "failed"
         self._reset_auto_relogin_ocr_gate()
         self._reset_auto_relogin_pointer_runtime()
@@ -2481,13 +2595,21 @@ class MapleStoryAutoBot:
         if keyboard_controller is not None:
             keyboard_controller.is_need_force_heal = False
 
-    def _auto_relogin_current_gameplay_evidence(self):
-        """Return a current player dot if the game already finished loading."""
+    def _auto_relogin_current_minimap_structure(self):
+        """Return the current detected minimap, or ``None`` when absent."""
         frame = getattr(self, "img_frame", None)
         if frame is None:
             return None
         detected_result = get_minimap_loc_size(frame)
         if not self._auto_relogin_minimap_structure_valid(detected_result):
+            return None
+        return detected_result
+
+    def _auto_relogin_current_gameplay_evidence(self):
+        """Return a current player dot if the game already finished loading."""
+        frame = getattr(self, "img_frame", None)
+        detected_result = self._auto_relogin_current_minimap_structure()
+        if frame is None or detected_result is None:
             return None
 
         x, y, width, height = map(int, detected_result)
@@ -2512,8 +2634,146 @@ class MapleStoryAutoBot:
             min_component_area=minimap_cfg.get("player_min_component_area", 4),
         )
 
+    def _reset_reactive_auto_relogin_confirmation(self):
+        """Return to passive OCR scanning without leaving recovery mode."""
+        self._auto_relogin_state = "waiting_page"
+        self._auto_relogin_pending_page = None
+        self._auto_relogin_pending_location = None
+        self._auto_relogin_confirmation_return_state = None
+        self._auto_relogin_confirm_count = 0
+        self._auto_relogin_confirm_miss_count = 0
+        self._auto_relogin_confirm_started_at = None
+        self._auto_relogin_last_confirm_frame_token = None
+        self._reset_auto_relogin_ocr_gate()
+
+    def _check_auto_relogin_reactive_screen(self):
+        """React to any confirmed login page until the minimap reappears.
+
+        Page order is deliberately irrelevant.  A missing minimap is the sole
+        entry/ownership condition, and a detected minimap is the sole exit
+        condition. Unknown frames, OCR misses, slow transitions, and repeated
+        pages therefore keep gameplay suspended without exhausting retries.
+        """
+        if not self._auto_relogin_enabled():
+            return False
+        if getattr(self, "is_terminated", False):
+            return True
+
+        state = getattr(self, "_auto_relogin_state", "idle")
+        minimap_result = self._auto_relogin_current_minimap_structure()
+        if minimap_result is not None:
+            if state == "idle":
+                return False
+            self._resume_gameplay_after_auto_relogin()
+            # Resume ordinary processing from a completely fresh frame.
+            return True
+
+        now = time.monotonic()
+        frame_token = self._auto_relogin_frame_token(now)
+        if state == "idle":
+            self._pause_gameplay_for_auto_relogin()
+            self._auto_relogin_state = "waiting_page"
+            state = "waiting_page"
+
+        # A pointer transaction may span several capture frames. If the UI was
+        # changed manually or loaded another recognizable page, abandon that
+        # pointer target and immediately start confirming the current page.
+        if state == "aiming":
+            pointer_page = getattr(self, "_auto_relogin_pointer_page", None)
+            classified_page, location = self._find_known_auto_relogin_page()
+            if classified_page is not None and \
+                    classified_page != pointer_page:
+                self._reset_auto_relogin_pointer_runtime()
+                self._reset_reactive_auto_relogin_confirmation()
+                self._begin_auto_relogin_confirmation(
+                    classified_page, location, now, frame_token
+                )
+                return True
+            self._advance_auto_relogin_pointer_action(now, frame_token)
+            return True
+
+        if state == "waiting_queue":
+            classified_page, location = self._find_known_auto_relogin_page()
+            if classified_page in {None, "queue"}:
+                # The queue can briefly blank while its count refreshes. Keep
+                # ownership and, critically, emit no click or key in either
+                # case. A newly visible character page resumes confirmation.
+                return True
+            self._begin_auto_relogin_confirmation(
+                classified_page, location, now, frame_token
+            )
+            return True
+
+        # Legacy terminal/wait states are non-terminal in reactive mode.
+        if state not in {"waiting_page", "confirming"}:
+            self._reset_reactive_auto_relogin_confirmation()
+            state = "waiting_page"
+
+        classified_page, location = self._find_known_auto_relogin_page()
+        if state == "waiting_page":
+            if classified_page is not None:
+                self._begin_auto_relogin_confirmation(
+                    classified_page, location, now, frame_token
+                )
+            return True
+
+        pending_page = getattr(self, "_auto_relogin_pending_page", None)
+        if classified_page is not None and classified_page != pending_page:
+            # Page transitions and ambiguous world/channel text are expected.
+            # Switch confirmation targets instead of treating either as an
+            # invalid sequence or a terminal recovery failure.
+            logger.debug(
+                "[auto_relogin] OCR page changed while confirming: "
+                f"{pending_page} -> {classified_page}"
+            )
+            self._begin_auto_relogin_confirmation(
+                classified_page, location, now, frame_token
+            )
+            return True
+
+        if classified_page is None:
+            if frame_token != getattr(
+                    self, "_auto_relogin_last_confirm_frame_token", None):
+                self._reset_auto_relogin_ocr_gate()
+                self._auto_relogin_confirm_miss_count = getattr(
+                    self, "_auto_relogin_confirm_miss_count", 0
+                ) + 1
+                self._auto_relogin_confirm_count = 0
+                self._auto_relogin_confirm_started_at = None
+                self._auto_relogin_last_confirm_frame_token = frame_token
+            allowed_misses = max(
+                1,
+                int(round(self._auto_relogin_number(
+                    "cancel_confirm_misses", 2, minimum=1
+                ))),
+            )
+            if getattr(
+                    self, "_auto_relogin_confirm_miss_count", 0
+                    ) >= allowed_misses:
+                self._reset_reactive_auto_relogin_confirmation()
+            return True
+
+        self._begin_auto_relogin_confirmation(
+            pending_page, location, now, frame_token
+        )
+        if not self._auto_relogin_confirmation_ready(now):
+            return True
+
+        self._execute_auto_relogin_page_action(
+            pending_page,
+            getattr(self, "_auto_relogin_pending_location", location),
+            now,
+            frame_token,
+        )
+        return True
+
     def _check_auto_relogin_screen(self):
-        """Advance the Chinese-OCR-confirmed five-page recovery flow.
+        if self._auto_relogin_reactive_pages():
+            return self._check_auto_relogin_reactive_screen()
+        return self._check_auto_relogin_ordered_screen()
+
+    def _check_auto_relogin_ordered_screen(self):
+        """Advance the ordered OCR recovery flow, including queue waiting.
 
         Returning ``True`` means recovery owns the frame, so gameplay systems
         must remain stopped. Only ``waiting_game`` yields unknown frames to the
@@ -2599,6 +2859,15 @@ class MapleStoryAutoBot:
         if state == "aiming":
             self._advance_auto_relogin_pointer_action(now, frame_token)
             return True
+
+        if state == "waiting_queue":
+            page, location = self._find_known_auto_relogin_page()
+            if page in {None, "queue"}:
+                return True
+            self._begin_auto_relogin_confirmation(
+                page, location, now, frame_token
+            )
+            state = "confirming"
 
         if state == "waiting_game":
             page, location = self._find_known_auto_relogin_page()
@@ -2726,6 +2995,9 @@ class MapleStoryAutoBot:
             if return_state == "waiting_game":
                 self._auto_relogin_state = "waiting_game"
                 return False
+            if return_state == "waiting_queue":
+                self._auto_relogin_state = "waiting_queue"
+                return True
             self._auto_relogin_state = "waiting_page"
             return True
 
@@ -2742,6 +3014,31 @@ class MapleStoryAutoBot:
             frame_token,
         )
         return True
+
+    def _resume_gameplay_after_auto_relogin(self):
+        """Restore gameplay producers after current minimap detection."""
+        mode = self.cfg.get("bot", {}).get("mode", "normal")
+        resume_state = {
+            "normal": "hunting",
+            "patrol": "patrol",
+            "aux": "aux",
+        }.get(mode, "hunting")
+        self.fsm.set_init_state(resume_state)
+
+        now = time.time()
+        self.t_last_attack = now
+        self.t_watch_dog = now
+        self.t_last_minimap_update = now
+        self.red_dot_center_prev = None
+        self.is_first_frame = True
+        self.screen_player_location_valid = False
+        self._reset_health_monitor_after_auto_relogin()
+        self._restore_health_after_auto_relogin()
+        self._reset_auto_relogin_runtime()
+        self._resume_keyboard_after_auto_relogin()
+        logger.info(
+            f"[auto_relogin] Minimap restored; resumed {resume_state} state"
+        )
 
     def _gate_auto_relogin_until_game_ready(self, player_location):
         """Keep gameplay stopped until consecutive fresh player dots appear."""
@@ -2770,28 +3067,7 @@ class MapleStoryAutoBot:
         if self._auto_relogin_ready_count < required_frames:
             return True
 
-        mode = self.cfg.get("bot", {}).get("mode", "normal")
-        resume_state = {
-            "normal": "hunting",
-            "patrol": "patrol",
-            "aux": "aux",
-        }.get(mode, "hunting")
-        self.fsm.set_init_state(resume_state)
-
-        now = time.time()
-        self.t_last_attack = now
-        self.t_watch_dog = now
-        self.t_last_minimap_update = now
-        self.red_dot_center_prev = None
-        self.is_first_frame = True
-        self.screen_player_location_valid = False
-        self._reset_health_monitor_after_auto_relogin()
-        self._restore_health_after_auto_relogin()
-        self._reset_auto_relogin_runtime()
-        self._resume_keyboard_after_auto_relogin()
-        logger.info(
-            f"[auto_relogin] Gameplay restored; resumed {resume_state} state"
-        )
+        self._resume_gameplay_after_auto_relogin()
         # Start gameplay on the next completely fresh frame rather than using
         # screen/player fields that were collected during the recovery gate.
         return True
@@ -2800,14 +3076,23 @@ class MapleStoryAutoBot:
         """Confirm the detected minimap occupies the saved/expected region."""
         if detected_result is None:
             return False
-        if getattr(self, "minimap_geometry", None) is None:
+        geometry = getattr(self, "minimap_geometry", None)
+        if geometry is None:
             return True
 
-        expected_image = getattr(self, "img_minimap_screen", None)
-        if expected_image is None or expected_image.size == 0:
+        # Recovery runs before apply_saved_minimap_geometry() in run_once.
+        # On the first frame img_minimap_screen is therefore still the 10x10
+        # constructor placeholder. Derive the expected rectangle directly from
+        # persisted geometry so a valid startup minimap can break the recovery
+        # gate instead of deadlocking before that crop is initialized.
+        frame = getattr(self, "img_frame", None)
+        if frame is None:
             return False
-        expected_x, expected_y = map(int, self.loc_minimap)
-        expected_h, expected_w = expected_image.shape[:2]
+        try:
+            expected_x, expected_y, expected_w, expected_h = \
+                scale_minimap_rect(geometry, frame.shape[:2])
+        except (TypeError, ValueError, KeyError):
+            return False
 
         detected_x, detected_y, detected_w, detected_h = map(
             int, detected_result
@@ -2874,6 +3159,8 @@ class MapleStoryAutoBot:
         monster_backend = str(
             monster_cfg.get("backend", "template")
         ).lower()
+        marker_cfg = cfg.get("nametag", {}).get("overhead_marker", {})
+        marker_backend = str(marker_cfg.get("backend", "template")).lower()
         if mode not in {"normal", "aux", "patrol", "debug"}:
             logger.error(f"[load_config] Unsupported bot mode: {mode}")
             return -1
@@ -2883,6 +3170,74 @@ class MapleStoryAutoBot:
                 f"{monster_backend}"
             )
             return -1
+        if marker_backend not in {"template", "yolo"}:
+            logger.error(
+                "[load_config] Unsupported Hero detection backend: "
+                f"{marker_backend}"
+            )
+            return -1
+        if marker_cfg.get("enable", False) and marker_backend == "yolo":
+            hero_yolo_cfg = marker_cfg.get("yolo", {})
+            if not isinstance(hero_yolo_cfg, dict):
+                logger.error(
+                    "[load_config] nametag.overhead_marker.yolo must be a mapping"
+                )
+                return -1
+            class_name = hero_yolo_cfg.get("class_name", "hero")
+            confidence = hero_yolo_cfg.get("confidence", 0.4)
+            anchor = hero_yolo_cfg.get("player_anchor", (0.5, 0.5))
+            offset = hero_yolo_cfg.get("player_offset", (0, 0))
+            if not isinstance(class_name, str) or not class_name.strip():
+                logger.error(
+                    "[load_config] nametag.overhead_marker.yolo.class_name "
+                    "must be non-empty"
+                )
+                return -1
+            if isinstance(confidence, bool) or not isinstance(
+                    confidence, (int, float)) or not 0 <= confidence <= 1:
+                logger.error(
+                    "[load_config] nametag.overhead_marker.yolo.confidence "
+                    "must be between 0 and 1"
+                )
+                return -1
+            if not isinstance(anchor, (list, tuple)) or len(anchor) != 2 or \
+                    any(
+                        isinstance(value, bool)
+                        or not isinstance(value, (int, float))
+                        or not 0 <= value <= 1
+                        for value in anchor
+                    ):
+                logger.error(
+                    "[load_config] nametag.overhead_marker.yolo.player_anchor "
+                    "must be two ratios between 0 and 1"
+                )
+                return -1
+            if not isinstance(offset, (list, tuple)) or len(offset) != 2 or \
+                    any(
+                        isinstance(value, bool)
+                        or not isinstance(value, (int, float))
+                        for value in offset
+                    ):
+                logger.error(
+                    "[load_config] nametag.overhead_marker.yolo.player_offset "
+                    "must be [x, y]"
+                )
+                return -1
+            max_stale_frames = marker_cfg.get("max_stale_frames", -1)
+            if isinstance(max_stale_frames, bool) or not isinstance(
+                    max_stale_frames, int) or max_stale_frames < -1:
+                logger.error(
+                    "[load_config] nametag.overhead_marker.max_stale_frames "
+                    "must be -1 (unlimited) or a non-negative integer"
+                )
+                return -1
+            if not isinstance(
+                    marker_cfg.get("require_minimap_player", True), bool):
+                logger.error(
+                    "[load_config] nametag.overhead_marker."
+                    "require_minimap_player must be true or false"
+                )
+                return -1
 
         try:
             validate_absolute_mouse_config(cfg)
@@ -3033,6 +3388,7 @@ class MapleStoryAutoBot:
             required_pages = {
                 "disconnect", "connect", "world", "channel", "character"
             }
+            recognized_pages = required_pages | {"queue"}
             flow_reference = auto_relogin_cfg.get(
                 "flow_template_reference_size", (2160, 3840)
             )
@@ -3145,7 +3501,7 @@ class MapleStoryAutoBot:
                         )
                         return -1
                     for page, target_cfg in ocr_targets.items():
-                        if page not in required_pages or not isinstance(
+                        if page not in recognized_pages or not isinstance(
                                 target_cfg, dict):
                             logger.error(
                                 "[load_config] auto_relogin.ocr.targets keys "
@@ -3215,11 +3571,11 @@ class MapleStoryAutoBot:
                         )).strip().lower()
                         if target_action not in {
                                 "click", "enter", "fixed_click",
-                                "focus_next_enter"}:
+                                "focus_next_enter", "wait"}:
                             logger.error(
                                 "[load_config] auto_relogin.ocr.targets."
                                 f"{page}.action must be click, enter, "
-                                "fixed_click, or focus_next_enter"
+                                "fixed_click, focus_next_enter, or wait"
                             )
                             return -1
                         allowed_actions = {
@@ -3229,6 +3585,7 @@ class MapleStoryAutoBot:
                             },
                             "world": {"click"},
                             "channel": {"fixed_click"},
+                            "queue": {"wait"},
                             "character": {"click"},
                         }[page]
                         if target_action not in allowed_actions:
@@ -3492,95 +3849,6 @@ class MapleStoryAutoBot:
                         "a non-negative number"
                     )
                     return -1
-            hp_bar_cfg = power_knockback_cfg.get("hp_bar_supplement", {})
-            hp_bar_enabled = hp_bar_cfg.get("enable", False)
-            if not isinstance(hp_bar_enabled, bool):
-                logger.error(
-                    "[load_config] power_knockback.hp_bar_supplement.enable "
-                    "must be boolean"
-                )
-                return -1
-            if hp_bar_enabled:
-                hsv_bounds = {}
-                for field_name in ("lower_hsv", "upper_hsv"):
-                    value = hp_bar_cfg.get(field_name)
-                    if not isinstance(value, (list, tuple)) or len(value) != 3 \
-                            or any(
-                                isinstance(channel, bool)
-                                or not isinstance(channel, (int, float))
-                                for channel in value
-                            ):
-                        logger.error(
-                            "[load_config] power_knockback.hp_bar_supplement."
-                            f"{field_name} must be three numeric OpenCV HSV "
-                            "channels"
-                        )
-                        return -1
-                    hsv_bounds[field_name] = tuple(map(float, value))
-                for bound_name, bound in hsv_bounds.items():
-                    if not (0 <= bound[0] <= 179) or any(
-                            not 0 <= channel <= 255 for channel in bound[1:]):
-                        logger.error(
-                            "[load_config] power_knockback.hp_bar_supplement."
-                            f"{bound_name} must use OpenCV HSV ranges "
-                            "H=0..179 and S/V=0..255"
-                        )
-                        return -1
-                if any(
-                        low > high
-                        for low, high in zip(
-                            hsv_bounds["lower_hsv"],
-                            hsv_bounds["upper_hsv"],
-                        )):
-                    logger.error(
-                        "[load_config] power_knockback.hp_bar_supplement."
-                        "lower_hsv must not exceed upper_hsv"
-                    )
-                    return -1
-                for field_name in (
-                        "search_above_y", "min_width", "max_width",
-                        "min_height", "max_height", "min_area"):
-                    value = hp_bar_cfg.get(field_name)
-                    if isinstance(value, bool) or not isinstance(value, int) \
-                            or value <= 0:
-                        logger.error(
-                            "[load_config] power_knockback.hp_bar_supplement."
-                            f"{field_name} must be a positive integer"
-                        )
-                        return -1
-                search_below_y = hp_bar_cfg.get("search_below_y")
-                if isinstance(search_below_y, bool) or not isinstance(
-                        search_below_y, int) or search_below_y < 0:
-                    logger.error(
-                        "[load_config] power_knockback.hp_bar_supplement."
-                        "search_below_y must be a non-negative integer"
-                    )
-                    return -1
-                if hp_bar_cfg["min_width"] > hp_bar_cfg["max_width"] or \
-                        hp_bar_cfg["min_height"] > hp_bar_cfg["max_height"]:
-                    logger.error(
-                        "[load_config] power_knockback.hp_bar_supplement "
-                        "minimum dimensions must not exceed maximum dimensions"
-                    )
-                    return -1
-                min_fill_rate = hp_bar_cfg.get("min_fill_rate")
-                if isinstance(min_fill_rate, bool) or not isinstance(
-                        min_fill_rate, (int, float)) or not (
-                            0 < min_fill_rate <= 1):
-                    logger.error(
-                        "[load_config] power_knockback.hp_bar_supplement."
-                        "min_fill_rate must be in (0, 1]"
-                    )
-                    return -1
-                min_aspect_ratio = hp_bar_cfg.get("min_aspect_ratio")
-                if isinstance(min_aspect_ratio, bool) or not isinstance(
-                        min_aspect_ratio, (int, float)) or \
-                        min_aspect_ratio < 0:
-                    logger.error(
-                        "[load_config] power_knockback.hp_bar_supplement."
-                        "min_aspect_ratio must be a non-negative number"
-                    )
-                    return -1
             knockback_key = cfg.get("key", {}).get("power_knockback", "")
             if not isinstance(knockback_key, str) or not knockback_key.strip():
                 logger.error(
@@ -3599,11 +3867,14 @@ class MapleStoryAutoBot:
         self._rope_climb_targets_by_route = []
         self._reset_ladder_route_hold()
         self._ladder_route_exit_confirmed_at = None
+        self._route_loop_goal_key = None
+        self._route_loop_goal_warned_keys = set()
         self._reset_stationary_jump_proximity()
         self._reset_rope_climb(clear_locks=True)
         self._reset_portal_sweep()
         self.monsters_info = {}
-        self.close_hp_bar_candidates = {"left": [], "right": []}
+        self.yolo_hero_detector = None
+        self.yolo_inference_class_names = ("mob",)
         self.minimap_geometry = None
         self._native_minimap_size = None
         self._last_native_minimap_error = None
@@ -3632,6 +3903,9 @@ class MapleStoryAutoBot:
         self.pending_overhead_marker_count = 0
         self.t_last_overhead_marker_detected = None
         self.last_overhead_marker_match = None
+        self.last_single_yolo_hero_location = None
+        self.last_single_yolo_hero_frame_token = None
+        self.last_yolo_hero_detection = None
         self.has_valid_appearance_location = False
         self.pending_appearance_location = None
         self.pending_appearance_count = 0
@@ -3718,7 +3992,7 @@ class MapleStoryAutoBot:
                     self._find_stationary_jump_targets(img)
                 )
                 self._rope_climb_targets_by_route.append(
-                    self._find_rope_climb_targets(img)
+                    self._find_rope_climb_targets(img, cfg["route"])
                 )
 
         if mode in {"normal", "debug"} and monster_backend == "template":
@@ -3777,6 +4051,51 @@ class MapleStoryAutoBot:
                 f"{warmup_text}"
             )
 
+        if marker_cfg.get("enable", False) and marker_backend == "yolo":
+            hero_yolo_cfg = deepcopy(monster_cfg)
+            hero_yolo_overrides = marker_cfg.get("yolo", {})
+            hero_yolo_cfg.update(hero_yolo_overrides)
+            hero_yolo_cfg["class_name"] = str(
+                hero_yolo_overrides.get("class_name", "hero")
+            )
+            try:
+                shared_model = (
+                    self.yolo_monster_detector is not None
+                    and YoloMonsterDetector.inference_signature_from_config(
+                        hero_yolo_cfg
+                    ) == YoloMonsterDetector.inference_signature_from_config(
+                        monster_cfg
+                    )
+                )
+                if shared_model:
+                    self.yolo_hero_detector = self.yolo_monster_detector
+                else:
+                    self.yolo_hero_detector = \
+                        YoloMonsterDetector.from_config(hero_yolo_cfg)
+                self.yolo_hero_detector.require_class(
+                    hero_yolo_cfg["class_name"]
+                )
+                if hero_yolo_cfg.get("warmup", True):
+                    self.yolo_hero_detector.warmup(frame_size=WINDOW_WORKING_SIZE)
+            except (FileNotFoundError, KeyError, RuntimeError, ValueError) as exc:
+                logger.error(
+                    "[load_config] Unable to load YOLO Hero detector: "
+                    f"{exc}"
+                )
+                return -1
+            if shared_model:
+                self.yolo_inference_class_names = tuple(dict.fromkeys((
+                    self.yolo_monster_detector.class_name,
+                    hero_yolo_cfg["class_name"],
+                )))
+            logger.info(
+                "[load_config] YOLO Hero detection ready: "
+                f"model={self.yolo_hero_detector.model_path}, "
+                f"confidence={float(hero_yolo_cfg.get('confidence', 0.4))}, "
+                f"class={hero_yolo_cfg['class_name']}, "
+                f"shared_with_mob={shared_model}"
+            )
+
         # Load player's name tag
         if cfg["nametag"]["enable"]:
             self.img_nametag = load_image(f"nametag/{cfg['nametag']['name']}.png")
@@ -3822,13 +4141,13 @@ class MapleStoryAutoBot:
                         "pet-assisted matching is disabled"
                     )
 
-        # Smile-only Hero detection still needs the nearby climbing/standing
+        # Marker/YOLO Hero detection still needs nearby climbing/standing
         # templates to decide whether a vertical route must remain held. Keep
         # pose loading independent from the disabled legacy name-tag locator.
         self._load_player_appearance_templates(cfg["nametag"])
 
         marker_cfg = cfg["nametag"].get("overhead_marker", {})
-        if marker_cfg.get("enable", False):
+        if marker_cfg.get("enable", False) and marker_backend == "template":
             marker_name = (
                 marker_cfg.get("name")
                 or f"{cfg['nametag']['name']}_overhead_smile"
@@ -4556,7 +4875,8 @@ class MapleStoryAutoBot:
                 self.health_monitor.start()
 
             self.profiler = Profiler(self.cfg)
-            self.rune_solver = RuneSolver(self.cfg)
+            if self.cfg.get("rune_solver", {}).get("enable", False) is True:
+                self.rune_solver = RuneSolver(self.cfg)
 
             # Reset all timers
             self.t_last_frame = time.time()
@@ -4594,6 +4914,9 @@ class MapleStoryAutoBot:
             self.pending_overhead_marker_count = 0
             self.t_last_overhead_marker_detected = None
             self.last_overhead_marker_match = None
+            self.last_single_yolo_hero_location = None
+            self.last_single_yolo_hero_frame_token = None
+            self.last_yolo_hero_detection = None
             self.has_valid_appearance_location = False
             self.pending_appearance_location = None
             self.pending_appearance_count = 0
@@ -4634,61 +4957,363 @@ class MapleStoryAutoBot:
 
     def start_record(self):
         '''
-        Start recording unprocessed capture frames.
+        Start recording raw capture frames and annotated diagnostic frames.
         '''
         # Make sure video/ exist
         os.makedirs("video", exist_ok=True)
         timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-        path = os.path.join("video", f"{timestamp}_raw.mp4")
-
-        self._video_record_path = path
-        self._video_record_size = None
-        self.video_writer = None
-        frame = getattr(self, "frame", None)
-        if frame is not None:
-            self._open_video_writer_for_frame(frame)
-
-        logger.info(
-            f"[start_record] Record raw capture frames to {path}"
+        raw_path = os.path.join("video", f"{timestamp}_raw.mp4")
+        annotated_path = os.path.join(
+            "video", f"{timestamp}_annotated.mp4"
         )
 
-    def _open_video_writer_for_frame(self, frame):
-        """Open the pending recorder with the actual current frame size."""
-        path = getattr(self, "_video_record_path", None)
+        with self._get_video_record_lock():
+            self._release_video_record_writers()
+            self._video_record_path = raw_path
+            self._video_record_size = None
+            self._annotated_video_record_path = annotated_path
+            self._annotated_video_record_size = None
+            self._annotated_record_frame_pending = False
+
+            # The raw writer can use the capture source's current dimensions
+            # immediately.  The annotated writer is opened lazily after the
+            # next frame has completed all diagnostic drawing.
+            frame = getattr(self, "frame", None)
+            if frame is not None:
+                self._open_video_writer_for_frame(frame)
+
+        logger.info(
+            "[start_record] Record raw capture frames to "
+            f"{raw_path}; annotated frames to {annotated_path}"
+        )
+
+    def _get_video_record_lock(self):
+        """Return the recorder lock, including for lightweight test objects."""
+        lock = getattr(self, "_video_record_lock", None)
+        if lock is None:
+            lock = threading.RLock()
+            self._video_record_lock = lock
+        return lock
+
+    def _release_video_record_writers(self):
+        """Release both writers. Caller must hold the recorder lock."""
+        for writer_attr in ("video_writer", "annotated_video_writer"):
+            writer = getattr(self, writer_attr, None)
+            if writer is not None:
+                writer.release()
+            setattr(self, writer_attr, None)
+
+    def _open_record_writer_for_frame(
+            self, frame, *, path_attr, writer_attr, size_attr):
+        """Open or resize one pending MP4 writer for a concrete frame."""
+        path = getattr(self, path_attr, None)
         if path is None or frame is None:
-            return
+            return None
         frame_h, frame_w = frame.shape[:2]
         frame_size = (frame_w, frame_h)
-        if getattr(self, "video_writer", None) is not None and \
-                getattr(self, "_video_record_size", None) == frame_size:
-            return
-        if getattr(self, "video_writer", None) is not None:
-            self.video_writer.release()
+        writer = getattr(self, writer_attr, None)
+        if writer is not None and getattr(self, size_attr, None) == frame_size:
+            return writer
+        if writer is not None:
+            writer.release()
         fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-        self.video_writer = cv2.VideoWriter(path, fourcc, 10, frame_size)
-        self._video_record_size = frame_size
+        writer = cv2.VideoWriter(path, fourcc, 10, frame_size)
+        setattr(self, writer_attr, writer)
+        setattr(self, size_attr, frame_size)
+        return writer
+
+    def _open_video_writer_for_frame(self, frame):
+        """Open the raw recorder with the actual capture-frame size."""
+        with self._get_video_record_lock():
+            return self._open_record_writer_for_frame(
+                frame,
+                path_attr="_video_record_path",
+                writer_attr="video_writer",
+                size_attr="_video_record_size",
+            )
+
+    def _open_annotated_video_writer_for_frame(self, frame):
+        """Open the annotated recorder with the rendered-frame size."""
+        with self._get_video_record_lock():
+            return self._open_record_writer_for_frame(
+                frame,
+                path_attr="_annotated_video_record_path",
+                writer_attr="annotated_video_writer",
+                size_attr="_annotated_video_record_size",
+            )
 
     def _write_raw_video_frame(self, frame):
         """Write one capture-source frame before pipeline processing."""
-        if getattr(self, "_video_record_path", None) is None or frame is None:
+        with self._get_video_record_lock():
+            writer = self._open_record_writer_for_frame(
+                frame,
+                path_attr="_video_record_path",
+                writer_attr="video_writer",
+                size_attr="_video_record_size",
+            )
+            if writer is None:
+                return False
+            writer.write(frame)
+            return True
+
+    def _write_annotated_video_frame(self, frame):
+        """Write one frame after all available diagnostic drawing."""
+        with self._get_video_record_lock():
+            writer = self._open_record_writer_for_frame(
+                frame,
+                path_attr="_annotated_video_record_path",
+                writer_attr="annotated_video_writer",
+                size_attr="_annotated_video_record_size",
+            )
+            if writer is None:
+                return False
+            writer.write(frame)
+            return True
+
+    def _flush_annotated_video_frame(self):
+        """Write the current loop frame once, including early-return frames."""
+        if not getattr(self, "_annotated_record_frame_pending", False):
             return False
-        if getattr(self, "video_writer", None) is None:
-            self._open_video_writer_for_frame(frame)
-        if getattr(self, "video_writer", None) is None:
-            return False
-        self.video_writer.write(frame)
-        return True
+        self._annotated_record_frame_pending = False
+        return self._write_annotated_video_frame(
+            getattr(self, "img_frame_debug", None)
+        )
 
     def stop_record(self):
         '''
-        Stop Record
+        Stop both video recordings.
         '''
-        if getattr(self, "video_writer", None) is not None:
-            self.video_writer.release()
-        self.video_writer = None
-        self._video_record_path = None
-        self._video_record_size = None
-        logger.info("[stop_record] Stop recording")
+        with self._get_video_record_lock():
+            was_recording = any((
+                getattr(self, "_video_record_path", None),
+                getattr(self, "_annotated_video_record_path", None),
+                getattr(self, "video_writer", None),
+                getattr(self, "annotated_video_writer", None),
+            ))
+            self._release_video_record_writers()
+            self._video_record_path = None
+            self._video_record_size = None
+            self._annotated_video_record_path = None
+            self._annotated_video_record_size = None
+            self._annotated_record_frame_pending = False
+        if was_recording:
+            logger.info("[stop_record] Stop raw and annotated recording")
+
+    def get_player_location_by_yolo(self, expected_player=None):
+        """Locate the configured Hero class with guarded temporal tracking."""
+        marker_cfg = (
+            self.cfg.get("nametag", {}).get("overhead_marker", {})
+        )
+        if not marker_cfg.get("enable", False) or str(
+                marker_cfg.get("backend", "template")).lower() != "yolo":
+            return None
+        detector = getattr(self, "yolo_hero_detector", None)
+        frame = getattr(self, "img_frame", None)
+        if detector is None or frame is None:
+            return None
+
+        def record_miss(status):
+            self.overhead_marker_miss_count = getattr(
+                self, "overhead_marker_miss_count", 0
+            ) + 1
+            self.pending_overhead_marker_location = None
+            self.pending_overhead_marker_count = 0
+            max_stale_frames = int(marker_cfg.get("max_stale_frames", -1))
+            retain_without_limit = max_stale_frames < 0
+            use_cached_location = (
+                status != "minimap-unavailable"
+                and getattr(
+                    self, "has_valid_overhead_marker_location", False
+                )
+                and (
+                    retain_without_limit
+                    or self.overhead_marker_miss_count <= max_stale_frames
+                )
+            )
+            self.last_overhead_marker_match = {
+                "status": f"{status},cached" if use_cached_location else status,
+            }
+            cache_expired = (
+                not retain_without_limit
+                and self.overhead_marker_miss_count > max_stale_frames
+            )
+            if status == "minimap-unavailable" or cache_expired:
+                self.last_single_yolo_hero_location = None
+                self.last_single_yolo_hero_frame_token = None
+                self.last_yolo_hero_detection = None
+            if use_cached_location:
+                cached_detection = getattr(
+                    self, "last_yolo_hero_detection", None
+                )
+                if cached_detection is not None:
+                    self._draw_debug_rectangle(
+                        cached_detection["position"],
+                        cached_detection["size"],
+                        (0, 165, 255),
+                        f"HeroYOLO:cached {self.overhead_marker_miss_count}",
+                        thickness=1,
+                        text_height=0.45,
+                    )
+                return self.loc_overhead_marker_player
+            self.has_valid_overhead_marker_location = False
+            return None
+
+        if marker_cfg.get("require_minimap_player", True):
+            minimap_source = getattr(self, "img_minimap_source", None)
+            minimap_cfg = self.cfg.get("minimap", {})
+            if minimap_source is None or get_player_location_on_minimap(
+                minimap_source,
+                minimap_player_color=minimap_cfg.get(
+                    "player_color", (255, 255, 0)
+                ),
+                color_tolerance=minimap_cfg.get("player_color_tolerance", 0),
+                min_component_area=minimap_cfg.get(
+                    "player_min_component_area", 4
+                ),
+            ) is None:
+                return record_miss("minimap-unavailable")
+
+        camera_y_end = min(
+            frame.shape[0], int(self.cfg["ui_coords"]["ui_y_start"])
+        )
+        if camera_y_end <= 0:
+            return record_miss("invalid-camera")
+        yolo_cfg = marker_cfg.get("yolo", {})
+        class_name = str(yolo_cfg.get("class_name", "hero"))
+        inference_classes = (
+            getattr(self, "yolo_inference_class_names", (class_name,))
+            if detector is getattr(self, "yolo_monster_detector", None)
+            else (class_name,)
+        )
+        detections = detector.detect(
+            frame,
+            roi=(0, 0, frame.shape[1], camera_y_end),
+            confidence=float(yolo_cfg.get("confidence", 0.4)),
+            class_name=class_name,
+            inference_class_names=inference_classes,
+            inference_confidence=(
+                detector.confidence
+                if detector is getattr(self, "yolo_monster_detector", None)
+                else None
+            ),
+            cache_key=getattr(self, "_current_capture_frame_token", None),
+        )
+        anchor = yolo_cfg.get("player_anchor", (0.5, 0.5))
+        offset = yolo_cfg.get("player_offset", (0, 0))
+        candidates = []
+        for detection in detections:
+            x, y = detection["position"]
+            height, width = detection["size"]
+            player = (
+                int(round(x + width * float(anchor[0]) + float(offset[0]))),
+                int(round(y + height * float(anchor[1]) + float(offset[1]))),
+            )
+            candidates.append({**detection, "player": player})
+
+        if not candidates:
+            return record_miss("not-found")
+        previous_single_location = getattr(
+            self, "last_single_yolo_hero_location", None
+        )
+        if len(candidates) == 1:
+            self.last_single_yolo_hero_location = candidates[0]["player"]
+            self.last_single_yolo_hero_frame_token = getattr(
+                self, "_current_capture_frame_token", None
+            )
+        if expected_player is None and getattr(
+                self, "has_valid_overhead_marker_location", False):
+            expected_player = self.loc_overhead_marker_player
+
+        # A frame containing exactly one Hero box is stronger identity history
+        # than a score comparison between several boxes. Keep that location
+        # separate from the accepted/cached coordinate so the immediately
+        # following crowded frame can select its nearest candidate.
+        selection_anchor = expected_player
+        selection_scope = "local"
+        if len(candidates) > 1 and previous_single_location is not None:
+            selection_anchor = previous_single_location
+            selection_scope = "single-history"
+
+        match_scope = "global"
+        if selection_anchor is not None:
+            selection_anchor = tuple(map(int, selection_anchor))
+            local_radius = max(
+                1, int(marker_cfg.get("local_search_radius", 90))
+            )
+            local_candidates = [
+                item for item in candidates
+                if max(
+                    abs(item["player"][0] - selection_anchor[0]),
+                    abs(item["player"][1] - selection_anchor[1]),
+                ) <= local_radius
+            ]
+            if not local_candidates:
+                return record_miss("not-found-local")
+            best_match = min(local_candidates, key=lambda item: (
+                max(
+                    abs(item["player"][0] - selection_anchor[0]),
+                    abs(item["player"][1] - selection_anchor[1]),
+                ),
+                -item["confidence"],
+            ))
+            match_scope = selection_scope
+        else:
+            if marker_cfg.get("require_unique_global", True) and \
+                    len(candidates) != 1:
+                return record_miss("ambiguous")
+            best_match = max(candidates, key=lambda item: item["confidence"])
+            confirm_frames = max(
+                1, int(marker_cfg.get("global_confirm_frames", 2))
+            )
+            if confirm_frames > 1:
+                pending = getattr(
+                    self, "pending_overhead_marker_location", None
+                )
+                confirm_radius = max(
+                    1, int(marker_cfg.get("global_confirm_radius", 24))
+                )
+                if pending is not None and max(
+                    abs(best_match["player"][0] - pending[0]),
+                    abs(best_match["player"][1] - pending[1]),
+                ) <= confirm_radius:
+                    self.pending_overhead_marker_count = getattr(
+                        self, "pending_overhead_marker_count", 0
+                    ) + 1
+                else:
+                    self.pending_overhead_marker_count = 1
+                self.pending_overhead_marker_location = best_match["player"]
+                if self.pending_overhead_marker_count < confirm_frames:
+                    self.last_overhead_marker_match = {
+                        "status": "pending",
+                        **best_match,
+                    }
+                    return None
+
+        self.loc_overhead_marker_player = best_match["player"]
+        self.has_valid_overhead_marker_location = True
+        self.overhead_marker_miss_count = 0
+        self.t_last_overhead_marker_detected = time.monotonic()
+        self.pending_overhead_marker_location = None
+        self.pending_overhead_marker_count = 0
+        self.last_overhead_marker_match = {
+            "status": match_scope,
+            **best_match,
+        }
+        self.last_yolo_hero_detection = {
+            "position": best_match["position"],
+            "size": best_match["size"],
+            "confidence": best_match["confidence"],
+        }
+        self._draw_debug_rectangle(
+            best_match["position"],
+            best_match["size"],
+            (255, 80, 220),
+            f"HeroYOLO:{best_match['confidence']:.3f},{match_scope}",
+            thickness=2,
+            text_height=0.45,
+        )
+        self._update_ladder_state_from_smile_pose(best_match["player"])
+        return best_match["player"]
 
     def get_player_location_by_overhead_marker(
             self, expected_player=None, allow_global=True):
@@ -4698,6 +5323,8 @@ class MapleStoryAutoBot:
         geometry. Only those small candidates are checked with the masked face
         template. Local matches near the previous Hero position are accepted
         immediately; cold full-frame matches use consecutive-frame protection.
+        Once established, the last valid Hero position remains authoritative
+        across detection misses until a new match is confirmed.
         """
         marker_cfg = (
             self.cfg.get("nametag", {}).get("overhead_marker", {})
@@ -4869,9 +5496,6 @@ class MapleStoryAutoBot:
             last_detected = getattr(
                 self, "t_last_overhead_marker_detected", None
             )
-            lost_timeout_s = max(0.0, float(marker_cfg.get(
-                "lost_timeout_s", 2.0
-            )))
             cache_age_s = (
                 None if last_detected is None else now - last_detected
             )
@@ -4879,11 +5503,10 @@ class MapleStoryAutoBot:
                 getattr(
                     self, "has_valid_overhead_marker_location", False
                 )
-                and cache_age_s is not None
-                and cache_age_s <= lost_timeout_s
+                and getattr(
+                    self, "loc_overhead_marker_player", None
+                ) is not None
             )
-            if not use_cached_location:
-                self.has_valid_overhead_marker_location = False
             self.last_overhead_marker_match = {
                 "status": f"{status},cached" if use_cached_location else status,
                 "cache_age_s": cache_age_s,
@@ -4900,10 +5523,8 @@ class MapleStoryAutoBot:
                 cached_component,
                 (expected_height, expected_width),
                 (0, 165, 255),
-                (
-                    f"HeroSmile:cached {cache_age_s:.1f}/"
-                    f"{lost_timeout_s:.1f}s"
-                ),
+                "HeroSmile:cached" if cache_age_s is None else
+                f"HeroSmile:cached {cache_age_s:.1f}s",
                 thickness=1,
                 text_height=0.45,
             )
@@ -5010,10 +5631,12 @@ class MapleStoryAutoBot:
         return best_match["player"]
 
     def _update_ladder_state_from_smile_pose(self, player_location):
-        """Classify the tiger hood directly below a fresh smile marker.
+        """Classify the tiger hood below a fresh screen-space Hero anchor.
 
-        The smile provides a unique Hero anchor.  Appearance matching is then
-        restricted to that anchor.  A climbing-hood match enters ladder state;
+        The historical method name is retained for compatibility. The active
+        smile-template or YOLO backend provides the Hero anchor, after which
+        appearance matching is restricted to that anchor. A climbing-hood
+        match enters ladder state;
         every other result is treated as flat ground, so stale climbing state
         can never survive a fresh non-climbing frame.
         """
@@ -5053,7 +5676,7 @@ class MapleStoryAutoBot:
             else:
                 evidence = "climbing-template-not-matched"
             logger.info(
-                "[ladder] Smile-anchored tiger pose changed state to "
+                "[ladder] Hero-anchored tiger pose changed state to "
                 f"{'climbing' if new_state else 'ground'} "
                 f"({evidence})"
             )
@@ -5068,6 +5691,10 @@ class MapleStoryAutoBot:
             self.cfg.get("nametag", {}).get("overhead_marker", {})
         )
         if marker_cfg.get("enable", False):
+            if str(marker_cfg.get("backend", "template")).lower() == "yolo":
+                return self.get_player_location_by_yolo(
+                    expected_player=expected_player
+                ), None
             return self.get_player_location_by_overhead_marker(
                 expected_player=expected_player, allow_global=True
             ), None
@@ -6192,6 +6819,49 @@ class MapleStoryAutoBot:
             return None
         return parts[1] if parts[1] in {"up", "down"} else None
 
+    def _get_ladder_route_alignment_move_x(self, color_code_up_down):
+        """Return a ground alignment move before emitting ladder Up/Down.
+
+        A legacy vertical route stroke is discoverable inside ``search_range``.
+        Without an x-axis guard, that tolerance can press Up while Hero is
+        beside the intended rope -- including while standing in a nearby map
+        portal.  Once the climbing pose is visible the normal ladder hold owns
+        input, so alignment is needed only while Hero is still on the ground.
+        """
+        if bool(getattr(self, "is_on_ladder", False)):
+            return None
+        direction = self._get_pure_ladder_route_direction(
+            color_code_up_down
+        )
+        if direction is None or self.img_route is None:
+            return None
+
+        component = self._get_route_color_component(
+            self.img_route,
+            color_code_up_down["pixel"],
+            color_code_up_down["color"],
+        )
+        if component is None:
+            return None
+
+        left, top, right, bottom = component["bbox"]
+        if bottom - top + 1 <= right - left + 1:
+            # Do not reinterpret a short horizontal smear as a rope/ladder.
+            return None
+
+        tolerance = max(
+            0,
+            int(self.cfg.get("route", {}).get(
+                "ladder_alignment_tolerance", 2
+            )),
+        )
+        player_x = int(self.loc_player_global[0])
+        if player_x < left - tolerance:
+            return "right"
+        if player_x > right + tolerance:
+            return "left"
+        return None
+
     def _apply_ladder_route_hold(
             self, color_code_up_down=None, *, allow_restore=True):
         """Keep the selected vertical direction until ground is classified.
@@ -6274,10 +6944,29 @@ class MapleStoryAutoBot:
             and parts[2] == "climb"
         )
 
-    def _find_rope_climb_targets(self, img_route):
-        """Find hand-drawn platform-to-rope guide components."""
+    def _find_rope_climb_targets(self, img_route, route_cfg=None):
+        """Find guide components and bind any explicit rope-end arrows."""
         if img_route is None:
             return ()
+
+        if route_cfg is None:
+            current_cfg = getattr(self, "cfg", None) or {}
+            route_cfg = current_cfg.get("route", {})
+        target_color = tuple(map(
+            int,
+            route_cfg.get("rope_climb_target_color", (0, 191, 255)),
+        ))
+        arrow_bind_distance = max(
+            0,
+            int(route_cfg.get("rope_climb_arrow_bind_distance", 3)),
+        )
+        target_ys, target_xs = np.where(
+            np.all(img_route == target_color, axis=2)
+        )
+        arrow_tips = tuple(
+            (int(px), int(py))
+            for px, py in zip(target_xs, target_ys)
+        )
 
         targets = []
         for color, command in self.color_code.items():
@@ -6326,12 +7015,43 @@ class MapleStoryAutoBot:
                     ),
                 )
                 endpoints = tuple(sorted((endpoint_a, endpoint_b)))
+                nearby_arrow_tips = []
+                for arrow_tip in arrow_tips:
+                    distance = min(
+                        abs(arrow_tip[0] - point[0])
+                        + abs(arrow_tip[1] - point[1])
+                        for point in points
+                    )
+                    if distance <= arrow_bind_distance:
+                        nearby_arrow_tips.append((distance, arrow_tip))
+
+                rope_target = None
+                if nearby_arrow_tips:
+                    # The arrow tip is a single exact-color pixel. Reject an
+                    # ambiguous tie instead of silently choosing an endpoint.
+                    nearby_arrow_tips.sort(
+                        key=lambda item: (item[0], item[1][1], item[1][0])
+                    )
+                    best_distance = nearby_arrow_tips[0][0]
+                    best_tips = [
+                        tip for distance, tip in nearby_arrow_tips
+                        if distance == best_distance
+                    ]
+                    if len(best_tips) == 1:
+                        rope_target = best_tips[0]
+                    else:
+                        logger.warning(
+                            "[route] Ambiguous explicit rope arrow near "
+                            f"guide bbox={(x, y, width, height)}; retain "
+                            "legacy endpoint inference"
+                        )
                 targets.append({
                     "color": tuple(color),
                     "command": command,
                     "pixels": frozenset(points),
                     "endpoints": endpoints,
                     "bbox": (x, y, width, height),
+                    "rope_target": rope_target,
                 })
 
         return tuple(sorted(
@@ -6373,11 +7093,22 @@ class MapleStoryAutoBot:
         )
         completed_key = getattr(self, "_rope_climb_completed_key", None)
         failed_key = getattr(self, "_rope_climb_failed_key", None)
+        failed_at = getattr(self, "_rope_climb_failed_at", None)
+        failure_rearm_delay = max(
+            0.0,
+            float(route_cfg.get("rope_climb_failure_rearm_delay", 1.5)),
+        )
+        failed_rearm_ready = bool(
+            failed_key is not None
+            and failed_at is not None
+            and time.monotonic() - float(failed_at) >= failure_rearm_delay
+        )
+        blocked_failed_key = None if failed_rearm_ready else failed_key
 
         candidates = []
         for target in self._get_active_rope_climb_targets():
             key = self._rope_climb_component_key(self.idx_routes, target)
-            if key in {completed_key, failed_key}:
+            if key in {completed_key, blocked_failed_key}:
                 continue
             nearest_distance = min(
                 abs(point[0] - player[0]) + abs(point[1] - player[1])
@@ -6393,13 +7124,17 @@ class MapleStoryAutoBot:
                 )
                 for endpoint in target["endpoints"]
             ]
-            _, rope_endpoint = max(
-                endpoint_distances,
-                key=lambda item: (item[0], item[1][1], item[1][0]),
-            )
+            rope_endpoint = target.get("rope_target")
+            explicit_target = rope_endpoint is not None
+            if rope_endpoint is None:
+                _, rope_endpoint = max(
+                    endpoint_distances,
+                    key=lambda item: (item[0], item[1][1], item[1][0]),
+                )
             candidate = dict(target)
             candidate["key"] = key
             candidate["center"] = tuple(rope_endpoint)
+            candidate["explicit_target"] = explicit_target
             candidates.append((
                 nearest_distance,
                 -max(distance for distance, _ in endpoint_distances),
@@ -6414,11 +7149,50 @@ class MapleStoryAutoBot:
         """Release the climb state while optionally rearming all guides."""
         self._rope_climb_state = None
         self._rope_climb_active = False
+        self._rope_climb_combat_deferred = False
+        self._rope_climb_combat_deferred_at = None
         if clear_locks:
             self._rope_climb_completed_key = None
             self._rope_climb_failed_key = None
             self._rope_climb_completed_position = None
             self._rope_climb_failed_position = None
+            self._rope_climb_failed_at = None
+
+    def _set_rope_climb_combat_deferred(self, deferred):
+        """Pause/resume a pre-mount climb while an attack target owns input."""
+        state = getattr(self, "_rope_climb_state", None)
+        if state is None:
+            self._rope_climb_combat_deferred = False
+            self._rope_climb_combat_deferred_at = None
+            return
+
+        now = time.monotonic()
+        was_deferred = bool(getattr(
+            self, "_rope_climb_combat_deferred", False
+        ))
+        if deferred:
+            if not was_deferred:
+                self._rope_climb_combat_deferred_at = now
+            self._rope_climb_combat_deferred = True
+            return
+        if not was_deferred:
+            return
+
+        paused_at = getattr(self, "_rope_climb_combat_deferred_at", None)
+        paused_for = max(0.0, now - paused_at) \
+            if paused_at is not None else 0.0
+        # All rope timeouts use monotonic timestamps. Shift them together so
+        # time spent killing a nearby monster cannot age or fail the climb.
+        for key in (
+                "started_at", "aligned_since", "mount_request_started_at",
+                "last_progress_at", "last_y_change_at",
+                "position_last_progress_at", "position_brake_started_at"):
+            value = state.get(key)
+            if value is not None:
+                state[key] = float(value) + paused_for
+        state["approach_last_x"] = int(self.loc_player_global[0])
+        self._rope_climb_combat_deferred = False
+        self._rope_climb_combat_deferred_at = None
 
     def _clear_rope_climb_locks_if_departed(self):
         """Rearm a guide after Hero leaves its completion/failure area."""
@@ -6457,6 +7231,8 @@ class MapleStoryAutoBot:
             if departed:
                 setattr(self, key_attr, None)
                 setattr(self, position_attr, None)
+                if key_attr == "_rope_climb_failed_key":
+                    self._rope_climb_failed_at = None
 
     def _choose_rope_runup_side(self, target_x):
         """Choose which side to back up to before running at the rope."""
@@ -6506,11 +7282,25 @@ class MapleStoryAutoBot:
         )
         state["position_best_distance"] = None
         state["position_last_progress_at"] = time.monotonic()
+        state["position_continuous"] = False
+        state["position_brake_started_at"] = None
+        state["position_last_dx"] = None
+        # The continuous-approach path predicts one capture interval of
+        # horizontal travel. Reset the sample whenever a retry changes sides;
+        # a displacement made while repositioning is not launch velocity.
+        state["approach_last_x"] = int(self.loc_player_global[0])
 
     def _start_rope_climb(self, route_action):
         """Create a climb state from one predicted rope guide endpoint."""
         target = tuple(map(int, route_action["target_center"]))
         key = route_action["guide_key"]
+        if key == getattr(self, "_rope_climb_failed_key", None):
+            logger.info(
+                "[route] Rearm nearby climb guide after failure cooldown"
+            )
+            self._rope_climb_failed_key = None
+            self._rope_climb_failed_position = None
+            self._rope_climb_failed_at = None
         state = getattr(self, "_rope_climb_state", None)
         if state is None or state.get("key") != key:
             now = time.monotonic()
@@ -6610,11 +7400,12 @@ class MapleStoryAutoBot:
         position = tuple(map(int, self.loc_player_global))
         logger.warning(
             f"[route] Rope climb {reason} near {state['target']}; "
-            "release input until the Hero leaves this guide"
+            "pause before retrying this guide"
         )
         self._reset_rope_climb()
         self._rope_climb_failed_key = key
         self._rope_climb_failed_position = position
+        self._rope_climb_failed_at = time.monotonic()
 
     def _prepare_rope_climb_retry(self, state):
         previous_side = state.get("side")
@@ -6775,22 +7566,57 @@ class MapleStoryAutoBot:
             tolerance = max(
                 0, int(route_cfg.get("rope_climb_align_tolerance", 1))
             )
-            reached_runway = (
-                player_x >= start_x - tolerance
+            previous_x = int(state.get("approach_last_x", player_x))
+            observed_step = (
+                player_x - previous_x
                 if direction == "right"
-                else player_x <= start_x + tolerance
+                else previous_x - player_x
             )
-            self.cmd_move_x = direction
-            if reached_runway:
-                return self._request_rope_mount(
-                    state, now, player_y
-                )
+            observed_step = max(0, observed_step)
+            state["approach_last_x"] = player_x
 
+            # At 10 FPS a running Hero can cross the generated runway between
+            # two minimap samples. Once forward motion is observed, trigger
+            # before the runway by one measured frame plus a small actuation
+            # margin. A stationary/repositioning Hero gets no prediction.
+            prediction_margin = max(
+                0,
+                int(route_cfg.get(
+                    "rope_climb_running_prediction_margin", 4
+                )),
+            )
+            runup_distance = max(
+                0,
+                int(route_cfg.get("rope_climb_runup_distance", 8)),
+            )
+            prediction_limit = max(1, runup_distance * 2)
+            prediction_lead = (
+                min(
+                    prediction_limit,
+                    observed_step + prediction_margin,
+                )
+                if observed_step > 0
+                else 0
+            )
             remaining = (
                 start_x - player_x
                 if direction == "right"
                 else player_x - start_x
             )
+            reached_runway = remaining <= tolerance + prediction_lead
+            self.cmd_move_x = direction
+            if reached_runway:
+                if prediction_lead > 0:
+                    logger.info(
+                        "[route] Continuous rope approach predicted runway "
+                        f"crossing: x={player_x}, runway_x={start_x}, "
+                        f"observed_step={observed_step}, "
+                        f"lead={prediction_lead}"
+                    )
+                return self._request_rope_mount(
+                    state, now, player_y
+                )
+
             best_distance = state.get("position_best_distance")
             if best_distance is None or remaining < best_distance:
                 state["position_best_distance"] = remaining
@@ -6813,7 +7639,26 @@ class MapleStoryAutoBot:
         )
         dx = int(state["start_x"]) - player_x
         distance = abs(dx)
-        if distance > tolerance:
+        hold_distance = max(
+            tolerance + 1,
+            int(route_cfg.get("rope_climb_align_hold_distance", 6)),
+        )
+        crossing_tolerance = max(
+            tolerance,
+            int(route_cfg.get(
+                "rope_climb_align_crossing_tolerance", 3
+            )),
+        )
+        previous_dx = state.get("position_last_dx")
+        crossed_runway = bool(
+            previous_dx is not None
+            and previous_dx != 0
+            and dx != 0
+            and (previous_dx > 0) != (dx > 0)
+            and distance <= crossing_tolerance
+        )
+        state["position_last_dx"] = dx
+        if distance > tolerance and not crossed_runway:
             state["phase"] = "position"
             state["aligned_since"] = None
             best_distance = state.get("position_best_distance")
@@ -6841,11 +7686,40 @@ class MapleStoryAutoBot:
                     f"{previous_side} to {state['side']} side"
                 )
                 return True
+            direction = "right" if dx > 0 else "left"
+            if distance > hold_distance:
+                # Cover most of a long runway repositioning with a held key.
+                # Repeated 30 ms taps are reserved for the final few pixels.
+                state["position_continuous"] = True
+                state["position_brake_started_at"] = None
+                self.cmd_move_x = direction
+                return True
+
+            if state.get("position_continuous", False):
+                # Release continuous movement before trusting a fine correction
+                # so the next minimap sample includes any residual travel.
+                state["position_continuous"] = False
+                state["position_brake_started_at"] = now
+                return True
+
+            brake_started_at = state.get("position_brake_started_at")
+            brake_delay = max(
+                0.0,
+                float(route_cfg.get(
+                    "rope_climb_align_brake_delay", 0.10
+                )),
+            )
+            if brake_started_at is not None:
+                if now - brake_started_at < brake_delay:
+                    return True
+                state["position_brake_started_at"] = None
             self.cmd_action = (
                 "rope_align_right" if dx > 0 else "rope_align_left"
             )
             return True
 
+        state["position_continuous"] = False
+        state["position_brake_started_at"] = None
         if phase != "settle" or state["aligned_since"] is None:
             state["phase"] = "settle"
             state["aligned_since"] = now
@@ -7078,6 +7952,83 @@ class MapleStoryAutoBot:
         parts = str(command).split()
         return len(parts) == 3 and parts[2] != "none"
 
+    @staticmethod
+    def _is_route_goal_command(command):
+        parts = str(command).split()
+        return len(parts) == 3 and parts[2] == "goal"
+
+    def _get_route_goal_component_at_player(self, route_idx=None):
+        """Return the goal component currently under Hero, if any."""
+        if route_idx is None:
+            route_idx = int(getattr(self, "idx_routes", 0))
+        routes = getattr(self, "img_routes", ())
+        if not (0 <= int(route_idx) < len(routes)):
+            return None
+        img_route = routes[int(route_idx)]
+        if img_route is None or self.loc_player_global is None:
+            return None
+
+        player_x, player_y = map(int, self.loc_player_global)
+        height, width = img_route.shape[:2]
+        if not (0 <= player_x < width and 0 <= player_y < height):
+            return None
+        color = tuple(img_route[player_y, player_x])
+        command = self.color_code.get(color)
+        if not self._is_route_goal_command(command):
+            return None
+        return self._get_route_color_component(
+            img_route, (player_x, player_y), color
+        )
+
+    def _route_loop_goal_is_suppressed(self, pixel, color, command):
+        """Ignore a disconnected loop goal until Hero leaves its marker."""
+        if not self._is_route_goal_command(command):
+            return False
+        component = self._get_route_color_component(
+            self.img_route, pixel, color
+        )
+        if component is None:
+            return False
+        key = (int(self.idx_routes), tuple(component["bbox"]))
+        return key == getattr(self, "_route_loop_goal_key", None)
+
+    def _clear_route_loop_goal_if_departed(self):
+        """Rearm a loop goal after Hero moves outside its painted blob."""
+        key = getattr(self, "_route_loop_goal_key", None)
+        if key is None or self.loc_player_global is None:
+            return
+        route_idx, bbox = key
+        player_x, player_y = map(int, self.loc_player_global)
+        left, top, right, bottom = bbox
+        if int(self.idx_routes) != int(route_idx) or not (
+                left <= player_x <= right and top <= player_y <= bottom):
+            self._route_loop_goal_key = None
+
+    def _route_has_local_continuation(self, route_idx):
+        """Check a candidate route using the normal local lookup rules."""
+        routes = getattr(self, "img_routes", ())
+        if not (0 <= int(route_idx) < len(routes)):
+            return False
+
+        original_idx = int(self.idx_routes)
+        original_route = self.img_route
+        original_debug = self.img_route_debug
+        try:
+            self.idx_routes = int(route_idx)
+            self.img_route = routes[int(route_idx)]
+            # This is a read-only validation; do not draw candidate-route
+            # lookup lines over the active route's debug image.
+            self.img_route_debug = None
+            color_code, color_code_up_down = self.get_nearest_color_code()
+            if color_code and self._is_route_goal_command(
+                    color_code.get("command")):
+                color_code = None
+            return bool(color_code or color_code_up_down)
+        finally:
+            self.idx_routes = original_idx
+            self.img_route = original_route
+            self.img_route_debug = original_debug
+
     def get_nearest_color_code(self, include_rope_climb=True):
         '''
         Searches for route colors around the player on the route map.
@@ -7131,6 +8082,9 @@ class MapleStoryAutoBot:
                 "rope_climb": True,
                 "target_center": target_center,
                 "guide_key": rope_climb_target["key"],
+                "explicit_rope_target": rope_climb_target.get(
+                    "explicit_target", False
+                ),
             }
             min_dist = nearest["distance"]
 
@@ -7184,7 +8138,11 @@ class MapleStoryAutoBot:
                     (x0, y0) in target["pixels"]
                     for target in self._get_active_stationary_jump_targets()
                 )
-                if not portal_failed and not (
+                loop_goal_suppressed = \
+                    self._route_loop_goal_is_suppressed(
+                        (x0, y0), player_pixel, player_command
+                    )
+                if not portal_failed and not loop_goal_suppressed and not (
                     self._is_stationary_jump_route_command(player_command)
                     and aligned_component
                 ):
@@ -7328,171 +8286,6 @@ class MapleStoryAutoBot:
             raise RuntimeError(f"Unsupported attack mode: {attack_type}")
 
         return (x0, y0, x1, y1)
-
-    def detect_close_enemy_hp_bars(self):
-        """Return at most one nearby enemy-HP-bar witness per Hero side.
-
-        This deliberately does not synthesize a normal monster detection.
-        Green fill width changes with remaining HP, so only its presence and
-        side relative to the Hero are trustworthy enough for the archer's
-        close-range block/Power Knock-Back decision.
-        """
-        sides = {"left": [], "right": []}
-        knockback_cfg = self.cfg.get("power_knockback", {})
-        hp_bar_cfg = knockback_cfg.get("hp_bar_supplement", {})
-        if not hp_bar_cfg.get("enable", False):
-            return sides
-
-        frame = getattr(self, "img_frame", None)
-        if frame is None or frame.size == 0:
-            return sides
-
-        frame_h, frame_w = frame.shape[:2]
-        player_x, player_y = map(int, self.loc_player)
-        max_distance_x = max(
-            0, int(round(knockback_cfg.get("trigger_distance_x", 0)))
-        )
-        search_above_y = max(
-            0, int(round(hp_bar_cfg.get("search_above_y", 0)))
-        )
-        search_below_y = max(
-            0, int(round(hp_bar_cfg.get("search_below_y", 0)))
-        )
-        min_width = max(1, int(round(hp_bar_cfg.get("min_width", 1))))
-        max_width = max(
-            min_width, int(round(hp_bar_cfg.get("max_width", min_width)))
-        )
-        min_height = max(1, int(round(hp_bar_cfg.get("min_height", 1))))
-        max_height = max(
-            min_height, int(round(hp_bar_cfg.get("max_height", min_height)))
-        )
-        min_area = max(0, int(round(hp_bar_cfg.get("min_area", 0))))
-        min_fill_rate = max(
-            0.0, min(1.0, float(hp_bar_cfg.get("min_fill_rate", 0.0)))
-        )
-        min_aspect_ratio = max(
-            0.0, float(hp_bar_cfg.get("min_aspect_ratio", 0.0))
-        )
-
-        # Keep whole components inside the crop, then apply the actual
-        # bar-to-Hero distance below. This avoids clipping a bar at the
-        # trigger boundary and moving its measured center inward.
-        x_margin = max_width
-        y_margin = max_height
-        x0 = max(0, player_x - max_distance_x - x_margin)
-        x1 = min(frame_w, player_x + max_distance_x + x_margin + 1)
-        y0 = max(0, player_y - search_above_y - y_margin)
-        ui_y_start = int(
-            self.cfg.get("ui_coords", {}).get("ui_y_start", frame_h)
-        )
-        y1 = min(
-            frame_h,
-            max(0, ui_y_start),
-            player_y + search_below_y + y_margin + 1,
-        )
-        if x1 <= x0 or y1 <= y0:
-            return sides
-
-        roi_hsv = cv2.cvtColor(frame[y0:y1, x0:x1], cv2.COLOR_BGR2HSV)
-        lower_hsv = np.asarray(
-            hp_bar_cfg.get("lower_hsv", (64, 140, 70)), dtype=np.uint8
-        )
-        upper_hsv = np.asarray(
-            hp_bar_cfg.get("upper_hsv", (74, 255, 255)), dtype=np.uint8
-        )
-        mask = cv2.inRange(roi_hsv, lower_hsv, upper_hsv)
-        count, _, stats, _ = cv2.connectedComponentsWithStats(
-            mask, connectivity=8
-        )
-
-        candidates = {"left": [], "right": []}
-        for index in range(1, count):
-            local_x = int(stats[index, cv2.CC_STAT_LEFT])
-            local_y = int(stats[index, cv2.CC_STAT_TOP])
-            width = int(stats[index, cv2.CC_STAT_WIDTH])
-            height = int(stats[index, cv2.CC_STAT_HEIGHT])
-            area = int(stats[index, cv2.CC_STAT_AREA])
-            if not (min_width <= width <= max_width) or \
-                    not (min_height <= height <= max_height) or \
-                    area < min_area:
-                continue
-            fill_rate = area / float(width * height)
-            aspect_ratio = width / float(height)
-            if fill_rate < min_fill_rate or \
-                    aspect_ratio < min_aspect_ratio:
-                continue
-
-            bar_x = x0 + local_x
-            bar_y = y0 + local_y
-            bar_center_x = int(round(bar_x + width / 2.0))
-            bar_center_y = int(round(bar_y + height / 2.0))
-            bar_right = bar_x + width - 1
-            if player_x < bar_x:
-                horizontal_distance = bar_x - player_x
-            elif player_x > bar_right:
-                horizontal_distance = player_x - bar_right
-            else:
-                horizontal_distance = 0
-            if horizontal_distance > max_distance_x or not (
-                    player_y - search_above_y
-                    <= bar_center_y
-                    <= player_y + search_below_y):
-                continue
-
-            if bar_center_x < player_x:
-                side = "left"
-            elif bar_center_x > player_x:
-                side = "right"
-            else:
-                keyboard_controller = getattr(self, "kb", None)
-                side = getattr(keyboard_controller, "cached_facing", None)
-                if side not in {"left", "right"}:
-                    side = getattr(self, "cmd_move_x", None)
-                if side not in {"left", "right"}:
-                    side = "left"
-
-            witness = {
-                "name": "Enemy HP Bar",
-                # This is a boolean side witness, not a body coordinate. Keep
-                # both sides symmetric so two visible bars use the normal
-                # cached-facing tie-break instead of comparing fill centers.
-                "position": (
-                    player_x - 1 if side == "left" else player_x + 1,
-                    player_y,
-                ),
-                "size": (1, 1),
-                "score": 0.0,
-                "source": "close_hp_bar",
-                "close_range_only": True,
-                "bar_position": (bar_x, bar_y),
-                "bar_size": (height, width),
-            }
-            candidates[side].append(witness)
-
-            if getattr(self, "img_frame_debug", None) is not None:
-                self._draw_debug_rectangle(
-                    (bar_x, bar_y),
-                    (height, width),
-                    (0, 165, 255),
-                    f"Close HP Bar ({side})",
-                    thickness=1,
-                    text_height=0.45,
-                )
-
-        # This signal is boolean by design. Multiple bars on one side must not
-        # alter AoE counts or outvote a bar on the opposite side.
-        for side in sides:
-            ordered = sorted(
-                candidates[side],
-                key=lambda item: abs(
-                    (
-                        item["bar_position"][0]
-                        + item["bar_size"][1] / 2.0
-                    ) - player_x
-                ),
-            )
-            sides[side] = ordered[:1]
-        return sides
 
     def get_power_knockback_monsters(self, is_left=True):
         """Return same-height monsters inside the close-range threshold.
@@ -7733,6 +8526,12 @@ class MapleStoryAutoBot:
             self.img_frame,
             roi=(x0, y0, x1, y1),
             confidence=confidence,
+            class_name=detector.class_name,
+            inference_class_names=getattr(
+                self, "yolo_inference_class_names", (detector.class_name,)
+            ),
+            inference_confidence=detector.confidence,
+            cache_key=getattr(self, "_current_capture_frame_token", None),
         )
         monsters = self.filter_yolo_detections_by_box_size(monsters)
         monsters = self.filter_pet_yolo_detections(monsters)
@@ -8548,8 +9347,9 @@ class MapleStoryAutoBot:
                 cv2.LINE_AA,
             )
 
-        # Draw attack boxes only when a current screen-space player location is
-        # available. Debug mode still shows the full-frame monster box below.
+        # Draw attack boxes only when a screen-space player location is
+        # available. The active Hero locator may intentionally supply its last
+        # confirmed position across detection misses.
         if not getattr(self, "screen_player_location_valid", False):
             self._draw_debug_text(
                 "Player location unavailable",
@@ -9272,10 +10072,16 @@ class MapleStoryAutoBot:
         self._clear_rope_climb_locks_if_departed()
         self._stationary_jump_proximity_active = False
         self._clear_failed_portal_if_departed()
+        self._clear_route_loop_goal_if_departed()
 
         # A generated rope run-up remains active after the Hero leaves the
         # endpoint marker's acquisition window. It owns input until progress,
         # retries, or the endpoint height resolves the attempt.
+        if getattr(self, "_rope_climb_combat_deferred", False):
+            # Monster detection from the previous frame found an attackable
+            # target. Keep the pre-mount climb frozen; mob detection below may
+            # attack again or rearm the climb after the target disappears.
+            return
         if self._update_active_rope_climb():
             return
 
@@ -9287,11 +10093,40 @@ class MapleStoryAutoBot:
         # Get color code from the active route.
         color_code, color_code_up_down = self.get_nearest_color_code()
 
+        # A failed rope guide deliberately hides that guide until the Hero
+        # leaves its local failure area.  Do not mistake that intentional
+        # lookup gap for a disconnected route and switch to an overlapping
+        # route (for example route2's opposite-direction ground stroke).
+        # Route changes after a rope miss must still happen only through an
+        # explicit goal or after the failure lock has been cleared by travel.
+        failed_rope_key = getattr(self, "_rope_climb_failed_key", None)
+        failed_rope_blocks_recovery = bool(
+            failed_rope_key is not None
+            and int(failed_rope_key[0]) == int(self.idx_routes)
+        )
+        failed_rope_recovery_ready = False
+        if failed_rope_blocks_recovery:
+            failed_at = getattr(self, "_rope_climb_failed_at", None)
+            rearm_delay = max(
+                0.0,
+                float(self.cfg.get("route", {}).get(
+                    "rope_climb_failure_rearm_delay", 1.5
+                )),
+            )
+            failed_rope_recovery_ready = bool(
+                failed_at is not None
+                and time.monotonic() - float(failed_at) >= rearm_delay
+            )
+
         # The next route may not pass through the player's current position
         # when the recorded route set is incomplete. Search each later route
         # once (with wraparound) and immediately execute the first local
         # action that can be found.
-        if not color_code and not color_code_up_down and self.img_routes:
+        if not color_code and not color_code_up_down and self.img_routes and \
+                (
+                    not failed_rope_blocks_recovery
+                    or failed_rope_recovery_ready
+                ):
             original_idx = self.idx_routes
             route_count = len(self.img_routes)
             for step in range(1, route_count):
@@ -9308,12 +10143,42 @@ class MapleStoryAutoBot:
                 # are considered only on the initially selected route.
                 color_code, color_code_up_down = \
                     self.get_nearest_color_code(include_rope_climb=False)
-                if color_code or color_code_up_down:
-                    logger.info(
-                        "[route] No action near player on "
-                        f"route{original_idx + 1}; recovered with "
-                        f"route{candidate_idx + 1}"
+                if failed_rope_blocks_recovery:
+                    # A nearby current-route guide would already have been
+                    # reacquired above.  Once its cooldown expires and it is
+                    # no longer nearby, allow escape to another route only
+                    # when Hero is genuinely on that route's stroke.  Merely
+                    # finding a color somewhere inside the normal 10-pixel
+                    # search box caused the original premature route2 switch.
+                    recovery_distance = max(
+                        0,
+                        int(self.cfg.get("route", {}).get(
+                            "rope_climb_failed_route_recovery_distance", 2
+                        )),
                     )
+                    if color_code is not None and int(
+                            color_code.get("distance", recovery_distance + 1)
+                    ) > recovery_distance:
+                        color_code = None
+                    if color_code_up_down is not None and int(
+                            color_code_up_down.get(
+                                "distance", recovery_distance + 1
+                            )
+                    ) > recovery_distance:
+                        color_code_up_down = None
+                if color_code or color_code_up_down:
+                    if failed_rope_blocks_recovery:
+                        logger.info(
+                            "[route] Failed rope guide is no longer nearby; "
+                            f"Hero overlaps route{candidate_idx + 1}, "
+                            "release the route lock"
+                        )
+                    else:
+                        logger.info(
+                            "[route] No action near player on "
+                            f"route{original_idx + 1}; recovered with "
+                            f"route{candidate_idx + 1}"
+                        )
                     break
             else:
                 # No route describes this location. Keep a deterministic
@@ -9328,6 +10193,11 @@ class MapleStoryAutoBot:
                     )
                 self._apply_ladder_route_hold()
                 return
+
+        if not color_code and not color_code_up_down and \
+                failed_rope_blocks_recovery:
+            self._apply_ladder_route_hold()
+            return
 
         if color_code and color_code.get("rope_climb", False):
             self._reset_stationary_jump_proximity()
@@ -9369,6 +10239,27 @@ class MapleStoryAutoBot:
             self._reset_ladder_route_hold()
             self._ladder_route_exit_confirmed_at = None
             color_code_up_down = None
+
+        vertical_route_would_own_input = bool(
+            color_code_up_down
+            and not (color_code and color_code.get("exact_action", False))
+            and (
+                not color_code
+                or color_code_up_down["distance"] <= color_code["distance"]
+            )
+        )
+        if vertical_route_would_own_input:
+            alignment_move_x = self._get_ladder_route_alignment_move_x(
+                color_code_up_down
+            )
+            if alignment_move_x is not None:
+                # Do not press Up/Down until the minimap centroid is actually
+                # aligned with the intended vertical component.  In
+                # particular this keeps a nearby portal from consuming an
+                # early Up while Hero approaches a rope.
+                self._reset_ladder_route_hold()
+                self.cmd_move_x = alignment_move_x
+                return
 
         # Use color_code and color_code_up_down to complement each other
         # To prevent character stuck at the end of ladder, we use two color color pixels
@@ -9424,7 +10315,6 @@ class MapleStoryAutoBot:
 
     def update_cmd_by_mob_detection(self):
         self._suppress_periodic_attack = False
-        self.close_hp_bar_candidates = {"left": [], "right": []}
         combat_actions = {"attack", "directional_aoe", "power_knockback"}
         stationary_jump_pending = bool(
             getattr(self, "_stationary_jump_proximity_active", False)
@@ -9438,10 +10328,23 @@ class MapleStoryAutoBot:
         route_jump_pending = (
             stationary_jump_pending or directional_jump_pending
         )
-        if getattr(self, "_rope_climb_active", False) or \
-                getattr(self, "_portal_sweep_active", False):
-            # Rope mounting/climbing and portal activation own their visual
-            # feedback loops until minimap displacement confirms completion.
+        rope_state = getattr(self, "_rope_climb_state", None)
+        rope_pre_mount = bool(
+            getattr(self, "_rope_climb_active", False)
+            and isinstance(rope_state, dict)
+            and rope_state.get("phase") in {
+                "position", "settle", "running_approach"
+            }
+        )
+        if getattr(self, "_rope_climb_active", False) and not rope_pre_mount:
+            # Once mounting has started, the rope transaction still owns every
+            # input. Only the light-blue approach/positioning phases may yield
+            # to a monster already inside the configured attack range.
+            self._suppress_periodic_attack = True
+            return
+        if getattr(self, "_portal_sweep_active", False):
+            # Portal activation owns its visual feedback loop until minimap
+            # displacement confirms completion.
             self._suppress_periodic_attack = True
             return
 
@@ -9475,8 +10378,20 @@ class MapleStoryAutoBot:
             self.cmd_move_y = "none"
             self.cmd_action = "none"
 
-        # Never build an attack decision around an expired screen location.
+        def hold_rope_approach_for_combat():
+            """Freeze a light-blue pre-mount route while combat owns input."""
+            if not rope_pre_mount:
+                return
+            self._set_rope_climb_combat_deferred(True)
+            self.cmd_move_x = "none"
+            self.cmd_move_y = "none"
+            self.cmd_action = "none"
+
+        # Never build an attack decision without an accepted screen location.
+        # A briefly retained Hero position remains accepted by design.
         if not getattr(self, "screen_player_location_valid", False):
+            if rope_pre_mount:
+                self._set_rope_climb_combat_deferred(False)
             self.monsters = []
             self.cmd_action = "none"
             self._suppress_periodic_attack = True
@@ -9527,18 +10442,14 @@ class MapleStoryAutoBot:
 
         # Get monsters in the search box
         self.monsters = self.get_monsters_in_range((x0, y0), (x1, y1))
-        if power_knockback_enabled:
-            self.close_hp_bar_candidates = self.detect_close_enemy_hp_bars()
-
-        # HP bars are close-range side witnesses only. They may keep the
-        # directional decision alive when YOLO loses an overlapped monster,
-        # but they never become entries in self.monsters.
-        if len(self.monsters) == 0 and not any(
-                self.close_hp_bar_candidates.values()):
+        if len(self.monsters) == 0:
+            if rope_pre_mount:
+                self._set_rope_climb_combat_deferred(False)
             return
 
         # Update attack command
         if attack_mode == "aoe_skill":
+            hold_rope_approach_for_combat()
             self._suppress_periodic_attack = True
             if time.time() - self.t_last_attack > cooldown:
                 self.cmd_action = "attack"
@@ -9566,10 +10477,8 @@ class MapleStoryAutoBot:
                 close_monsters_right = self.get_power_knockback_monsters(
                     is_left=False,
                 )
-            hp_bar_left = self.close_hp_bar_candidates["left"]
-            hp_bar_right = self.close_hp_bar_candidates["right"]
-            left_blocked = bool(close_monsters_left or hp_bar_left)
-            right_blocked = bool(close_monsters_right or hp_bar_right)
+            left_blocked = bool(close_monsters_left)
+            right_blocked = bool(close_monsters_right)
             if left_blocked or right_blocked:
                 # Patrol's blind periodic attack must not overwrite the
                 # close-range decision and fire a bow into a blocked side.
@@ -9598,6 +10507,7 @@ class MapleStoryAutoBot:
                     directional_aoe_cfg["min_monsters"],
                 )
                 if aoe_direction is not None:
+                    hold_rope_approach_for_combat()
                     self._suppress_periodic_attack = True
                     now = time.time()
                     if now - getattr(
@@ -9630,16 +10540,18 @@ class MapleStoryAutoBot:
             )
             # Determine attack direction
             attack_direction = self.get_attack_direction(monster_left, monster_right)
-            if attack_direction is None and route_jump_pending:
-                # At a route-jump marker, an equally close monster on each
-                # side must still win. Reuse the deterministic direction
-                # tie-breaker (nearest, then cached facing) instead of jumping.
+            if attack_direction is None and (
+                    route_jump_pending or rope_pre_mount):
+                # At a route-jump or light-blue pre-mount marker, an equally
+                # close monster on each side must still win. Reuse the
+                # deterministic direction tie-breaker instead of routing.
                 attack_direction = self.get_directional_aoe_direction(
                     [monster_left] if monster_left is not None else [],
                     [monster_right] if monster_right is not None else [],
                     1,
                 )
             if attack_direction is not None:
+                hold_rope_approach_for_combat()
                 self._suppress_periodic_attack = True
                 now = time.time()
                 if now - self.t_last_attack > cooldown and \
@@ -9656,11 +10568,9 @@ class MapleStoryAutoBot:
                 return
 
             if power_knockback_enabled and (left_blocked or right_blocked):
-                knockback_left = close_monsters_left or hp_bar_left
-                knockback_right = close_monsters_right or hp_bar_right
                 knockback_direction = self.get_directional_aoe_direction(
-                    knockback_left,
-                    knockback_right,
+                    close_monsters_left,
+                    close_monsters_right,
                     1,
                 )
                 now = time.time()
@@ -9668,15 +10578,27 @@ class MapleStoryAutoBot:
                         self, "t_last_power_knockback", 0.0
                 ) > power_knockback_cfg["cooldown"] and \
                         not attack_recovering:
+                    hold_rope_approach_for_combat()
                     self.cmd_action = "power_knockback"
                     self.cmd_move_x = knockback_direction
                     self.t_last_power_knockback = now
                     self.t_last_attack = now
+                elif knockback_direction is not None:
+                    hold_rope_approach_for_combat()
+                    if self.cmd_action in combat_actions:
+                        self.cmd_action = "none"
+                    else:
+                        hold_route_jump_for_combat()
                 elif self.cmd_action in combat_actions:
                     self.cmd_action = "none"
                 else:
                     hold_route_jump_for_combat()
+                if rope_pre_mount and knockback_direction is None:
+                    self._set_rope_climb_combat_deferred(False)
                 return
+
+            if rope_pre_mount:
+                self._set_rope_climb_combat_deferred(False)
 
     def update_cmd_by_random(self):
         '''
@@ -9690,10 +10612,52 @@ class MapleStoryAutoBot:
 
     def check_reach_goal(self):
         if self.cmd_action == "goal":
-            # Switch to next route map
             self._reset_rope_climb(clear_locks=True)
             self._reset_ladder_route_hold()
-            self.idx_routes = (self.idx_routes+1)%len(self.img_routes)
+            route_count = len(self.img_routes)
+            current_idx = int(self.idx_routes)
+            next_idx = (
+                (current_idx + 1) % route_count
+                if route_count > 0
+                else current_idx
+            )
+
+            # A goal is also useful as the closing checkpoint of a loop.  Do
+            # not blindly switch to a disconnected route: that used to make
+            # the fallback lookup select this same goal every frame, leaving
+            # Hero stuck near hazards.  Suppress the checkpoint temporarily
+            # and let the adjacent movement stroke continue the same loop.
+            has_next_continuation = (
+                route_count > 1
+                and self._route_has_local_continuation(next_idx)
+            )
+            if not has_next_continuation:
+                component = self._get_route_goal_component_at_player(
+                    current_idx
+                )
+                if component is not None:
+                    goal_key = (
+                        current_idx, tuple(component["bbox"])
+                    )
+                    self._route_loop_goal_key = goal_key
+                    warned = getattr(
+                        self, "_route_loop_goal_warned_keys", set()
+                    )
+                    if goal_key not in warned:
+                        logger.warning(
+                            f"[route] route{current_idx + 1} goal has no "
+                            f"local continuation on route{next_idx + 1}; "
+                            "keep the current route and treat this goal as "
+                            "a loop checkpoint"
+                        )
+                        warned.add(goal_key)
+                        self._route_loop_goal_warned_keys = warned
+                self.cmd_action = "none"
+                return
+
+            self._route_loop_goal_key = None
+            self.idx_routes = next_idx
+            self.cmd_action = "none"
             logger.debug(f"Change to new route:{self.idx_routes}")
 
     def run_once(self):
@@ -9704,7 +10668,17 @@ class MapleStoryAutoBot:
         self.profiler.start()
 
         # Check if need viz window
-        self.is_show_debug_window = self.is_need_show_debug_window
+        # Annotated recording needs the same full-resolution canvas as the UI
+        # visualization, but it must not permanently change the user's tab/UI
+        # visualization preference.
+        annotated_recording = (
+            getattr(self, "_annotated_video_record_path", None) is not None
+        )
+        self.is_show_debug_window = (
+            getattr(self, "is_need_show_debug_window", False)
+            or annotated_recording
+        )
+        self._annotated_record_frame_pending = False
         if not self.is_show_debug_window:
             self.img_frame_debug = None
             self.img_route_debug = None
@@ -9746,6 +10720,7 @@ class MapleStoryAutoBot:
         # Image for debug viz
         if self.is_show_debug_window:
             self.img_frame_debug = self.img_frame.copy()
+            self._annotated_record_frame_pending = annotated_recording
 
         # Session recovery is a global safety guard, not a gameplay FSM state.
         # It must preempt route, health, watchdog, and combat behavior even
@@ -9898,7 +10873,7 @@ class MapleStoryAutoBot:
             # Update player location
             self.loc_player = loc_player
 
-        # Do not draw an expired coordinate beside "location unavailable".
+        # Draw the accepted coordinate, including a retained Hero position.
         if self.screen_player_location_valid:
             self._draw_debug_circle(
                 self.loc_player,
@@ -10086,6 +11061,10 @@ class MapleStoryAutoBot:
                 self.is_frame_done = False
                 ret = self.run_once()
 
+                # Flush after run_once so both normal and safe early-return
+                # paths preserve every annotated canvas produced this cycle.
+                self._flush_annotated_video_frame()
+
                 # Only proceed if the frame is valid
                 if ret == 0:
                     self._emit_debug_images()
@@ -10104,6 +11083,10 @@ class MapleStoryAutoBot:
             # Never leave the independent keyboard/heartbeat threads alive if
             # detection or UI rendering crashes; a remote movement key could
             # otherwise be renewed indefinitely on computer B.
+            try:
+                self.stop_record()
+            except Exception as exc:
+                logger.error(f"[MapleStoryAutoBot] Recorder cleanup failed: {exc}")
             try:
                 self.terminate_threads()
             except Exception as exc:
@@ -10213,7 +11196,7 @@ if __name__ == '__main__':
     parser.add_argument(
         '--record',
         action="store_true",
-        help="Record debug window"
+        help="Record raw capture and annotated debug videos"
     )
 
     parser.add_argument(

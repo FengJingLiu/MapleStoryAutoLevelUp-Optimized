@@ -26,6 +26,7 @@ class AutoBotController(QObject):
     debug_image_signal = Signal(object)
     route_map_viz_signal = Signal(object)
     start_pause_hotkey_signal = Signal()
+    start_finished_signal = Signal(int)
     screenshot_hotkey_signal = Signal()
     record_hotkey_signal = Signal()
     close_hotkey_signal = Signal()
@@ -47,6 +48,7 @@ class AutoBotController(QObject):
         self._capture_lifecycle_lock = threading.RLock()
         self._capture_state_lock = threading.Lock()
         self._capture_state = self.CAPTURE_IDLE
+        self._start_thread = None
         self._screenshot_thread = None
         self._prestart_capture = None
         self._prestart_release_failed = False
@@ -93,6 +95,10 @@ class AutoBotController(QObject):
             ui.button_start_pause.click,
             queued,
         )
+        self.start_finished_signal.connect(
+            ui.finish_start_ui,
+            queued,
+        )
         self.screenshot_hotkey_signal.connect(
             ui.button_screenshot.click,
             queued,
@@ -116,10 +122,7 @@ class AutoBotController(QObject):
             'f12', self.close_hotkey_signal.emit
         )
 
-    def start_bot(self, cfg_path):
-        '''
-        Start the bot engine threads
-        '''
+    def _reserve_start(self):
         with self._capture_state_lock:
             self._refresh_stopping_state_locked()
             if self._closing:
@@ -147,7 +150,9 @@ class AutoBotController(QObject):
                 self._capture_state = self.CAPTURE_STOPPING
                 return -1
             self._capture_state = self.CAPTURE_STARTING
+        return 0
 
+    def _start_bot_reserved(self, cfg_path):
         with self._capture_lifecycle_lock:
             result = -1
             try:
@@ -182,6 +187,48 @@ class AutoBotController(QObject):
                         self._capture_state = self.CAPTURE_IDLE
 
         return result
+
+    def start_bot(self, cfg_path):
+        '''
+        Start the bot engine threads synchronously.
+        '''
+        if self._reserve_start() != 0:
+            return -1
+        return self._start_bot_reserved(cfg_path)
+
+    def _start_bot_worker(self, cfg_path):
+        result = -1
+        try:
+            result = self._start_bot_reserved(cfg_path)
+        finally:
+            with self._capture_state_lock:
+                self._start_thread = None
+        self.start_finished_signal.emit(result)
+
+    def start_bot_async(self, cfg_path):
+        '''
+        Start the bot without blocking Qt's event loop during model warmup.
+        '''
+        if self._reserve_start() != 0:
+            return -1
+
+        worker = threading.Thread(
+            target=self._start_bot_worker,
+            args=(cfg_path,),
+            name="ui-f1-start",
+            daemon=True,
+        )
+        with self._capture_state_lock:
+            self._start_thread = worker
+        try:
+            worker.start()
+        except Exception:
+            with self._capture_state_lock:
+                self._start_thread = None
+                if not self._closing:
+                    self._capture_state = self.CAPTURE_IDLE
+            raise
+        return 0
 
     def pause_bot(self):
         '''

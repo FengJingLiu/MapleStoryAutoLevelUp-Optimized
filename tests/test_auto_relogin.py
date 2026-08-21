@@ -14,7 +14,7 @@ from src.vision.cursor_tracker import CursorTracker
 
 
 class AutoReloginTests(unittest.TestCase):
-    """Focused tests for the screenshot-confirmed five-page login flow."""
+    """Focused tests for the screenshot-confirmed login flow."""
 
     FRAME_HEIGHT = 200
     FRAME_WIDTH = 400
@@ -25,6 +25,7 @@ class AutoReloginTests(unittest.TestCase):
         "connect": (20, 30),
         "world": (30, 40),
         "channel": (50, 60),
+        "queue": (60, 70),
         "character": (70, 80),
     }
 
@@ -39,6 +40,7 @@ class AutoReloginTests(unittest.TestCase):
             "game_window": {"title_bar_height": 34},
             "auto_relogin": {
                 "enable": enabled,
+                "reactive_pages": False,
                 "flow_template_reference_size": [
                     cls.FRAME_HEIGHT,
                     cls.FRAME_WIDTH,
@@ -117,6 +119,13 @@ class AutoReloginTests(unittest.TestCase):
                             "search_region": [0, 0, 400, 200],
                             "match_mode": "exact",
                             "action": "fixed_click",
+                        },
+                        "queue": {
+                            "texts": ["正在排队进入游戏"],
+                            "region_source": "configured",
+                            "search_region": [0, 0, 400, 200],
+                            "match_mode": "contains",
+                            "action": "wait",
                         },
                         "character": {
                             "texts": ["开始游戏"],
@@ -209,6 +218,15 @@ class AutoReloginTests(unittest.TestCase):
         bot._reset_auto_relogin_runtime()
         return bot
 
+    @classmethod
+    def make_reactive_bot(cls, **kwargs):
+        bot = cls.make_bot(**kwargs)
+        bot.cfg["auto_relogin"]["reactive_pages"] = True
+        bot._auto_relogin_current_minimap_structure = Mock(
+            return_value=None
+        )
+        return bot
+
     @staticmethod
     def check_at(bot, now):
         with patch(
@@ -250,6 +268,124 @@ class AutoReloginTests(unittest.TestCase):
                 bot.kb.suspend_automation_for_session_recovery.assert_called_once_with()
                 bot.kb.press_session_recovery_key.assert_not_called()
                 bot.kb.click_session_recovery_point.assert_not_called()
+
+    def test_reactive_recovery_uses_only_minimap_absence_as_its_gate(self):
+        bot = self.make_reactive_bot()
+        bot._visible_page = "disconnect"
+        bot._auto_relogin_current_minimap_structure.return_value = (
+            1, 1, 100, 60
+        )
+
+        self.assertFalse(self.show_and_check(
+            bot, "disconnect", frame_token=1, now=10.0
+        ))
+        self.assertEqual(bot._auto_relogin_state, "idle")
+        bot.kb.suspend_automation_for_session_recovery.assert_not_called()
+
+        bot._auto_relogin_current_minimap_structure.return_value = None
+        self.assertTrue(self.show_and_check(
+            bot, "disconnect", frame_token=2, now=10.1
+        ))
+        self.assertEqual(bot._auto_relogin_state, "confirming")
+        self.assertEqual(bot._auto_relogin_pending_page, "disconnect")
+        bot.kb.suspend_automation_for_session_recovery.assert_called_once_with()
+
+    def test_reactive_recovery_waits_forever_on_unknown_frames(self):
+        bot = self.make_reactive_bot()
+
+        self.assertTrue(self.show_and_check(
+            bot, None, frame_token=1, now=10.0
+        ))
+        self.assertTrue(self.show_and_check(
+            bot, None, frame_token=2, now=10000.0
+        ))
+
+        self.assertEqual(bot._auto_relogin_state, "waiting_page")
+        bot.kb.press_session_recovery_key.assert_not_called()
+        bot.kb.click_session_recovery_point.assert_not_called()
+
+    def test_reactive_same_page_retries_beyond_legacy_attempt_limit(self):
+        bot = self.make_reactive_bot(remote=True)
+        bot.cfg["auto_relogin"]["max_step_attempts"] = 1
+        token = 1
+
+        for now in (10.0, 14.0):
+            self.assertTrue(self.show_and_check(
+                bot, "disconnect", frame_token=token, now=now
+            ))
+            token += 1
+            self.assertTrue(self.show_and_check(
+                bot, "disconnect", frame_token=token, now=now + 0.1
+            ))
+            token += 1
+
+        self.assertEqual(bot.kb.press_session_recovery_key.call_count, 2)
+        self.assertEqual(bot._auto_relogin_state, "waiting_page")
+
+    def test_reactive_pages_can_act_in_any_order_and_never_wait_for_successor(self):
+        bot = self.make_reactive_bot(remote=True)
+        bot.cfg["auto_relogin"]["ocr"]["targets"]["connect"][
+            "action"
+        ] = "enter"
+        token = 1
+
+        def confirm(page, now):
+            nonlocal token
+            self.assertTrue(self.show_and_check(
+                bot, page, frame_token=token, now=now
+            ))
+            token += 1
+            self.assertTrue(self.show_and_check(
+                bot, page, frame_token=token, now=now + 0.1
+            ))
+            token += 1
+            self.assertEqual(bot._auto_relogin_state, "waiting_page")
+
+        # Deliberately not the normal login sequence.
+        confirm("character", 20.0)
+        confirm("disconnect", 21.0)
+        confirm("channel", 22.0)
+        confirm("world", 23.0)
+        confirm("connect", 24.0)
+
+        self.assertEqual(bot.kb.press_session_recovery_key.call_count, 2)
+        self.assertEqual(bot.kb.click_session_recovery_point.call_count, 4)
+        self.assertIsNone(bot._auto_relogin_expected_page)
+
+    def test_reactive_page_change_restarts_confirmation_without_failure(self):
+        bot = self.make_reactive_bot(remote=True)
+
+        self.assertTrue(self.show_and_check(
+            bot, "channel", frame_token=1, now=30.0
+        ))
+        self.assertTrue(self.show_and_check(
+            bot, "world", frame_token=2, now=30.1
+        ))
+        self.assertEqual(bot._auto_relogin_pending_page, "world")
+        self.assertTrue(self.show_and_check(
+            bot, "world", frame_token=3, now=30.2
+        ))
+
+        self.assertEqual(bot._auto_relogin_state, "waiting_page")
+        bot.kb.click_session_recovery_point.assert_called_once()
+
+    def test_reactive_recovery_resumes_only_when_minimap_returns(self):
+        bot = self.make_reactive_bot(mode="normal")
+        bot._auto_relogin_health_was_enabled = True
+
+        self.assertTrue(self.show_and_check(
+            bot, None, frame_token=1, now=40.0
+        ))
+        bot._auto_relogin_current_minimap_structure.return_value = (
+            1, 1, 100, 60
+        )
+        self.assertTrue(self.show_and_check(
+            bot, None, frame_token=2, now=40.1
+        ))
+
+        self.assertEqual(bot._auto_relogin_state, "idle")
+        bot.fsm.set_init_state.assert_called_once_with("hunting")
+        bot.kb.resume_automation_after_session_recovery.assert_called_once_with()
 
     def test_bound_frame_token_is_not_replaced_by_newer_live_timestamp(self):
         bot = self.make_bot()
@@ -1504,7 +1640,7 @@ class AutoReloginTests(unittest.TestCase):
                 tracker = CursorTracker(image, hotspot=hotspot)
                 self.assertEqual(tracker.hotspot, hotspot)
 
-    def test_shipped_config_uses_chinese_ocr_for_all_five_pages(self):
+    def test_shipped_config_uses_chinese_ocr_for_login_and_queue_pages(self):
         root = Path(__file__).resolve().parents[1]
         with (root / "config" / "config_default.yaml").open(
                 encoding="utf-8") as stream:
@@ -1518,7 +1654,10 @@ class AutoReloginTests(unittest.TestCase):
         targets = auto_relogin["ocr"]["targets"]
         self.assertEqual(
             set(targets),
-            {"disconnect", "connect", "world", "channel", "character"},
+            {
+                "disconnect", "connect", "world", "channel", "queue",
+                "character",
+            },
         )
         disconnect = auto_relogin["ocr"]["targets"]["disconnect"]
         self.assertEqual(disconnect["action"], "enter")
@@ -1536,6 +1675,8 @@ class AutoReloginTests(unittest.TestCase):
         self.assertEqual(targets["channel"]["match_mode"], "exact")
         self.assertEqual(auto_relogin["channel_click_count"], 2)
         self.assertEqual(len(auto_relogin["channel_points"]), 20)
+        self.assertEqual(targets["queue"]["action"], "wait")
+        self.assertEqual(targets["queue"]["match_mode"], "contains")
         self.assertEqual(targets["character"]["action"], "click")
 
     def test_invalid_relogin_config_fails_during_load(self):
@@ -1812,9 +1953,15 @@ class AutoReloginTests(unittest.TestCase):
 
     def test_saved_minimap_recovery_requires_matching_detected_structure(self):
         bot = MapleStoryAutoBot.__new__(MapleStoryAutoBot)
-        bot.minimap_geometry = {"minimap_rect": (10, 20, 60, 30)}
-        bot.loc_minimap = (10, 20)
-        bot.img_minimap_screen = np.zeros((30, 60, 3), dtype=np.uint8)
+        bot.minimap_geometry = {
+            "frame_size": (200, 400),
+            "minimap_rect": (10, 20, 60, 30),
+        }
+        bot.img_frame = np.zeros((200, 400, 3), dtype=np.uint8)
+        # This is the constructor state before saved geometry is applied.
+        # Recovery must use minimap_geometry instead of this stale placeholder.
+        bot.loc_minimap = (0, 0)
+        bot.img_minimap_screen = np.zeros((10, 10, 3), dtype=np.uint8)
 
         # Dynamic detection includes a one-pixel border around saved geometry.
         self.assertTrue(

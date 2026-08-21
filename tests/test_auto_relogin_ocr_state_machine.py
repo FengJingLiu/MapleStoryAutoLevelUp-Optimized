@@ -15,6 +15,7 @@ PAGE_LOCATIONS = {
     "connect": (20, 30),
     "world": (30, 40),
     "channel": (50, 60),
+    "queue": (60, 70),
     "character": (70, 80),
 }
 OCR_TARGET = (210, 110)
@@ -46,6 +47,7 @@ def make_bot(*, click_results=True):
         "game_window": {"title_bar_height": 34},
         "auto_relogin": {
             "enable": True,
+            "reactive_pages": False,
             "flow_template_reference_size": [FRAME_HEIGHT, FRAME_WIDTH],
             "template_threshold": 0.03,
             "confirm_frames": 2,
@@ -99,6 +101,12 @@ def make_bot(*, click_results=True):
                         "search_region": target_region,
                         "match_mode": "exact",
                         "action": "fixed_click",
+                    },
+                    "queue": {
+                        "texts": ["正在排队进入游戏"],
+                        "search_region": target_region,
+                        "match_mode": "contains",
+                        "action": "wait",
                     },
                     "character": {
                         "texts": ["开始游戏"],
@@ -217,6 +225,62 @@ def test_ocr_pages_require_two_fresh_stable_ocr_frames_after_page_detection():
         bot.kb.press_session_recovery_key.assert_not_called()
         assert bot._auto_relogin_state == expected_state
         assert bot._auto_relogin_expected_page == expected_next_page
+
+
+def test_queue_waits_without_input_then_character_page_starts_game():
+    bot = make_bot()
+    bot.cfg["auto_relogin"]["reactive_pages"] = True
+    bot._auto_relogin_ocr_locator.locate.side_effect = (
+        make_match((210, 110)),
+        make_match((212, 111)),
+        make_match((210, 110)),
+        make_match((212, 111)),
+    )
+
+    assert show_and_check(bot, "queue", captured_at=10.0)
+    assert show_and_check(bot, "queue", captured_at=10.1)
+    assert show_and_check(bot, "queue", captured_at=10.2)
+
+    assert bot._auto_relogin_state == "waiting_queue"
+    bot.kb.click_session_recovery_point.assert_not_called()
+    bot.kb.press_session_recovery_key.assert_not_called()
+    assert bot._auto_relogin_ocr_locator.locate.call_count == 2
+
+    # A persistent queue overlay remains observation-only and does not keep
+    # re-confirming or clicking the channel hidden behind the modal.
+    assert show_and_check(bot, "queue", captured_at=10.3)
+    assert bot._auto_relogin_state == "waiting_queue"
+    assert bot._auto_relogin_ocr_locator.locate.call_count == 2
+    bot.kb.click_session_recovery_point.assert_not_called()
+
+    # When the queue is admitted, the ordinary character target takes over and
+    # receives the same two-frame OCR authorization as every clickable page.
+    assert show_and_check(bot, "character", captured_at=11.0)
+    assert show_and_check(bot, "character", captured_at=11.1)
+    assert show_and_check(bot, "character", captured_at=11.2)
+
+    bot.kb.click_session_recovery_point.assert_called_once_with(
+        212,
+        111,
+        FRAME_WIDTH,
+        FRAME_HEIGHT,
+        button="left",
+        duration=0.05,
+    )
+    bot.kb.press_session_recovery_key.assert_not_called()
+    assert bot._auto_relogin_state == "waiting_page"
+
+
+def test_queue_overlay_has_priority_over_channel_text_behind_it():
+    bot = make_bot()
+    bot.cfg["auto_relogin"]["reactive_pages"] = True
+    bot._match_auto_relogin_page.side_effect = lambda page: (
+        PAGE_LOCATIONS[page] if page in {"queue", "channel"} else None
+    )
+
+    assert bot._find_known_auto_relogin_page() == (
+        "queue", PAGE_LOCATIONS["queue"]
+    )
 
 
 def test_disconnect_requires_stable_ocr_then_sends_enter_only():

@@ -60,20 +60,6 @@ def _config():
             "range_y": 70,
             "cooldown": 0.9,
             "attack_recovery_delay": 0.95,
-            "hp_bar_supplement": {
-                "enable": True,
-                "lower_hsv": [50, 120, 80],
-                "upper_hsv": [75, 255, 255],
-                "search_above_y": 90,
-                "search_below_y": 10,
-                "min_width": 6,
-                "max_width": 30,
-                "min_height": 1,
-                "max_height": 4,
-                "min_area": 10,
-                "min_fill_rate": 0.75,
-                "min_aspect_ratio": 3.0,
-            },
         },
         "monster_detect": {
             "search_box_margin": 50,
@@ -101,7 +87,9 @@ def _config():
                 "component_height": 30,
                 "match_search_tolerance": 2,
                 "local_search_radius": 90,
+                "global_confirm_radius": 24,
                 "diff_thres": 0.02,
+                "yolo": {"player_offset": [4, -3]},
             },
             "medal": {
                 "id_fragment_width": 30,
@@ -197,20 +185,6 @@ def test_scales_full_frame_pixel_settings_without_mutating_source():
         "range_y": 140,
         "cooldown": 0.9,
         "attack_recovery_delay": 0.95,
-        "hp_bar_supplement": {
-            "enable": True,
-            "lower_hsv": [50, 120, 80],
-            "upper_hsv": [75, 255, 255],
-            "search_above_y": 180,
-            "search_below_y": 20,
-            "min_width": 18,
-            "max_width": 90,
-            "min_height": 2,
-            "max_height": 8,
-            "min_area": 60,
-            "min_fill_rate": 0.75,
-            "min_aspect_ratio": 3.0,
-        },
     }
     assert scaled["monster_detect"]["search_box_margin"] == 150
     assert scaled["monster_detect"]["max_mob_area_trigger"] == 9000
@@ -238,6 +212,8 @@ def test_scales_nametag_anchors_and_template_offsets():
     assert nametag["overhead_marker"]["component_height"] == 60
     assert nametag["overhead_marker"]["match_search_tolerance"] == 6
     assert nametag["overhead_marker"]["local_search_radius"] == 270
+    assert nametag["overhead_marker"]["global_confirm_radius"] == 72
+    assert nametag["overhead_marker"]["yolo"]["player_offset"] == [12, -6]
     assert nametag["overhead_marker"]["diff_thres"] == 0.02
     assert nametag["medal"]["id_fragment_width"] == 90
     assert nametag["medal"]["id_fragment_stride"] == 45
@@ -451,7 +427,7 @@ def test_video_writer_uses_current_frame_width_and_height():
     assert bot._video_record_size == (3579, 2013)
 
 
-def test_start_record_uses_unprocessed_capture_frame_without_enabling_viz():
+def test_start_record_prepares_raw_and_annotated_outputs_without_enabling_viz():
     bot = MapleStoryAutoBot.__new__(MapleStoryAutoBot)
     raw = np.zeros((2160, 3840, 3), dtype=np.uint8)
     bot.frame = raw
@@ -466,6 +442,12 @@ def test_start_record_uses_unprocessed_capture_frame_without_enabling_viz():
     bot.enable_viz.assert_not_called()
     bot._open_video_writer_for_frame.assert_called_once_with(raw)
     assert bot._video_record_path.endswith("_raw.mp4")
+    assert bot._annotated_video_record_path.endswith("_annotated.mp4")
+    assert (
+        bot._video_record_path.removesuffix("_raw.mp4")
+        == bot._annotated_video_record_path.removesuffix("_annotated.mp4")
+    )
+    assert bot.annotated_video_writer is None
 
 
 def test_raw_video_writer_receives_capture_frame_unchanged():
@@ -479,3 +461,52 @@ def test_raw_video_writer_receives_capture_frame_unchanged():
     assert bot._write_raw_video_frame(raw)
 
     writer.write.assert_called_once_with(raw)
+
+
+def test_annotated_video_writer_receives_rendered_frame_unchanged():
+    bot = MapleStoryAutoBot.__new__(MapleStoryAutoBot)
+    annotated = np.arange(6 * 10 * 3, dtype=np.uint8).reshape(6, 10, 3)
+    writer = Mock()
+    bot._annotated_video_record_path = "video/annotated.mp4"
+    bot._annotated_video_record_size = (10, 6)
+    bot.annotated_video_writer = writer
+
+    assert bot._write_annotated_video_frame(annotated)
+
+    writer.write.assert_called_once_with(annotated)
+
+
+def test_flush_annotated_video_frame_writes_each_rendered_frame_once():
+    bot = MapleStoryAutoBot.__new__(MapleStoryAutoBot)
+    annotated = np.full((6, 10, 3), 17, dtype=np.uint8)
+    bot.img_frame_debug = annotated
+    bot._annotated_record_frame_pending = True
+    bot._write_annotated_video_frame = Mock(return_value=True)
+
+    assert bot._flush_annotated_video_frame()
+    assert not bot._flush_annotated_video_frame()
+
+    bot._write_annotated_video_frame.assert_called_once_with(annotated)
+
+
+def test_stop_record_releases_raw_and_annotated_writers():
+    bot = MapleStoryAutoBot.__new__(MapleStoryAutoBot)
+    raw_writer = Mock()
+    annotated_writer = Mock()
+    bot.video_writer = raw_writer
+    bot.annotated_video_writer = annotated_writer
+    bot._video_record_path = "video/raw.mp4"
+    bot._video_record_size = (8, 4)
+    bot._annotated_video_record_path = "video/annotated.mp4"
+    bot._annotated_video_record_size = (8, 4)
+    bot._annotated_record_frame_pending = True
+
+    bot.stop_record()
+
+    raw_writer.release.assert_called_once_with()
+    annotated_writer.release.assert_called_once_with()
+    assert bot.video_writer is None
+    assert bot.annotated_video_writer is None
+    assert bot._video_record_path is None
+    assert bot._annotated_video_record_path is None
+    assert not bot._annotated_record_frame_pending

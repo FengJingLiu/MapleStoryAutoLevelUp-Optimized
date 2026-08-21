@@ -549,7 +549,7 @@ class MainWindow(QMainWindow):
         self.button_screenshot.clicked.connect(self.toggle_screenshot_ui)
 
         # Record Button
-        self.button_record = QPushButton("⏺ Record Raw (F3)")
+        self.button_record = QPushButton("⏺ Record Raw + Annotated (F3)")
         self.button_record.setCheckable(True)
         self.button_record.clicked.connect(self.toggle_record_ui)
 
@@ -977,16 +977,15 @@ class MainWindow(QMainWindow):
             cfg_path = "config/.config_tmp.yaml"
             save_yaml(self.cfg, cfg_path)
 
-            # Start AutoBot
-            ret = self.controller.start_bot(cfg_path)
+            self.button_start_pause.setText("⏳ Starting...")
+            self.button_start_pause.setStyleSheet("background-color: khaki;")
+            self.button_start_pause.setEnabled(False)
+            self.set_gbox_enabled(False)
 
-            if ret == 0: # Start success
-                self.button_start_pause.setText("⏸ Pause (F1)")
-                self.button_start_pause.setStyleSheet("background-color: lightgreen;")
-                self.set_gbox_enabled(False)
-            else:
-                # Start failed
-                self.button_start_pause.setChecked(False)
+            # Model loading and CUDA warmup can take tens of seconds. Keep
+            # Qt's event loop responsive while the controller starts AutoBot.
+            if self.controller.start_bot_async(cfg_path) != 0:
+                self.finish_start_ui(-1)
 
         else: # When pause autobot
             self.button_start_pause.setText("▶ Start (F1)")
@@ -995,6 +994,20 @@ class MainWindow(QMainWindow):
             self.set_gbox_enabled(True)
             clear_debug_canvas(self.debug_canvas) # Set debug viz to null
             clear_debug_canvas(self.route_map_canvas) # Set debug viz to null
+
+    def finish_start_ui(self, result):
+        self.button_start_pause.setEnabled(True)
+        if result == 0:
+            self.button_start_pause.setChecked(True)
+            self.button_start_pause.setText("⏸ Pause (F1)")
+            self.button_start_pause.setStyleSheet("background-color: lightgreen;")
+            self.set_gbox_enabled(False)
+            return
+
+        self.button_start_pause.setChecked(False)
+        self.button_start_pause.setText("▶ Start (F1)")
+        self.button_start_pause.setStyleSheet("")
+        self.set_gbox_enabled(True)
 
     def toggle_screenshot_ui(self):
         # F2 is available before F1.  Pass a snapshot so the controller can
@@ -1012,11 +1025,11 @@ class MainWindow(QMainWindow):
 
     def toggle_record_ui(self):
         if self.button_record.isChecked():
-            self.button_record.setText("⏹ Stop Raw (F3)")
+            self.button_record.setText("⏹ Stop Both (F3)")
             self.button_record.setStyleSheet("background-color: orange;")
             self.controller.start_recording()
         else:
-            self.button_record.setText("⏺ Record Raw (F3)")
+            self.button_record.setText("⏺ Record Raw + Annotated (F3)")
             self.button_record.setStyleSheet("")
             self.controller.stop_recording()
 

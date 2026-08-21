@@ -169,29 +169,6 @@ def scale_runtime_pixel_config(
         scale_x,
     )
     _scale_scalar(result, ("power_knockback", "range_y"), scale_y)
-    for field_name in ("search_above_y", "search_below_y"):
-        _scale_scalar(
-            result,
-            ("power_knockback", "hp_bar_supplement", field_name),
-            scale_y,
-        )
-    for field_name in ("min_width", "max_width"):
-        _scale_scalar(
-            result,
-            ("power_knockback", "hp_bar_supplement", field_name),
-            scale_x,
-        )
-    for field_name in ("min_height", "max_height"):
-        _scale_scalar(
-            result,
-            ("power_knockback", "hp_bar_supplement", field_name),
-            scale_y,
-        )
-    _scale_scalar(
-        result,
-        ("power_knockback", "hp_bar_supplement", "min_area"),
-        scale_area,
-    )
     _scale_scalar(result, ("monster_detect", "search_box_margin"), scale_radius)
     # YOLO returns boxes in the source-frame coordinate system. Keep the
     # configured minimum box dimensions physically stable when native capture
@@ -234,10 +211,17 @@ def scale_runtime_pixel_config(
     for key in (
         "match_search_tolerance",
         "local_search_radius",
+        "global_confirm_radius",
     ):
         _scale_scalar(
             result, ("nametag", "overhead_marker", key), scale_radius
         )
+    _scale_xy(
+        result,
+        ("nametag", "overhead_marker", "yolo", "player_offset"),
+        scale_x,
+        scale_y,
+    )
 
     _scale_scalar(result, ("nametag", "medal", "id_fragment_width"), scale_x)
     _scale_scalar(result, ("nametag", "medal", "id_fragment_stride"), scale_x)

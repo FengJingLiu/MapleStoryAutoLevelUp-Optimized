@@ -52,6 +52,9 @@ auto_relogin:
   # No page image template is loaded or matched, and this flow never stores or
   # types an account password.
   enable: True
+  # Enter recovery only while the minimap is absent. React to whichever OCR
+  # page is currently visible and keep scanning forever until it returns.
+  reactive_pages: true
   template_reference_size: [700, 1296] # Legacy login_button_*.png native [height, width].
   flow_template_reference_size: [2160, 3840] # OCR/click coordinate reference [height, width].
   confirm_frames: 2              # Consecutive OCR page matches before each action.
@@ -59,11 +62,12 @@ auto_relogin:
   cancel_confirm_misses: 2       # Distinct misses needed to cancel an unacted false positive.
   input_retry_delay: 1.0         # Retry a definite local/HID send failure after this delay.
   retry_cooldown: 3.0            # Minimum wait before retrying an action on the same page.
-  step_timeout: 60.0             # Fail closed if the expected next page never appears.
-  game_ready_timeout: 60.0       # Fail closed if fresh gameplay evidence never appears.
-  max_recovery_duration: 300.0   # Stop all automatic retries after this total time.
-  max_step_attempts: 5           # Maximum actions on any one confirmed page.
-  game_ready_confirm_frames: 2   # Fresh, expanded minimap player dots required before combat resumes.
+  # The following bounds apply only when reactive_pages is explicitly disabled.
+  step_timeout: 60.0
+  game_ready_timeout: 60.0
+  max_recovery_duration: 300.0
+  max_step_attempts: 5
+  game_ready_confirm_frames: 2
   mouse_click_duration: 0.10     # Slightly longer BLE click for remote game UI reliability.
   channel_click_count: 2         # Enter a displayed channel with a real double-click.
   channel_double_click_interval: 0.08 # Delay between the two channel clicks.
@@ -118,7 +122,7 @@ auto_relogin:
   # Keep sending one OCR-authorized Enter at a time while the connection page
   # remains visible. Stop immediately when the world-selection page appears.
   connect_enter_retry_delay: 1.0
-  connect_enter_max_attempts: 30 # Bounded loop; max_recovery_duration also applies.
+  connect_enter_max_attempts: 30 # Ordered compatibility mode only.
   remote_confirm_key: "enter"    # Key sent only after a configured OCR key-action gate.
   # Every page is classified and authorized from Chinese OCR alone.
   # Missing, duplicate, low-confidence, or moving targets never emit input.
@@ -157,6 +161,12 @@ auto_relogin:
         search_region: [1288, 751, 2092, 1127]
         match_mode: exact
         action: fixed_click
+      queue:
+        texts: ["正在排队进入游戏"]
+        region_source: configured
+        search_region: [1600, 900, 2250, 1040]
+        match_mode: contains
+        action: wait               # Observe only; never cancel or send input while queued.
       character:
         texts: ["开始游戏"]
         region_source: configured
@@ -238,23 +248,6 @@ power_knockback:
   range_y: 70                 # ↕️ Total vertical detection range (pixels)
   cooldown: 0.9               # ⏱️ Minimum time between Power Knock-Back uses
   attack_recovery_delay: 0.90 # 🏹 Block every other input after the S TAP completes
-  hp_bar_supplement:
-    # YOLO can lose a monster whose sprite is covered by the Hero. In that
-    # case a nearby enemy HP bar only marks the corresponding side as blocked;
-    # it is never added to the normal monster/AoE count.
-    enable: true
-    lower_hsv: [64, 140, 70]   # OpenCV HSV lower bound (H:0-179, S/V:0-255)
-    upper_hsv: [74, 255, 255]  # OpenCV HSV upper bound
-    search_above_y: 90         # Search this far above the Hero center
-    search_below_y: 10         # Small allowance below the Hero center
-    min_width: 1               # Green fill shrinks horizontally with remaining HP
-    max_width: 50
-    min_height: 3              # Enemy HP fill height in the legacy 1296x700 frame
-    max_height: 6
-    min_area: 3
-    min_fill_rate: 0.75
-    min_aspect_ratio: 0.25     # Keep almost-empty (very narrow) HP fills detectable
-
 directional_aoe:
   # 🏹 Single-sided AoE (for example, an archer's multi-target skill)
   # While bot.attack is "directional", count monsters separately on each side.
@@ -337,12 +330,10 @@ nametag:
   jump_confirm_distance: 40 # Larger screen-space jumps must repeat before acceptance
   jump_confirm_radius: 12   # Maximum difference between two pending jump candidates
 
-  # Optional overhead marker anchor. This is useful for characters that show
-  # a stable smile bubble above their head. Detection first filters white
-  # connected components (similar to party health-bar geometry filtering),
-  # then verifies the face locally with a masked template.
+  # Screen-space Hero anchor detected by the shared mob/Hero YOLO model.
   overhead_marker:
-    enable: False
+    enable: True
+    backend: "yolo"
     name: ""                    # Empty loads nametag/<name>_overhead_smile.png
     diff_thres: 0.02            # Masked SQDIFF threshold; lower is stricter
     white_lower: [185, 185, 185] # BGR lower bound for the white bubble
@@ -353,11 +344,19 @@ nametag:
     max_fill_rate: 0.90
     match_search_tolerance: 2   # Verify a few pixels around the component alignment
     player_offset: [18, 71]     # White-component top-left to existing Hero coordinate
-    local_search_radius: 90     # Prefer the bubble near the last valid Hero position
+    local_search_radius: 90     # YOLO multi-box choice must stay near the previous single-box Hero
     global_confirm_frames: 2    # Cold global matches must repeat before acceptance
-    lost_timeout_s: 2.0         # Reuse the last smile position until this timeout expires
+    global_confirm_radius: 24   # Maximum movement between cold YOLO confirmations
+    max_stale_frames: -1        # YOLO only: -1 retains the last location without a frame limit
+    require_minimap_player: True # YOLO only: reject login/UI false positives without own minimap dot
+    # A missing own-player minimap dot still invalidates the cached Hero immediately.
     require_unique_local: True  # Reject two identical bubbles near the cached Hero
-    require_unique_global: True # Reject multiple identical bubbles without local history
+    require_unique_global: True # Reject multiple candidates without accepted/single-box history
+    yolo:
+      class_name: "hero"
+      confidence: 0.85           # Independent Hero threshold; mob remains configured below
+      player_anchor: [0.5, 0.5] # Hero coordinate as [x, y] ratios inside the YOLO box
+      player_offset: [0, 0]     # Optional pixel correction after applying player_anchor
 
   # Optional second anchor: the medal immediately below the character ID.
   # A partial ID may use a looser threshold only when this medal also matches
@@ -396,7 +395,7 @@ nametag:
     yolo_name_max_gap: 12        # Maximum actual gap from box bottom to name
 
   # Optional fourth anchor: the character's tiger hood/head. Under a freshly
-  # detected smile, climbing vs standing templates determine ladder state.
+  # detected Hero anchor, climbing vs standing templates determine ladder state.
   # Standing poses can also recover Hero when all text is covered; the less
   # distinctive climbing hood is restricted to a known local anchor or a
   # previously confirmed ladder position.
@@ -446,17 +445,20 @@ monster_detect:
   # Automatically detect monsters around your character.
   # The 1024 YOLO backend replaces per-map sprite template matching.
   backend: "yolo"             # Options: "yolo" or legacy "template"
-  model_path: "models/yolo/mob_1024_best.pt"
+  model_path: "models/yolo/yolov8n_1024_rect_hero_mob_16000_v6_best.pt"
   imgsz: 1024                 # Must match the new model's intended inference size
   confidence: 0.40            # Minimum YOLO confidence
   iou: 0.70                   # YOLO NMS IoU threshold
   max_det: 100                # Maximum mob boxes per camera frame
-  min_box_width: 40           # Minimum YOLO box width at the reference resolution; 0 disables
-  min_box_height: 40          # Minimum YOLO box height at the reference resolution; 0 disables
+  # Croko's 4K boxes are roughly 70-85 px high, or 23-28 px at the legacy
+  # 1296x700 reference size. Keep the guard below that while still rejecting
+  # the small bottom-UI fragments emitted by the model.
+  min_box_width: 20           # Minimum YOLO box width at the reference resolution; 0 disables
+  min_box_height: 20          # Minimum YOLO box height at the reference resolution; 0 disables
   device: "auto"             # CUDA device 0 when available, otherwise CPU
   half: True                  # FP16 on CUDA; automatically disabled on CPU
   warmup: True                # Initialize CUDA during config load, before control starts
-  class_name: "mob"          # Model metadata resolves this to class id 3
+  class_name: "mob"
   # Detection mode determines the method used to find monsters.
   # Settings below are retained only for backend: "template".
   # Modes ranked from most to least computational cost:
@@ -520,6 +522,7 @@ route:
   # The character follows a pre-defined route image (route*.png) using color-coded commands.
   search_range: 10            # 🔍 Route lookup radius; a nearby magenta stationary-jump marker triggers inside this distance
   ladder_endpoint_tolerance: 2 # Vertical-route endpoint tolerance in native minimap pixels
+  ladder_alignment_tolerance: 2 # Require this x alignment before a ground Up/Down command; prevents nearby portal activation
   jump_down_cooldown: 3.0     # ⏱️ Cooldown (in seconds) for 'jump down' action to prevent continuous descent
   jump_up_settle_delay: 0.6   # 🛑 Seconds to stop horizontal movement before a stationary jump
   jump_alignment_nudge_ms: 30 # ↔️ Duration of each left/right centering pulse
@@ -528,10 +531,16 @@ route:
   # Seeing any part of that segment lets the bot predict its far endpoint as
   # the rope x, generate its own runway, and mount with a directional jump.
   rope_climb_detection_range: 10   # Distance from Hero to acquire a climb guide segment
+  rope_climb_target_color: [0, 191, 255] # Explicit arrow-tip RGB; fixes the rope endpoint independently of Hero position
+  rope_climb_arrow_bind_distance: 3 # Maximum pixels between an arrow tip and its light-blue guide
   rope_climb_runup_distance: 8     # Generated takeoff offset to the left/right of the rope
   rope_climb_align_tolerance: 1    # Accepted minimap x error at the generated takeoff point
+  rope_climb_align_hold_distance: 6 # Hold direction outside this radius; use short correction pulses only nearby
+  rope_climb_align_brake_delay: 0.10 # Release continuous movement before fine alignment
+  rope_climb_align_crossing_tolerance: 3 # Accept a small overshoot instead of reversing into oscillation
   rope_climb_settle_delay: 0.15    # Reposition-only pause; skipped when already running toward the rope
   rope_climb_runup_ms: 180         # Minimum directional momentum before Up + Jump (existing run time counts)
+  rope_climb_running_prediction_margin: 4 # Extra native minimap pixels added to one-frame motion prediction
   rope_climb_align_nudge_ms: 30    # Duration of each takeoff-position correction pulse
   rope_climb_position_timeout: 0.9 # Switch runway side if backing up makes no x progress
   rope_climb_retry_interval: 0.9   # Retry when an attempt produces no continued upward progress
@@ -541,6 +550,8 @@ route:
   rope_climb_landing_tolerance: 2  # Treat a stalled attempt this close to start y as a miss
   rope_climb_max_attempts: 4       # Alternate/recalculate the run-up side up to this many times
   rope_climb_max_duration: 15.0    # Release control after an overall climb timeout
+  rope_climb_failure_rearm_delay: 1.5 # Retry the same nearby guide after a bounded failure instead of waiting for watchdog movement
+  rope_climb_failed_route_recovery_distance: 2 # After rearm delay, accept another route only when Hero is on/very near its stroke
   portal_sweep_nudge_ms: 30       # Horizontal TAP duration while Up remains held
   portal_sweep_edge_margin: 2     # Turn inward this many pixels before a block edge
   portal_sweep_repeat_interval: 0.2 # Minimum seconds between pulses on an unchanged frame

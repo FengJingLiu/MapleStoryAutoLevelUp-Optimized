@@ -43,7 +43,7 @@ def _to_numpy(value):
 
 
 class YoloMonsterDetector:
-    """Load one YOLO model and return only its ``mob`` detections.
+    """Load one YOLO model and expose one or more named object classes.
 
     Detection dictionaries preserve the existing engine convention:
     ``position`` is ``(x, y)``, ``size`` is ``(height, width)``, and ``score``
@@ -101,18 +101,11 @@ class YoloMonsterDetector:
         names = getattr(self.model, "names", {})
         if isinstance(names, (list, tuple)):
             names = dict(enumerate(names))
-        self.class_id = next(
-            (
-                int(class_id)
-                for class_id, name in dict(names).items()
-                if str(name) == self.class_name
-            ),
-            None,
-        )
-        if self.class_id is None:
-            raise ValueError(
-                f"YOLO class {self.class_name!r} is missing; classes={names}"
-            )
+        self.names = {int(class_id): str(name) for class_id, name in names.items()}
+        self.class_ids = {name: class_id for class_id, name in self.names.items()}
+        self.class_id = self.require_class(self.class_name)
+        self._prediction_cache_key = None
+        self._prediction_cache = None
 
         self.config_signature = (
             str(self.model_path),
@@ -156,6 +149,12 @@ class YoloMonsterDetector:
         )
 
     @classmethod
+    def inference_signature_from_config(cls, config):
+        """Return settings that determine whether one model can be shared."""
+        signature = cls.signature_from_config(config)
+        return signature[:2] + signature[3:7]
+
+    @classmethod
     def from_config(cls, config):
         return cls(
             config["model_path"],
@@ -168,8 +167,33 @@ class YoloMonsterDetector:
             class_name=config.get("class_name", "mob"),
         )
 
-    def detect(self, frame, roi=None, confidence=None):
-        """Run full-frame inference and optionally retain boxes touching ROI."""
+    def require_class(self, class_name):
+        """Return a named class id or fail before runtime control starts."""
+        class_name = str(class_name)
+        class_id = self.class_ids.get(class_name)
+        if class_id is None:
+            raise ValueError(
+                f"YOLO class {class_name!r} is missing; classes={self.names}"
+            )
+        return class_id
+
+    def detect(
+        self,
+        frame,
+        roi=None,
+        confidence=None,
+        *,
+        class_name=None,
+        inference_class_names=None,
+        inference_confidence=None,
+        cache_key=None,
+    ):
+        """Run full-frame inference and retain one named class touching ROI.
+
+        ``inference_class_names`` and ``inference_confidence`` let the engine
+        request ``mob`` and ``hero`` once at their lowest required threshold.
+        Each returned class is still filtered by its independent ``confidence``.
+        """
         if frame is None or not isinstance(frame, np.ndarray) or frame.size == 0:
             return []
         if frame.ndim != 3 or frame.shape[2] != 3:
@@ -189,34 +213,64 @@ class YoloMonsterDetector:
         conf = self.confidence if confidence is None else float(confidence)
         if not 0.0 <= conf <= 1.0:
             raise ValueError("YOLO confidence must be between 0 and 1")
-
-        results = self.model.predict(
-            source=frame,
-            imgsz=self.imgsz,
-            conf=conf,
-            iou=self.iou,
-            max_det=self.max_det,
-            classes=[self.class_id],
-            device=self.device,
-            half=self.half,
-            verbose=False,
+        model_confidence = (
+            conf if inference_confidence is None
+            else min(conf, float(inference_confidence))
         )
-        self.is_warmed_up = True
-        if not results:
-            return []
+        if not 0.0 <= model_confidence <= 1.0:
+            raise ValueError("YOLO inference confidence must be between 0 and 1")
 
-        boxes = getattr(results[0], "boxes", None)
-        if boxes is None:
-            return []
-        xyxy = _to_numpy(getattr(boxes, "xyxy", None)).reshape(-1, 4)
-        confidences = _to_numpy(getattr(boxes, "conf", None)).reshape(-1)
-        class_ids = _to_numpy(getattr(boxes, "cls", None)).reshape(-1)
+        target_name = self.class_name if class_name is None else str(class_name)
+        target_class_id = self.require_class(target_name)
+        if inference_class_names is None:
+            inference_class_names = (target_name,)
+        inference_class_ids = tuple(sorted({
+            self.require_class(name) for name in inference_class_names
+        } | {target_class_id}))
+        prediction_key = None if cache_key is None else (
+            cache_key,
+            frame.shape,
+            model_confidence,
+            self.iou,
+            self.max_det,
+            inference_class_ids,
+        )
+        if prediction_key is not None and \
+                prediction_key == self._prediction_cache_key:
+            xyxy, confidences, class_ids = self._prediction_cache
+        else:
+            results = self.model.predict(
+                source=frame,
+                imgsz=self.imgsz,
+                conf=model_confidence,
+                iou=self.iou,
+                max_det=self.max_det,
+                classes=list(inference_class_ids),
+                device=self.device,
+                half=self.half,
+                verbose=False,
+            )
+            self.is_warmed_up = True
+            if not results:
+                return []
+
+            boxes = getattr(results[0], "boxes", None)
+            if boxes is None:
+                return []
+            xyxy = _to_numpy(getattr(boxes, "xyxy", None)).reshape(-1, 4)
+            confidences = _to_numpy(getattr(boxes, "conf", None)).reshape(-1)
+            class_ids = _to_numpy(getattr(boxes, "cls", None)).reshape(-1)
+            if prediction_key is not None:
+                self._prediction_cache_key = prediction_key
+                self._prediction_cache = (xyxy, confidences, class_ids)
 
         detections = []
         for box, box_confidence, class_id in zip(
             xyxy, confidences, class_ids
         ):
-            if int(round(float(class_id))) != self.class_id:
+            if int(round(float(class_id))) != target_class_id:
+                continue
+            if float(box_confidence) < conf:
                 continue
             x1, y1, x2, y2 = (int(round(float(value))) for value in box)
             x1 = min(max(0, x1), frame_w)
@@ -234,8 +288,8 @@ class YoloMonsterDetector:
             box_confidence = float(box_confidence)
             detections.append(
                 {
-                    "name": self.class_name,
-                    "class_id": self.class_id,
+                    "name": target_name,
+                    "class_id": target_class_id,
                     "position": (x1, y1),
                     "size": (y2 - y1, x2 - x1),
                     "confidence": box_confidence,

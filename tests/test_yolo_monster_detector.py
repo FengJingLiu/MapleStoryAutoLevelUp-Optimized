@@ -106,6 +106,73 @@ class YoloMonsterDetectorTests(unittest.TestCase):
             (700, 1296, 3),
         )
 
+    def test_one_prediction_cache_serves_hero_and_mob_classes(self):
+        detector, model = self.build_detector(
+            boxes=[
+                ((10, 20, 50, 80), 0.82, 3),
+                ((60, 30, 100, 90), 0.91, 0),
+            ]
+        )
+        model.names[0] = "hero"
+        detector.names[0] = "hero"
+        detector.class_ids["hero"] = 0
+        frame = np.zeros((100, 120, 3), dtype=np.uint8)
+
+        heroes = detector.detect(
+            frame,
+            confidence=0.85,
+            class_name="hero",
+            inference_class_names=("mob", "hero"),
+            inference_confidence=0.4,
+            cache_key=123,
+        )
+        mobs = detector.detect(
+            frame,
+            class_name="mob",
+            inference_class_names=("mob", "hero"),
+            inference_confidence=0.4,
+            cache_key=123,
+        )
+
+        self.assertEqual(len(model.predict_calls), 1)
+        self.assertEqual(model.predict_calls[0]["classes"], [0, 3])
+        self.assertEqual(model.predict_calls[0]["conf"], 0.4)
+        self.assertEqual(heroes[0]["name"], "hero")
+        self.assertEqual(mobs[0]["name"], "mob")
+
+    def test_class_threshold_filters_cached_lower_confidence_output(self):
+        detector, model = self.build_detector(
+            boxes=[
+                ((10, 20, 50, 80), 0.82, 3),
+                ((60, 30, 100, 90), 0.80, 0),
+            ]
+        )
+        model.names[0] = "hero"
+        detector.names[0] = "hero"
+        detector.class_ids["hero"] = 0
+        frame = np.zeros((100, 120, 3), dtype=np.uint8)
+
+        heroes = detector.detect(
+            frame,
+            confidence=0.85,
+            class_name="hero",
+            inference_class_names=("mob", "hero"),
+            inference_confidence=0.4,
+            cache_key=456,
+        )
+        mobs = detector.detect(
+            frame,
+            confidence=0.4,
+            class_name="mob",
+            inference_class_names=("mob", "hero"),
+            inference_confidence=0.4,
+            cache_key=456,
+        )
+
+        self.assertEqual(heroes, [])
+        self.assertEqual(len(mobs), 1)
+        self.assertEqual(len(model.predict_calls), 1)
+
     def test_missing_mob_class_is_rejected(self):
         detector_path = Path(tempfile.gettempdir()) / "missing-mob-class.pt"
         detector_path.write_bytes(b"test")
@@ -136,6 +203,144 @@ class YoloMonsterDetectorTests(unittest.TestCase):
 
 
 class YoloMonsterEngineIntegrationTests(unittest.TestCase):
+    @staticmethod
+    def _make_yolo_hero_bot(detections):
+        bot = MapleStoryAutoBot.__new__(MapleStoryAutoBot)
+        bot.cfg = {
+            "nametag": {
+                "enable": False,
+                "overhead_marker": {
+                    "enable": True,
+                    "backend": "yolo",
+                    "local_search_radius": 90,
+                    "global_confirm_frames": 2,
+                    "global_confirm_radius": 24,
+                    "max_stale_frames": 1,
+                    "require_minimap_player": False,
+                    "require_unique_global": True,
+                    "yolo": {
+                        "class_name": "hero",
+                        "confidence": 0.4,
+                        "player_anchor": [0.5, 0.5],
+                        "player_offset": [0, 0],
+                    },
+                },
+                "appearance": {"enable": False},
+            },
+            "ui_coords": {"ui_y_start": 90},
+        }
+        bot.img_frame = np.zeros((100, 160, 3), dtype=np.uint8)
+        bot.img_frame_debug = None
+        bot.yolo_hero_detector = Mock(detect=Mock(return_value=detections))
+        bot.yolo_monster_detector = None
+        bot.yolo_inference_class_names = ("hero",)
+        bot._current_capture_frame_token = 1
+        bot.has_valid_overhead_marker_location = False
+        bot.loc_overhead_marker_player = (0, 0)
+        bot.overhead_marker_miss_count = 0
+        bot.pending_overhead_marker_location = None
+        bot.pending_overhead_marker_count = 0
+        bot.last_overhead_marker_match = None
+        bot.nametag_appearance_templates = []
+        bot.is_on_ladder = False
+        return bot
+
+    @staticmethod
+    def _hero(position, confidence=0.8):
+        return {
+            "name": "hero",
+            "class_id": 1,
+            "position": position,
+            "size": (40, 20),
+            "confidence": confidence,
+            "score": 1.0 - confidence,
+        }
+
+    def test_yolo_hero_rejects_ambiguous_cold_global_frame(self):
+        bot = self._make_yolo_hero_bot([
+            self._hero((20, 20), 0.9),
+            self._hero((100, 20), 0.8),
+        ])
+
+        self.assertIsNone(bot.get_player_location_by_yolo())
+        self.assertEqual(bot.last_overhead_marker_match["status"], "ambiguous")
+        self.assertFalse(bot.has_valid_overhead_marker_location)
+
+    def test_yolo_hero_does_not_infer_without_own_minimap_dot(self):
+        bot = self._make_yolo_hero_bot([self._hero((40, 20), 0.9)])
+        bot.cfg["nametag"]["overhead_marker"][
+            "require_minimap_player"
+        ] = True
+        bot.cfg["minimap"] = {
+            "player_color": [136, 255, 255],
+            "player_color_tolerance": 10,
+            "player_min_component_area": 2,
+        }
+        bot.img_minimap_source = np.zeros((30, 40, 3), dtype=np.uint8)
+
+        self.assertIsNone(bot.get_player_location_by_yolo())
+        bot.yolo_hero_detector.detect.assert_not_called()
+        self.assertEqual(
+            bot.last_overhead_marker_match["status"], "minimap-unavailable"
+        )
+
+    def test_yolo_hero_requires_stable_cold_confirmation(self):
+        bot = self._make_yolo_hero_bot([self._hero((40, 20), 0.9)])
+
+        self.assertIsNone(bot.get_player_location_by_yolo())
+        self.assertEqual(bot.pending_overhead_marker_count, 1)
+        self.assertEqual(bot.get_player_location_by_yolo(), (50, 40))
+        self.assertTrue(bot.has_valid_overhead_marker_location)
+
+    def test_yolo_hero_uses_previous_single_box_for_crowded_frame(self):
+        single = self._hero((40, 20), 0.90)
+        near_previous_single = self._hero((45, 23), 0.86)
+        remote_higher_score = self._hero((120, 20), 0.99)
+        bot = self._make_yolo_hero_bot([single])
+        bot.yolo_hero_detector.detect.side_effect = [
+            [single],
+            [remote_higher_score, near_previous_single],
+        ]
+
+        self.assertIsNone(bot.get_player_location_by_yolo())
+        bot._current_capture_frame_token = 2
+        self.assertEqual(bot.get_player_location_by_yolo(), (55, 43))
+        self.assertEqual(
+            bot.last_overhead_marker_match["status"], "single-history"
+        )
+
+    def test_yolo_hero_tracks_nearest_box_instead_of_remote_higher_score(self):
+        bot = self._make_yolo_hero_bot([
+            self._hero((43, 22), 0.7),
+            self._hero((120, 20), 0.99),
+        ])
+        bot.has_valid_overhead_marker_location = True
+        bot.loc_overhead_marker_player = (50, 40)
+
+        self.assertEqual(bot.get_player_location_by_yolo(), (53, 42))
+        self.assertEqual(bot.last_overhead_marker_match["status"], "local")
+
+    def test_yolo_hero_unlimited_cache_survives_repeated_misses(self):
+        hero = self._hero((40, 20), 0.9)
+        bot = self._make_yolo_hero_bot([hero])
+        bot.cfg["nametag"]["overhead_marker"]["max_stale_frames"] = -1
+        bot.yolo_hero_detector.detect.side_effect = [
+            [hero],
+            [hero],
+            *([[]] * 20),
+        ]
+
+        self.assertIsNone(bot.get_player_location_by_yolo())
+        self.assertEqual(bot.get_player_location_by_yolo(), (50, 40))
+        for _ in range(20):
+            self.assertEqual(bot.get_player_location_by_yolo(), (50, 40))
+
+        self.assertTrue(bot.has_valid_overhead_marker_location)
+        self.assertEqual(bot.overhead_marker_miss_count, 20)
+        self.assertEqual(
+            bot.last_overhead_marker_match["status"], "not-found,cached"
+        )
+
     @staticmethod
     def _make_pet_filter_bot(frame, pet_template):
         bot = MapleStoryAutoBot.__new__(MapleStoryAutoBot)

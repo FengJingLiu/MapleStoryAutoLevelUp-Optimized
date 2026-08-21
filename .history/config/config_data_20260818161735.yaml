@@ -1,0 +1,74 @@
+# Translation from English to Chinese
+eng_to_cn:
+  # map
+  wisdom_forest: 智慧森林
+  henesys_east_field: 射手村東部平原
+  swamp_land_1: 沼澤地1
+  east_rocky_mountain_5: 東部岩石山脈5
+  east_rocky_mountain_4: 東部岩石山脈4
+  east_rocky_mountain_5_bottom: 東部岩石山脈5(底部)
+  east_rocky_mountain_6: 東部岩石山脈6
+  # monster
+  zombie_lupin: 天使猴
+  black_axe_stump: 黑斧木妖
+  brown_windup_bear: 褐色發條熊
+  cold_eye: 冰獨眼獸
+  evolved_ghost: 進化妖魔
+  fire_boar: 火肥肥
+  green_mushroom: 綠菇菇
+  mushroom: 菇菇寶貝
+  pig: 肥肥
+  pink_windup_bear: 粉色發條熊
+  ribbon_pig: 緞帶肥肥
+  skeleton_officer: 骷髏隊長
+  skeleton_soldier: 骷髏士兵
+  spike_mushroom: 刺菇菇
+  wild_boar: 黑肥肥
+  wild_kargo: 魔龍
+  wind_single_eye_beast: 風獨眼獸
+  zombie_mushroom: 殭屍菇菇
+  grupin: 藍獨角獅
+  red_cellion: 紅獨角獅
+  the_book_ghost: 書靈
+  blue_perfume: 冷豔香水
+  grizzly: 功夫熊
+  panda: 柔道貓熊
+  hodori: 小虎
+  moon_bunny: 月妙
+  nependeath: 食人花
+  dark_nependeath: 黑食人花
+  snail: 蜗牛
+  slime: 绿水灵
+
+
+# Register mobs in each maps
+map_mobs_mapping:
+  ant_cave_2: [spike_mushroom, zombie_mushroom]
+  cloud_balcony: [pink_windup_bear, brown_windup_bear]
+  dragon_territory: [wild_kargo]
+  empty_house: [mushroom]
+  fire_land_1: [black_axe_stump, fire_boar]
+  fire_land_2: [black_axe_stump, fire_boar]
+  first_barrack: [skeleton_officer, skeleton_soldier]
+  land_of_wild_boar: [wild_boar]
+  lost_time_1: [evolved_ghost]
+  monkey_swamp_3: [zombie_lupin]
+  mushroom_hills: [mushroom, green_mushroom]
+  north_forest_training_ground_2: [green_mushroom, spike_mushroom]
+  north_forest_training_ground_8: [wind_single_eye_beast]
+  pig_shores: [pig, ribbon_pig]
+  the_path_of_time_1_for_mage: [evolved_ghost]
+  garden_of_green_2: [grupin]
+  garden_of_red_2: [red_cellion]
+  foggy_forest_for_mage: [the_book_ghost]
+  101_2f_east: [blue_perfume]
+  black_mountain: [hodori, moon_bunny, black_axe_stump]
+  disposed_flower_garden: [nependeath, dark_nependeath]
+  mu_Lung_wild_bear_area_2: [grizzly, panda]
+  wisdom_forest: [snail, slime, green_mushroom]
+  henesys_east_field: [pig, ribbon_pig]
+  swamp_land_1: [wild_boar, fire_boar, zombie_mushroom]
+  east_rocky_mountain_5: [cold_eye, wind_single_eye_beast, blue_perfume]
+  east_rocky_mountain_4: [cold_eye, wind_single_eye_beast, blue_perfume]
+  east_rocky_mountain_5_bottom: [cold_eye, wind_single_eye_beast, blue_perfume]
+  east_rocky_mountain_6: [cold_eye, wind_single_eye_beast, blue_perfume]

@@ -169,26 +169,29 @@ the ESP32 connection for detection-only debugging. With `remote_target: True`,
 computer A's foreground window is intentionally ignored because MapleStory is
 assumed to stay in front on B. Pausing, disconnecting, and exiting release every
 held key; stale capture video also suspends input until fresh frames return.
-Session recovery is a scoped remote-input exception. Every page is authorized
-by stable Chinese RapidOCR results, and game UI clicks use calibrated absolute
-ESP32 HID coordinates mapped from the GC573 4K frame back into Magpie's source
-window. The configured five-step flow is:
+Session recovery is a scoped remote-input exception. It starts only when the
+current minimap structure cannot be detected and keeps gameplay suspended until
+that minimap returns. Every action is authorized by stable Chinese RapidOCR
+results, while game UI clicks use calibrated absolute ESP32 HID coordinates
+mapped from the GC573 4K frame back into Magpie's source window. Pages do not
+have to arrive in a prescribed order; the current page independently selects
+one reaction:
 
-1. Match the disconnect dialog, then send `Enter`.
-2. Match the connection page, send `Alt+Tab` to focus the already-running
-   `launcher3.0` window, then send `Enter`.
-3. Match exact world text `4.漂漂猪`, then click its OCR center.
+1. Match the disconnect sentence, then send `Enter`.
+2. Match exact connection text `连接`, then send `Enter`.
+3. Match exact world text `4.漂漂猪` without the channel-panel marker, then click
+   its OCR center.
 4. Match the unnumbered `漂漂猪` channel-panel marker, then double-click one of
    the configured 20 channel points at random.
 5. Match exact character-page text `开始游戏`, then click its OCR center.
 
-Gameplay control resumes only after fresh minimap player dots are confirmed in
-consecutive frames. Missing or ambiguous OCR, stale frames, failed HID sends,
-and all timeouts fail closed and leave gameplay input suspended for manual
-recovery. This flow recovers an already authenticated session and can focus the
-known running launcher, but it does not enter credentials or handle CAPTCHA,
-two-factor prompts, launcher updates, or unexpected pages. Firmware and setup
-instructions are in `esp32/README.md`.
+Each OCR action still requires consecutive stable frames and has a same-page
+cooldown. Unknown frames, OCR misses, slow transitions, repeated pages, or an
+uncertain input do not terminate recovery: scanning and safe retries continue
+without a total timeout or attempt limit until the minimap is detected again.
+This flow recovers an already authenticated session, but it does not enter
+credentials or handle CAPTCHA, two-factor prompts, launcher updates, or unknown
+pages. Firmware and setup instructions are in `esp32/README.md`.
 
 DirectShow has no clickable desktop window, and computer A's desktop position
 is not used for remote clicks. Game-PC scaling may change how far one relative
@@ -230,6 +233,23 @@ This project is mostly developed and tested on MapleStory Artale Taiwan Server a
 pip install -r requirements.txt
 ```
 
+Monster and screen-space Hero detection share the default
+`models/yolo/yolov8n_1024_rect_hero_mob_16000_v6_best.pt` checkpoint:
+
+```yaml
+nametag:
+  overhead_marker:
+    enable: true
+    backend: yolo
+    yolo:
+      class_name: hero
+      confidence: 0.85
+```
+
+The Hero confidence threshold is independent from the monster threshold. Run
+`python -m tools.evaluate_yolo_hero` to write a CSV and annotated contact sheet
+for saved `screenshot/*_img_frame.png` files.
+
 ### Run with UI (Recommend)
 Run command
 ```
@@ -255,10 +275,14 @@ python -m src.engine.MapleStoryAutoLevelUp --cfg my_config
 ```
 python -m src.engine.MapleStoryAutoLevelUp --disable_viz
 ```
-#### Record the debug window
+#### Record raw and annotated video together
 ```
 python -m src.engine.MapleStoryAutoLevelUp --record
 ```
+The UI `F3` shortcut and `--record` create two synchronized recording outputs
+under `video/`: `<timestamp>_raw.mp4` contains the unprocessed capture frames,
+while `<timestamp>_annotated.mp4` contains the full-resolution diagnostic
+overlays used by the Game Window visualization.
 #### Choose map via config_custom.yaml
 Edit your map selection in the config file:
 ```
@@ -357,22 +381,31 @@ filled horizontal region over the portal activation position:
 ### Manually paint a rope-climb guide
 
 The route recorder is unchanged and does not create rope commands. After
-saving a route, manually edit `minimaps/<map>/route*.png` and draw one exact-
-color connected segment from the current platform approach toward the rope:
+saving a route, manually edit `minimaps/<map>/route*.png`, draw one exact-color
+connected segment from the current platform approach toward the rope, and add
+an explicit arrow tip at the real rope contact point:
 
-- Color: RGB `(0, 127, 255)`, hex `#007FFF` (OpenCV BGR: `(255, 127, 0)`).
-- Put the near end where the normal platform route can discover it and the far
-  end on the rope contact x-position. The bot detects the segment early and
-  treats the endpoint farther from Hero as the rope position.
+- Guide and optional arrow wings: RGB `(0, 127, 255)`, hex `#007FFF` (OpenCV
+  BGR: `(255, 127, 0)`).
+- Arrow tip: place exactly **one pixel** at the real rope contact point using
+  RGB `(0, 191, 255)`, hex `#00BFFF` (OpenCV BGR: `(255, 191, 0)`). Its
+  Manhattan distance from the guide must not exceed 3 minimap pixels.
+- Arrow wings may use the normal guide color; only the single bright-blue tip
+  is semantic. Use a 1-pixel pencil at 100% opacity with antialiasing disabled,
+  and save as PNG so the RGB values remain exact.
+- Once bound, the explicit tip fixes the rope position regardless of which
+  side Hero approaches from, monster knockback, or failure retries. A legacy
+  guide without a bright-blue tip retains the farther-from-Hero fallback.
 - Keep each guide as a separate connected component. Do not join two ropes or
-  cover the segment with another route color.
+  cover the segment with another route color, and bind only one bright-blue tip
+  to each guide.
 - The bot generates its own takeoff point (8 minimap pixels by default). If
   Hero is already running toward the rope, that direction remains held and the
-  jump is issued at the generated point with no stop. Otherwise the bot first
-  repositions, then performs a left/right run-up followed by `Up + Jump`.
+  bot uses the last observed frame displacement to issue the jump before the
+  next frame would cross that point. Otherwise the bot first repositions, then
+  performs a left/right run-up followed by `Up + Jump`.
 - Once mounted, the bot holds `Up`, detects upward minimap progress, and retries
-  from the other side if a mount produces no progress. Existing routes keep
-  their old behavior until this color is added manually.
+  from the other side if a mount produces no progress.
 
 * Please register mobs in config/config_data.yaml after creating a new map. 
 * If this is a big map, it's recommended to scan the map first instead of start record route right away.

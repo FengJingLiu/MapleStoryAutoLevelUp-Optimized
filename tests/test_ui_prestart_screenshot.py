@@ -47,6 +47,10 @@ class _FakeUi(QObject):
     def update_route_map_canvas(self, _image):
         pass
 
+    @Slot(int)
+    def finish_start_ui(self, _result):
+        pass
+
 
 def _controller(*, running=False):
     controller = AutoBotController.__new__(AutoBotController)
@@ -67,6 +71,7 @@ def _controller(*, running=False):
     controller._capture_lifecycle_lock = threading.RLock()
     controller._capture_state_lock = threading.Lock()
     controller._capture_state = controller.CAPTURE_IDLE
+    controller._start_thread = None
     controller._screenshot_thread = None
     controller._prestart_capture = None
     controller._prestart_release_failed = False
@@ -159,6 +164,39 @@ class AutoBotControllerPrestartScreenshotTests(unittest.TestCase):
         self.assertEqual(result, -1)
         self.assertEqual(controller._capture_state, controller.CAPTURE_IDLE)
         controller.auto_bot.start.assert_not_called()
+
+    def test_async_start_returns_while_model_load_continues(self):
+        controller = _controller()
+        QObject.__init__(controller)
+        load_entered = threading.Event()
+        release_load = threading.Event()
+
+        def load_config(_cfg):
+            load_entered.set()
+            release_load.wait(timeout=2)
+            return 0
+
+        controller.auto_bot.load_config.side_effect = load_config
+
+        with patch(
+            "src.ui.AutoBotController.load_yaml",
+            return_value={"capture": {"source": "directshow"}},
+        ):
+            self.assertEqual(controller.start_bot_async("unused.yaml"), 0)
+            self.assertTrue(load_entered.wait(timeout=1))
+            self.assertEqual(
+                controller._capture_state,
+                controller.CAPTURE_STARTING,
+            )
+            worker = controller._start_thread
+            self.assertTrue(worker.is_alive())
+            self.assertEqual(controller.start_bot_async("unused.yaml"), -1)
+
+            release_load.set()
+            worker.join(timeout=2)
+
+        controller.auto_bot.start.assert_called_once_with()
+        self.assertEqual(controller._capture_state, controller.CAPTURE_IDLE)
 
     def test_capture_error_releases_device_and_does_not_start_controls(self):
         controller = _controller()

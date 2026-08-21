@@ -1,0 +1,36 @@
+bot:
+  map: east_rocky_mountain_6
+buff_skill:
+  cooldown:
+  - 600
+  - 60
+  keys:
+  - ins
+  - t
+directional_aoe:
+  range_x: 400
+directional_attack:
+  cooldown: 0.75
+  range_x: 400
+  range_y: 50
+game_window:
+  auto_resize: false
+  preserve_native_resolution: true
+health_monitor:
+  add_hp_percent: 0
+  add_mp_percent: 0
+  enable: false
+key:
+  directional_attack: control
+  jump: alt
+nametag:
+  appearance:
+    enable: false
+  name: liu_muning
+  overhead_marker:
+    enable: true
+  template_reference_size:
+  - 2160
+  - 3840
+power_knockback:
+  trigger_distance_x: 40
