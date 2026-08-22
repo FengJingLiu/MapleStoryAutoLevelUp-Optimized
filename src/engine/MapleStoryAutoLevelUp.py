@@ -11759,35 +11759,12 @@ class MapleStoryAutoBot:
         # endpoint marker's acquisition window. It owns input until progress,
         # retries, or the endpoint height resolves the attempt.
         if getattr(self, "_rope_climb_combat_deferred", False):
-            navigator = getattr(self, "wz_navigation", None)
-            travel_combat_exhausted = bool(getattr(
-                navigator, "platform_state_machine_active", False
-            )) and not bool(getattr(
-                navigator, "platform_combat_priority", True
-            ))
-            if travel_combat_exhausted:
-                deferred_state = getattr(self, "_rope_climb_state", None)
-                deferred_phase = (
-                    deferred_state.get("phase")
-                    if isinstance(deferred_state, dict) else None
-                )
-                # The previous frame consumed the bounded clear-first combat
-                # budget. Resume this transaction now; otherwise route
-                # arbitration waits for combat to clear the deferred flag
-                # while combat deliberately ignores monsters, producing a
-                # permanent ``none none none`` deadlock after knockback.
-                self._set_rope_climb_combat_deferred(False)
-                if deferred_phase != "mount_request":
-                    logger.info(
-                        "[route] Travel combat budget exhausted; resume "
-                        "deferred rope approach"
-                    )
-            else:
-                # Monster detection from the previous frame found an
-                # attackable target. Keep the pre-mount climb frozen; mob
-                # detection below may attack again or rearm the climb after
-                # the target disappears.
-                return
+            # Monster detection from the previous frame found an attackable
+            # target. Keep every pre-mount phase frozen even after the normal
+            # travel combat budget expires. Mob detection runs later in this
+            # frame and explicitly releases the defer as soon as the attack
+            # range is clear, so no route-side timeout is needed here.
+            return
         if self._update_active_rope_climb():
             return
 
@@ -12336,8 +12313,17 @@ class MapleStoryAutoBot:
         rope_jump_pending = bool(
             rope_pre_mount and rope_state.get("phase") == "mount_request"
         )
+        failed_rope_key = getattr(self, "_rope_climb_failed_key", None)
+        rope_retry_pending = bool(
+            failed_rope_key is not None
+            and int(failed_rope_key[0])
+            == int(getattr(self, "idx_routes", -1))
+        )
         jump_transaction_pending = bool(
             route_jump_pending or timed_jump_pending or rope_jump_pending
+        )
+        transition_requires_combat_clear = bool(
+            jump_transaction_pending or rope_pre_mount or rope_retry_pending
         )
         if getattr(self, "_rope_climb_active", False) and not rope_pre_mount:
             # Once the mount command has actually been dispatched, the rope
@@ -12470,10 +12456,13 @@ class MapleStoryAutoBot:
                 navigator, "platform_state_machine_active", False)) and \
                 not bool(getattr(
                     navigator, "platform_combat_priority", True
-                )) and not jump_transaction_pending:
+                )) and not transition_requires_combat_clear:
             # A continuous detection already consumed this transition's
             # bounded combat budget. Keep the semantic WZ path command; the
-            # destination platform will re-enable clear-first combat.
+            # destination platform will re-enable clear-first combat. Never
+            # apply this escape hatch while preparing/retrying a rope or an
+            # uncommitted jump: those transitions must wait for a clear attack
+            # range so knockback cannot leave Hero idle at their launch point.
             self.monsters = []
             return
         checkpoint = self._active_wz_combat_checkpoint()

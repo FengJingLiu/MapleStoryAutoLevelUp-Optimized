@@ -1629,7 +1629,7 @@ class AutoBotLifecycleTests(unittest.TestCase):
         self.assertEqual(bot._rope_climb_state["start_x"], 14)
         self.assertEqual(bot.cmd_action, "rope_align_right")
 
-    def test_travel_combat_budget_resumes_rope_after_far_knockback(self):
+    def test_expired_travel_combat_budget_keeps_rope_deferred(self):
         bot = self._route_color_bot()
         bot.img_route = np.zeros((21, 101, 3), dtype=np.uint8)
         bot.img_routes = [bot.img_route]
@@ -1661,11 +1661,11 @@ class AutoBotLifecycleTests(unittest.TestCase):
         ):
             bot.update_cmd_by_route()
 
-        self.assertFalse(bot._rope_climb_combat_deferred)
+        self.assertTrue(bot._rope_climb_combat_deferred)
         self.assertEqual(bot._rope_climb_state["target"], (70, 10))
         self.assertEqual(
             (bot.cmd_move_x, bot.cmd_move_y, bot.cmd_action),
-            ("right", "none", "rope_hold"),
+            ("none", "none", "none"),
         )
 
     def test_rope_runway_holds_then_brakes_and_accepts_small_overshoot(self):

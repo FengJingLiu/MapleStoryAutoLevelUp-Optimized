@@ -423,6 +423,10 @@ class DirectionalAoeDecisionTests(unittest.TestCase):
 
     def test_light_blue_rope_approach_yields_to_attackable_monster(self):
         bot = self.make_bot([make_monster(150)], threshold=3)
+        bot.wz_navigation = SimpleNamespace(
+            platform_state_machine_active=True,
+            platform_combat_priority=False,
+        )
         bot._rope_climb_active = True
         bot._rope_climb_state = {
             "phase": "position",
@@ -445,6 +449,29 @@ class DirectionalAoeDecisionTests(unittest.TestCase):
         self.assertEqual(bot.cmd_move_x, "left")
         self.assertEqual(bot.cmd_move_y, "none")
         self.assertTrue(bot._rope_climb_combat_deferred)
+
+    def test_failed_rope_cooldown_ignores_expired_travel_combat_budget(self):
+        bot = self.make_bot([make_monster(150)], threshold=3)
+        bot.cfg["directional_aoe"]["enable"] = False
+        bot.idx_routes = 0
+        bot._rope_climb_failed_key = (
+            0,
+            (130, 320, 18, 10),
+            ((130, 329), (139, 329)),
+        )
+        bot._rope_climb_failed_at = 8.5
+        bot.wz_navigation = SimpleNamespace(
+            platform_state_machine_active=True,
+            platform_combat_priority=False,
+        )
+
+        bot.update_cmd_by_mob_detection()
+
+        self.assertEqual(
+            (bot.cmd_move_x, bot.cmd_move_y, bot.cmd_action),
+            ("left", "none", "attack"),
+        )
+        bot.get_monsters_in_range.assert_called_once()
 
     def test_rope_mount_request_yields_before_hid_dispatch(self):
         bot = self.make_bot([make_monster(150)], threshold=3)
@@ -480,6 +507,10 @@ class DirectionalAoeDecisionTests(unittest.TestCase):
     def test_light_blue_rope_approach_rearms_after_monsters_disappear(self):
         bot = self.make_bot([], threshold=3)
         bot.loc_player_global = (10, 10)
+        bot.wz_navigation = SimpleNamespace(
+            platform_state_machine_active=True,
+            platform_combat_priority=False,
+        )
         bot._rope_climb_active = True
         bot._rope_climb_combat_deferred = True
         bot._rope_climb_combat_deferred_at = 5.0
