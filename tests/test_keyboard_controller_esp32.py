@@ -977,6 +977,123 @@ class KeyboardControllerEsp32RoutingTests(unittest.TestCase):
             "cancelled",
         )
 
+    def test_scheduled_rope_mount_fires_once_and_preserves_up(self):
+        controller = self.make_rope_controller()
+        controller.cmd_left_right = "none"
+        controller.cmd_up_down = "none"
+        controller.cmd_action = "none"
+        controller._last_source_action = "none"
+        controller.is_need_force_heal = False
+        controller.perform_rope_mount = Mock(return_value=True)
+        timers = []
+
+        class FakeTimer:
+            def __init__(self, delay, callback, args=()):
+                self.delay = delay
+                self.callback = callback
+                self.args = args
+                self.daemon = False
+                self.cancelled = False
+                timers.append(self)
+
+            def start(self):
+                pass
+
+            def cancel(self):
+                self.cancelled = True
+
+            def fire(self):
+                if not self.cancelled:
+                    self.callback(*self.args)
+
+        token = (3, "rope", 1)
+        with patch.object(controller_module.threading, "Timer", FakeTimer):
+            self.assertTrue(controller.schedule_rope_mount(
+                "right", 0.18, token
+            ))
+
+        self.assertEqual(
+            controller._command_snapshot(), ("right", "none", "none")
+        )
+        self.assertEqual(
+            controller.scheduled_rope_mount_status(token)["state"],
+            "pending",
+        )
+
+        timers[0].fire()
+
+        controller.perform_rope_mount.assert_called_once_with("right")
+        self.assertEqual(
+            controller.scheduled_rope_mount_status(token)["state"],
+            "fired",
+        )
+        self.assertEqual(
+            controller._command_snapshot(), ("none", "up", "rope_hold")
+        )
+        self.assertFalse(controller.cancel_scheduled_rope_mount(token))
+        self.assertEqual(
+            controller.scheduled_rope_mount_status(token)["state"],
+            "fired",
+        )
+
+        # The same route/rope token can recur on the next patrol loop. A
+        # completed prior attempt must create a fresh timer, not masquerade as
+        # the new attempt.
+        controller.set_command("right none none")
+        with patch.object(controller_module.threading, "Timer", FakeTimer):
+            self.assertTrue(controller.schedule_rope_mount(
+                "right", 0.18, token
+            ))
+        self.assertEqual(len(timers), 2)
+        self.assertEqual(
+            controller.scheduled_rope_mount_status(token)["state"],
+            "pending",
+        )
+        self.assertEqual(
+            controller._command_snapshot(), ("right", "none", "none")
+        )
+
+    def test_scheduled_rope_mount_rejects_a_replaced_command(self):
+        controller = self.make_rope_controller()
+        controller.cmd_left_right = "none"
+        controller.cmd_up_down = "none"
+        controller.cmd_action = "none"
+        controller._last_source_action = "none"
+        controller.is_need_force_heal = False
+        controller.perform_rope_mount = Mock(return_value=True)
+        timers = []
+
+        class FakeTimer:
+            def __init__(self, _delay, callback, args=()):
+                self.callback = callback
+                self.args = args
+                self.daemon = False
+                timers.append(self)
+
+            def start(self):
+                pass
+
+            def cancel(self):
+                pass
+
+            def fire(self):
+                self.callback(*self.args)
+
+        token = (4, "rope", 1)
+        with patch.object(controller_module.threading, "Timer", FakeTimer):
+            self.assertTrue(controller.schedule_rope_mount(
+                "left", 0.18, token
+            ))
+        controller.set_command("none none none")
+
+        timers[0].fire()
+
+        controller.perform_rope_mount.assert_not_called()
+        self.assertEqual(
+            controller.scheduled_rope_mount_status(token)["state"],
+            "failed",
+        )
+
     @staticmethod
     def make_stationary_jump_controller():
         controller = controller_module.KeyBoardController.__new__(
@@ -1254,6 +1371,26 @@ class KeyboardControllerEsp32RoutingTests(unittest.TestCase):
         self.assertEqual(controller.cmd_left_right_last, "none")
         self.assertEqual(controller.cmd_up_down_last, "up")
         self.assertEqual(controller.cached_facing, "left")
+
+    def test_stationary_rope_mount_holds_up_before_jump(self):
+        controller_module._input_allowed.set()
+        controller = self.make_rope_controller()
+        controller.rope_climb_stationary_up_lead_ms = 35
+
+        with patch.object(controller_module.time, "sleep") as sleep:
+            self.assertTrue(controller.perform_stationary_rope_mount())
+
+        sleep.assert_called_once_with(0.035)
+        self.assertEqual(
+            controller_module._input_client.method_calls,
+            [
+                call.set_state([]),
+                call.set_state(["up"]),
+                call.tap("space", 50),
+            ],
+        )
+        self.assertEqual(controller.cmd_left_right_last, "none")
+        self.assertEqual(controller.cmd_up_down_last, "up")
 
     def test_rope_mount_keeps_existing_same_direction_run_without_pause(self):
         controller_module._input_allowed.set()

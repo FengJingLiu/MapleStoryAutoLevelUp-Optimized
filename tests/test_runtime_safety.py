@@ -1816,6 +1816,37 @@ class AutoBotLifecycleTests(unittest.TestCase):
         self.assertEqual(bot.cmd_action, "rope_hold")
         self.assertEqual(bot.cmd_move_y, "up")
 
+    def test_exact_rope_alignment_uses_stationary_up_before_jump(self):
+        bot = self._route_color_bot()
+        bot.loc_player_global = (18, 10)
+        self._draw_rope_guide(bot, start=(11, 10), end=(18, 10))
+        bot.img_route[10, 18] = (0, 191, 255)
+
+        with patch(
+            "src.engine.MapleStoryAutoLevelUp.time.monotonic",
+            return_value=100.0,
+        ):
+            bot.update_cmd_by_route()
+
+        self.assertEqual(bot._rope_climb_state["target"], (18, 10))
+        self.assertEqual(
+            bot._rope_climb_state["phase"], "stationary_settle"
+        )
+        self.assertEqual(bot.cmd_action, "rope_hold")
+
+        with patch(
+            "src.engine.MapleStoryAutoLevelUp.time.monotonic",
+            return_value=100.16,
+        ):
+            bot.update_cmd_by_route()
+
+        self.assertEqual(bot._rope_climb_state["phase"], "mount_request")
+        self.assertEqual(bot._rope_climb_state["mount_kind"], "stationary")
+        self.assertEqual(
+            (bot.cmd_move_x, bot.cmd_move_y, bot.cmd_action),
+            ("none", "up", "rope_mount_stationary"),
+        )
+
     def test_wz_rope_mount_runs_from_physics_staging_to_launch(self):
         bot = self._route_color_bot()
         mount_plan = SimpleNamespace(
@@ -1879,6 +1910,103 @@ class AutoBotLifecycleTests(unittest.TestCase):
         self.assertEqual(bot.cmd_move_x, "right")
         self.assertEqual(bot.cmd_move_y, "up")
         self.assertEqual(bot.cmd_action, "rope_mount_right")
+
+    def test_wz_rope_mount_arms_independent_timer_before_launch(self):
+        bot = self._route_color_bot()
+        bot.cfg["system"] = {"fps_limit_main": 10}
+        bot.cfg["wz_navigation"] = {
+            "motion": {"walk_speed_px_per_sec": 20.0}
+        }
+        bot.kb.schedule_rope_mount = Mock(return_value=True)
+        bot.kb.scheduled_rope_mount_status = Mock(return_value=None)
+        bot.kb.cancel_scheduled_rope_mount = Mock(return_value=True)
+        bot.kb.same_direction_move_seconds = Mock(return_value=0.25)
+        mount_plan = SimpleNamespace(
+            contact=(18, 10),
+            vertical_gap_px=4.0,
+            jump_height_px=14.0,
+            jump_distance_px=11.0,
+            launch_lead_px=2,
+            launch_offset_px=3,
+            staging_offset_px=7,
+            predicted_contact_height_px=10.0,
+            contact_clearance_px=6.0,
+            reachable_at_contact=True,
+            approach_direction=None,
+        )
+        bot.wz_navigation = SimpleNamespace(
+            active=True,
+            jump_active=False,
+            walk_target_crossed=Mock(return_value=False),
+            route_legs=(SimpleNamespace(
+                rope_mount=mount_plan,
+                target=(18, 3),
+            ),),
+        )
+        bot.loc_player_global = (11, 10)
+        self._draw_rope_guide(bot, start=(11, 10), end=(18, 10))
+        bot.img_route[10, 18] = (0, 191, 255)
+
+        with patch(
+            "src.engine.MapleStoryAutoLevelUp.time.monotonic",
+            return_value=100.0,
+        ):
+            bot.update_cmd_by_route()
+        with patch(
+            "src.engine.MapleStoryAutoLevelUp.time.monotonic",
+            return_value=100.16,
+        ):
+            bot.update_cmd_by_route()
+
+        bot.loc_player_global = (14, 10)
+        with patch(
+            "src.engine.MapleStoryAutoLevelUp.time.monotonic",
+            return_value=100.26,
+        ):
+            bot.update_cmd_by_route()
+
+        self.assertEqual(bot._rope_climb_state["phase"], "running_approach")
+        self.assertIsInstance(bot._rope_timed_mount_candidate, dict)
+        self.assertEqual(
+            (bot.cmd_move_x, bot.cmd_move_y, bot.cmd_action),
+            ("right", "none", "none"),
+        )
+
+        with patch(
+            "src.engine.MapleStoryAutoLevelUp.time.monotonic",
+            return_value=100.26,
+        ):
+            self.assertTrue(bot.finalize_rope_timed_mount())
+
+        self.assertEqual(bot._rope_climb_state["phase"], "timed_mount")
+        direction, delay, token = bot.kb.schedule_rope_mount.call_args.args
+        self.assertEqual(direction, "right")
+        self.assertGreaterEqual(delay, 0.0)
+        self.assertLess(delay, 0.1)
+        self.assertEqual(bot._rope_climb_state["timed_mount_token"], token)
+
+    def test_fired_rope_timer_cannot_be_deferred_by_late_combat(self):
+        bot = self._route_color_bot()
+        bot._rope_climb_active = True
+        bot._rope_climb_combat_deferred = False
+        bot._rope_climb_combat_deferred_at = None
+        bot._rope_climb_state = {
+            "phase": "timed_mount",
+            "timed_mount_token": ("rope", 1),
+        }
+        bot.kb.scheduled_rope_mount_status = Mock(return_value={
+            "state": "fired",
+            "finished_at": 100.0,
+        })
+
+        with patch(
+            "src.engine.MapleStoryAutoLevelUp.time.monotonic",
+            return_value=100.01,
+        ):
+            bot._set_rope_climb_combat_deferred(True)
+
+        self.assertFalse(bot._rope_climb_combat_deferred)
+        self.assertEqual(bot._rope_climb_state["phase"], "timed_mount")
 
     def test_calibrated_wz_rope_mount_runs_through_launch_window(self):
         bot = self._route_color_bot()

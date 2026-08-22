@@ -545,6 +545,7 @@ route:
   rope_climb_align_crossing_tolerance: 3 # Accept a small overshoot instead of reversing into oscillation
   rope_climb_settle_delay: 0.15    # Reposition-only pause; skipped when already running toward the rope
   rope_climb_runup_ms: 180         # Minimum directional momentum before Up + Jump (existing run time counts)
+  rope_climb_stationary_up_lead_ms: 35 # Exact-x mount: hold Up briefly before the Jump TAP
   rope_climb_launch_lead_ms: 100   # Start farther out by one 10 FPS vision/HID interval before the theoretical apex point
   rope_climb_running_prediction_margin: 4 # Hand-painted-route prediction margin; WZ trajectories use observed frame motion only
   rope_climb_align_nudge_ms: 30    # Duration of each takeoff-position correction pulse

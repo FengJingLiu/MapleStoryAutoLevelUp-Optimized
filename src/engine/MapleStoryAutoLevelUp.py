@@ -163,6 +163,7 @@ class MapleStoryAutoBot:
         self._rope_climb_targets_by_route = []
         self._rope_climb_state = None
         self._rope_climb_active = False
+        self._rope_timed_mount_candidate = None
         self._rope_climb_combat_deferred = False
         self._rope_climb_combat_deferred_at = None
         self._rope_climb_completed_key = None
@@ -7797,8 +7798,64 @@ class MapleStoryAutoBot:
             return None
         return min(candidates, key=lambda item: item[:2])[-1]
 
+    def _rope_timed_mount_status(self, state=None):
+        """Return the keyboard timer state for the active rope attempt."""
+        state = state or getattr(self, "_rope_climb_state", None)
+        if not isinstance(state, dict):
+            return None
+        token = state.get("timed_mount_token")
+        reader = getattr(
+            getattr(self, "kb", None), "scheduled_rope_mount_status", None
+        )
+        if token is None or not callable(reader):
+            return None
+        return reader(token)
+
+    def _cancel_rope_timed_mount(self, state=None):
+        """Cancel a pending rope timer and discard its frame candidate."""
+        self._rope_timed_mount_candidate = None
+        state = state or getattr(self, "_rope_climb_state", None)
+        if not isinstance(state, dict):
+            return False
+        token = state.get("timed_mount_token")
+        cancel = getattr(
+            getattr(self, "kb", None), "cancel_scheduled_rope_mount", None
+        )
+        cancelled = bool(
+            token is not None and callable(cancel) and cancel(token)
+        )
+        status = self._rope_timed_mount_status(state)
+        non_interruptible = bool(
+            isinstance(status, dict)
+            and status.get("state") in {"firing", "fired"}
+        )
+        if not non_interruptible:
+            state["timed_mount_token"] = None
+        return cancelled
+
+    def _rope_timed_mount_owns_input(self, now=None):
+        """Return whether a firing/recent rope timer is no longer interruptible."""
+        status = self._rope_timed_mount_status()
+        if not isinstance(status, dict):
+            return False
+        state = status.get("state")
+        if state in {"pending", "firing"}:
+            return True
+        if state != "fired":
+            return False
+        now = time.monotonic() if now is None else float(now)
+        finished_at = self._positive_finite_number(status.get("finished_at"))
+        timeout = max(
+            0.05,
+            float(self.cfg.get("route", {}).get(
+                "timed_jump_confirmation_timeout_ms", 450
+            )) / 1000.0,
+        )
+        return finished_at > 0 and now - finished_at <= timeout
+
     def _reset_rope_climb(self, clear_locks=False):
         """Release the climb state while optionally rearming all guides."""
+        self._cancel_rope_timed_mount()
         self._rope_climb_state = None
         self._rope_climb_active = False
         self._rope_climb_combat_deferred = False
@@ -7823,6 +7880,28 @@ class MapleStoryAutoBot:
             self, "_rope_climb_combat_deferred", False
         ))
         if deferred:
+            self._rope_timed_mount_candidate = None
+            timed_status = self._rope_timed_mount_status(state)
+            if isinstance(timed_status, dict) and \
+                    timed_status.get("state") in {"firing", "fired"}:
+                # Combat sampled the timer as pending, but its callback won
+                # the race before cancellation. The mount now owns input and
+                # must be allowed to reach the ascent state.
+                return
+            if isinstance(timed_status, dict) and \
+                    timed_status.get("state") == "pending":
+                if not self._cancel_rope_timed_mount(state):
+                    timed_status = self._rope_timed_mount_status(state)
+                    if isinstance(timed_status, dict) and \
+                            timed_status.get("state") in {
+                                "pending", "firing", "fired"
+                            }:
+                        return
+                same_side = state.get("side")
+                self._set_rope_runup_side(state, side=same_side)
+                state["phase"] = "position"
+                state["aligned_since"] = None
+                state["mount_request_started_at"] = None
             if not was_deferred:
                 self._rope_climb_combat_deferred_at = now
             self._rope_climb_combat_deferred = True
@@ -8021,6 +8100,8 @@ class MapleStoryAutoBot:
                 "started_at": now,
                 "aligned_since": None,
                 "mount_request_started_at": None,
+                "mount_kind": None,
+                "timed_mount_token": None,
                 "mount_origin_y": player_y,
                 "best_y": player_y,
                 "last_progress_at": now,
@@ -8104,6 +8185,14 @@ class MapleStoryAutoBot:
                     approach_side = "right"
                     approach_direction = "left"
 
+                if approach_side is None:
+                    # Live trials showed that an exact-x Up-before-Jump mount
+                    # is fully repeatable and avoids an unnecessary retreat.
+                    # Recheck the alignment after the normal settle interval
+                    # before committing the one-shot action.
+                    state["phase"] = "stationary_settle"
+                    state["aligned_since"] = now
+
                 held_direction = getattr(
                     getattr(self, "kb", None),
                     "cmd_left_right_last",
@@ -8114,7 +8203,8 @@ class MapleStoryAutoBot:
                     calibration.get("approach_direction")
                     if calibration is not None else None
                 )
-                if held_direction == approach_direction and (
+                if approach_side is not None and \
+                        held_direction == approach_direction and (
                         calibrated_direction is None
                         or approach_direction == calibrated_direction
                 ):
@@ -8134,7 +8224,13 @@ class MapleStoryAutoBot:
                             calibrated_runway_ready:
                         state["phase"] = "running_approach"
             self._rope_climb_state = state
-            if mount_plan is not None:
+            if state["phase"] == "stationary_settle":
+                logger.info(
+                    "[route] Acquired climb guide at exact rope x; "
+                    f"try stationary Up + Jump at {target} before using "
+                    "the generated runway"
+                )
+            elif mount_plan is not None:
                 log_message = (
                     "[route] Acquired trajectory climb guide; "
                     f"rope_bottom={target}, "
@@ -8212,6 +8308,7 @@ class MapleStoryAutoBot:
         self._rope_climb_failed_at = time.monotonic()
 
     def _prepare_rope_climb_retry(self, state):
+        self._cancel_rope_timed_mount(state)
         previous_side = state.get("side")
         calibration = state.get("rope_mount_calibration")
         calibrated_direction = (
@@ -8228,6 +8325,7 @@ class MapleStoryAutoBot:
         state["phase"] = "position"
         state["aligned_since"] = None
         state["mount_request_started_at"] = None
+        state["mount_kind"] = None
         state["position_side_switches"] = 0
         logger.info(
             "[route] Rope mount made no upward progress; retry from "
@@ -8240,6 +8338,7 @@ class MapleStoryAutoBot:
         side = state["side"]
         direction = "right" if side == "left" else "left"
         state["phase"] = "mount_request"
+        state["mount_kind"] = "directional"
         state["attempts"] += 1
         state["mount_request_started_at"] = now
         state["mount_origin_y"] = player_y
@@ -8250,6 +8349,125 @@ class MapleStoryAutoBot:
         self.cmd_move_x = direction
         self.cmd_move_y = "up"
         self.cmd_action = f"rope_mount_{direction}"
+        return True
+
+    def _request_stationary_rope_mount(self, state, now, player_y):
+        """Publish one exact-x Up-before-Jump rope mount request."""
+        state["phase"] = "mount_request"
+        state["mount_kind"] = "stationary"
+        state["attempts"] += 1
+        state["mount_request_started_at"] = now
+        state["mount_origin_y"] = player_y
+        state["best_y"] = player_y
+        state["last_progress_at"] = now
+        state["last_y"] = player_y
+        state["last_y_change_at"] = now
+        self.cmd_move_x = "none"
+        self.cmd_move_y = "up"
+        self.cmd_action = "rope_mount_stationary"
+        return True
+
+    def _rope_timed_mount_descriptor(self, state):
+        """Describe a generated rope launch for the shared WZ predictor."""
+        scheduler = getattr(
+            getattr(self, "kb", None), "schedule_rope_mount", None
+        )
+        status_reader = getattr(
+            getattr(self, "kb", None), "scheduled_rope_mount_status", None
+        )
+        if not isinstance(state, dict) or \
+                state.get("phase") != "running_approach" or \
+                not state.get("trajectory_mount", False) or \
+                not callable(scheduler) or not callable(status_reader):
+            return None
+        side = state.get("side")
+        if side not in {"left", "right"}:
+            return None
+        direction = "right" if side == "left" else "left"
+        launch_x = float(state.get("launch_x", state.get("start_x")))
+        player_x, player_y = map(float, self.loc_player_global[:2])
+        token = (
+            state.get("key"),
+            side,
+            int(state.get("attempts", 0)) + 1,
+            int(round(launch_x)),
+        )
+        return {
+            "token": token,
+            "state_key": state.get("key"),
+            "side": side,
+            "direction": direction,
+            "player_x": player_x,
+            "player_y": player_y,
+            "launch_x": launch_x,
+        }
+
+    def _prepare_rope_timed_mount(self, state):
+        """Reserve a rope timer candidate before monster arbitration."""
+        self._rope_timed_mount_candidate = None
+        descriptor = self._rope_timed_mount_descriptor(state)
+        if descriptor is None:
+            return False
+        prediction = self._predict_current_wz_timed_jump(descriptor)
+        if prediction is None:
+            return False
+        descriptor["prediction"] = prediction
+        self._rope_timed_mount_candidate = descriptor
+        self.cmd_move_x = descriptor["direction"]
+        self.cmd_move_y = "none"
+        self.cmd_action = "none"
+        return True
+
+    def finalize_rope_timed_mount(self):
+        """Arm the rope timer after combat kept the approach command."""
+        candidate = getattr(self, "_rope_timed_mount_candidate", None)
+        self._rope_timed_mount_candidate = None
+        if not isinstance(candidate, dict):
+            return False
+        state = getattr(self, "_rope_climb_state", None)
+        direction = candidate["direction"]
+        if not isinstance(state, dict) or \
+                state.get("phase") != "running_approach" or \
+                state.get("key") != candidate["state_key"] or \
+                state.get("side") != candidate["side"] or (
+                    self.cmd_move_x != direction
+                    or self.cmd_move_y not in {"none", "stop"}
+                    or self.cmd_action not in {"none", "stop"}
+                ):
+            return False
+
+        prediction = self._predict_current_wz_timed_jump(candidate)
+        scheduler = getattr(
+            getattr(self, "kb", None), "schedule_rope_mount", None
+        )
+        if prediction is None or not callable(scheduler) or not scheduler(
+                direction, prediction.delay_seconds, candidate["token"]):
+            return False
+
+        now = time.monotonic()
+        state["phase"] = "timed_mount"
+        state["mount_kind"] = "directional"
+        state["timed_mount_token"] = candidate["token"]
+        state["attempts"] += 1
+        state["mount_request_started_at"] = None
+        state["mount_origin_y"] = int(round(candidate["player_y"]))
+        state["best_y"] = state["mount_origin_y"]
+        state["last_progress_at"] = now
+        state["last_y"] = state["mount_origin_y"]
+        state["last_y_change_at"] = now
+        self.cmd_move_x = direction
+        self.cmd_move_y = "none"
+        self.cmd_action = "none"
+        logger.info(
+            "[timed-rope] Armed "
+            f"{direction}: sample={prediction.sample_x:.2f}px, "
+            f"predicted={prediction.predicted_x:.2f}px, "
+            f"launch={prediction.launch_x:.2f}px, "
+            f"speed={prediction.speed_px_per_second:.3f}px/s, "
+            f"frameAge={prediction.capture_age_seconds * 1000:.0f}ms, "
+            f"lead={prediction.input_lead_seconds * 1000:.0f}ms, "
+            f"delay={prediction.delay_seconds * 1000:.0f}ms"
+        )
         return True
 
     def _update_active_rope_climb(self):
@@ -8289,18 +8507,64 @@ class MapleStoryAutoBot:
         player_x, player_y = map(int, self.loc_player_global)
         phase = state["phase"]
 
-        if phase == "mount_request":
-            side = state["side"]
-            direction = "right" if side == "left" else "left"
-            request_hold = max(
-                0.20,
-                float(route_cfg.get("rope_climb_runup_ms", 180)) / 1000.0
-                + 0.05,
+        if phase == "timed_mount":
+            direction = "right" if state["side"] == "left" else "left"
+            status = self._rope_timed_mount_status(state)
+            timer_state = (
+                status.get("state") if isinstance(status, dict) else None
             )
+            if timer_state in {"pending", "firing"}:
+                self.cmd_move_x = direction
+                self.cmd_move_y = "none"
+                self.cmd_action = "none"
+                return True
+            if timer_state == "fired":
+                state["phase"] = "mounting"
+                state["mount_request_started_at"] = status.get(
+                    "fired_at", status.get("finished_at", now)
+                )
+                state["last_progress_at"] = now
+                state["last_y_change_at"] = now
+                self.cmd_move_y = "up"
+                self.cmd_action = "rope_hold"
+                phase = "mounting"
+            else:
+                max_attempts = max(
+                    1, int(route_cfg.get("rope_climb_max_attempts", 4))
+                )
+                if state["attempts"] >= max_attempts:
+                    self._fail_rope_climb(
+                        "exhausted its timed mount retries"
+                    )
+                    return True
+                self._prepare_rope_climb_retry(state)
+                return True
+
+        if phase == "mount_request":
+            stationary = state.get("mount_kind") == "stationary"
+            if stationary:
+                direction = "none"
+                request_hold = max(
+                    0.20,
+                    float(route_cfg.get(
+                        "rope_climb_stationary_up_lead_ms", 35
+                    )) / 1000.0 + 0.05,
+                )
+            else:
+                side = state["side"]
+                direction = "right" if side == "left" else "left"
+                request_hold = max(
+                    0.20,
+                    float(route_cfg.get("rope_climb_runup_ms", 180))
+                    / 1000.0 + 0.05,
+                )
             if now - state["mount_request_started_at"] < request_hold:
                 self.cmd_move_x = direction
                 self.cmd_move_y = "up"
-                self.cmd_action = f"rope_mount_{direction}"
+                self.cmd_action = (
+                    "rope_mount_stationary"
+                    if stationary else f"rope_mount_{direction}"
+                )
                 return True
             state["phase"] = "mounting"
             phase = "mounting"
@@ -8395,6 +8659,31 @@ class MapleStoryAutoBot:
             self._prepare_rope_climb_retry(state)
             return True
 
+        if phase == "stationary_settle":
+            tolerance = max(
+                0, int(route_cfg.get("rope_climb_align_tolerance", 1))
+            )
+            target_x = int(state["target"][0])
+            if abs(player_x - target_x) > tolerance:
+                self._set_rope_runup_side(state)
+                state["phase"] = "position"
+                state["aligned_since"] = None
+                phase = "position"
+            else:
+                settle_delay = max(
+                    0.0,
+                    float(route_cfg.get("rope_climb_settle_delay", 0.15)),
+                )
+                aligned_since = state.get("aligned_since")
+                if aligned_since is None:
+                    state["aligned_since"] = now
+                    return True
+                if now - float(aligned_since) < settle_delay:
+                    return True
+                return self._request_stationary_rope_mount(
+                    state, now, player_y
+                )
+
         if phase == "running_approach":
             direction = "right" if state["side"] == "left" else "left"
             launch_x = int(state.get("launch_x", state["start_x"]))
@@ -8411,11 +8700,83 @@ class MapleStoryAutoBot:
             observed_step = max(0, observed_step)
             state["approach_last_x"] = player_x
 
+            # WZ routes know both the measured horizontal speed and the exact
+            # launch x. Arm a host timer while the point is still ahead so a
+            # 5-10 FPS vision loop cannot notice the launch only after Hero
+            # has crossed it. The candidate is committed after this frame's
+            # monster arbitration, matching normal timed edge jumps.
+            trajectory_mount = bool(state.get("trajectory_mount", False))
+            timed_descriptor = (
+                self._rope_timed_mount_descriptor(state)
+                if trajectory_mount else None
+            )
+            timed_speed = self._wz_walk_speed_px_per_second()
+            if timed_descriptor is not None and timed_speed > 0:
+                held_seconds = 0.0
+                held_reader = getattr(
+                    getattr(self, "kb", None),
+                    "same_direction_move_seconds",
+                    None,
+                )
+                if callable(held_reader):
+                    try:
+                        held_seconds = max(0.0, float(held_reader(
+                            direction, now=now
+                        )))
+                    except (TypeError, ValueError, OverflowError):
+                        held_seconds = 0.0
+                frame_age = self._wz_capture_frame_age_seconds(now)
+                projected_travel = timed_speed * min(
+                    frame_age, held_seconds
+                )
+                projected_remaining = remaining = (
+                    launch_x - player_x
+                    if direction == "right"
+                    else player_x - launch_x
+                )
+                projected_remaining -= projected_travel
+                if projected_remaining < -1.0:
+                    same_side = state["side"]
+                    self._set_rope_runup_side(state, side=same_side)
+                    state["phase"] = "position"
+                    state["aligned_since"] = None
+                    state["position_side_switches"] = 0
+                    logger.info(
+                        "[timed-rope] Captured frame is already past "
+                        f"launch_x={launch_x}: x={player_x}, "
+                        f"predicted_remaining={projected_remaining:.2f}px; "
+                        "restart the same-side runway"
+                    )
+                    return True
+
+                self.cmd_move_x = direction
+                if self._prepare_rope_timed_mount(state):
+                    return True
+
+                best_distance = state.get("position_best_distance")
+                if best_distance is None or remaining < best_distance:
+                    state["position_best_distance"] = remaining
+                    state["position_last_progress_at"] = now
+                position_timeout = max(
+                    0.1,
+                    float(route_cfg.get(
+                        "rope_climb_position_timeout", 0.9
+                    )),
+                )
+                if now - state["position_last_progress_at"] >= \
+                        position_timeout:
+                    state["phase"] = "position"
+                    state["aligned_since"] = None
+                    logger.info(
+                        "[timed-rope] Approach stopped before timer arming; "
+                        "fall back to runway positioning"
+                    )
+                return True
+
             # Predict one observed minimap sample so the USB action reaches
             # the game at the calculated launch point. WZ trajectories need
             # no arbitrary extra margin: any missing 180 ms momentum is added
             # precisely by KeyBoardController before it taps Jump.
-            trajectory_mount = bool(state.get("trajectory_mount", False))
             if trajectory_mount:
                 prediction_margin = 0
                 if launch_window is not None:
@@ -11749,6 +12110,7 @@ class MapleStoryAutoBot:
         self.cmd_move_x = "none"
         self.cmd_move_y = "none"
         self.cmd_action = "none"
+        self._rope_timed_mount_candidate = None
         self._clear_wz_route_jump_atomic_if_departed()
         self._clear_rope_climb_locks_if_departed()
         self._stationary_jump_proximity_active = False
@@ -12080,11 +12442,24 @@ class MapleStoryAutoBot:
             "ranged_safe_platforms"
 
     def _scheduled_buff_allowed(self):
-        """Allow Buff preemption everywhere except a committed WZ Jump."""
+        """Block Buffs while a WZ jump or rope launch owns timing."""
         if not getattr(self, "_wz_navigation_enabled", False):
             return True
         if self._wz_timed_jump_owns_input() or bool(getattr(
                 self, "_stationary_jump_proximity_active", False)):
+            return False
+        rope_state = getattr(self, "_rope_climb_state", None)
+        rope_pre_mount = bool(
+            getattr(self, "_rope_climb_active", False)
+            and isinstance(rope_state, dict)
+            and rope_state.get("phase") in {
+                "position", "settle", "stationary_settle",
+                "running_approach", "timed_mount", "mount_request",
+            }
+        )
+        if rope_pre_mount or isinstance(getattr(
+                self, "_rope_timed_mount_candidate", None), dict) or \
+                self._rope_timed_mount_owns_input():
             return False
         navigator = getattr(self, "wz_navigation", None)
         if navigator is None or not getattr(navigator, "active", False) or \
@@ -12285,6 +12660,20 @@ class MapleStoryAutoBot:
             self.monsters = []
             self._suppress_periodic_attack = True
             return
+        timed_rope_status = self._rope_timed_mount_status()
+        timed_rope_state = (
+            timed_rope_status.get("state")
+            if isinstance(timed_rope_status, dict) else None
+        )
+        armed_timed_rope_pending = timed_rope_state == "pending"
+        if not armed_timed_rope_pending and \
+                self._rope_timed_mount_owns_input():
+            # Once the timer callback begins, Up + Jump is one indivisible HID
+            # transaction. Combat resumes only after the climb state observes
+            # its result.
+            self.monsters = []
+            self._suppress_periodic_attack = True
+            return
         combat_actions = {"attack", "directional_aoe", "power_knockback"}
         clear_before_move = self._clears_monsters_before_moving()
         route_jump_pending = self.cmd_action == "jump"
@@ -12307,11 +12696,14 @@ class MapleStoryAutoBot:
             getattr(self, "_rope_climb_active", False)
             and isinstance(rope_state, dict)
             and rope_state.get("phase") in {
-                "position", "settle", "running_approach", "mount_request"
+                "position", "settle", "stationary_settle",
+                "running_approach", "timed_mount", "mount_request"
             }
         )
         rope_jump_pending = bool(
-            rope_pre_mount and rope_state.get("phase") == "mount_request"
+            rope_pre_mount and rope_state.get("phase") in {
+                "timed_mount", "mount_request"
+            }
         )
         failed_rope_key = getattr(self, "_rope_climb_failed_key", None)
         rope_retry_pending = bool(
