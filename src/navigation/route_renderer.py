@@ -89,7 +89,6 @@ class RopeMountMotion:
     jump_height_px: float
     jump_distance_px: float
     runup_seconds: float
-    launch_lead_seconds: float = 0.10
 
 
 @dataclass(frozen=True, slots=True)
@@ -101,7 +100,6 @@ class RopeMountPlan:
     vertical_gap_px: float
     jump_height_px: float
     jump_distance_px: float
-    launch_lead_px: int
     launch_offset_px: int
     staging_offset_px: int
     predicted_contact_height_px: float
@@ -246,9 +244,6 @@ def _build_rope_mount_plan(
         raise ValueError("rope mount motion values must be finite and positive")
     if not math.isfinite(motion.runup_seconds) or motion.runup_seconds < 0:
         raise ValueError("rope mount run-up time must be finite and non-negative")
-    if not math.isfinite(motion.launch_lead_seconds) or \
-            motion.launch_lead_seconds < 0:
-        raise ValueError("rope launch lead must be finite and non-negative")
     if recorded_launch_offset_px is not None and \
             int(recorded_launch_offset_px) <= 0:
         raise ValueError("recorded rope launch offset must be positive")
@@ -256,18 +251,12 @@ def _build_rope_mount_plan(
         raise ValueError("rope approach direction must be left or right")
 
     vertical_gap = max(0.0, float(source_pixel[1] - contact[1]))
-    # The measured apex is half of the full airborne distance. Start farther
-    # away by one main-loop/HID lead interval so the real delayed key press
-    # puts the apex before the rope instead of beyond it.
-    launch_lead = max(
-        0,
-        int(round(
-            motion.walk_speed_px_per_sec * motion.launch_lead_seconds
-        )),
-    )
+    # The runtime now triggers directly from the 60 Hz Hero position. The
+    # full-speed spatial point therefore targets the measured apex itself;
+    # no frame/HID lead distance is baked into route geometry.
     desired_launch_offset = max(
         1,
-        int(round(motion.jump_distance_px / 2.0)) + launch_lead,
+        int(round(motion.jump_distance_px / 2.0)),
     )
 
     # Do not move the launch so far out that the descending arc reaches the
@@ -318,7 +307,6 @@ def _build_rope_mount_plan(
         vertical_gap_px=vertical_gap,
         jump_height_px=float(motion.jump_height_px),
         jump_distance_px=float(motion.jump_distance_px),
-        launch_lead_px=launch_lead,
         launch_offset_px=launch_offset,
         staging_offset_px=staging_offset,
         predicted_contact_height_px=contact_height,

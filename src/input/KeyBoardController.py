@@ -372,23 +372,10 @@ class KeyBoardController():
         self.command_lock = threading.RLock()
         self.cached_facing = None
         # Monotonic timestamp for the currently held horizontal direction.
-        # Directional jumps preserve it without waiting; rope mounting uses
-        # the elapsed duration when its trajectory still requires momentum.
+        # Live minimap motion consumes this only as observable state; launch
+        # commands themselves are now frame-driven and immediate.
         self.direction_held_since = None
         self.direction_held_generation = None
-        # One-shot host timer used by latency-compensated WZ edge jumps.  It
-        # runs independently of both the low-FPS vision loop and this worker's
-        # 30 FPS command polling.
-        self._scheduled_jump_lock = threading.RLock()
-        self._scheduled_jump_generation = 0
-        self._scheduled_jump = None
-        # Rope mounting needs the same low-FPS isolation as WZ edge jumps,
-        # but it finishes by holding Up instead of preserving a horizontal
-        # key.  Keep a separate one-shot so the two transactions cannot
-        # overwrite each other's ownership or completion state.
-        self._scheduled_rope_mount_lock = threading.RLock()
-        self._scheduled_rope_mount_generation = 0
-        self._scheduled_rope_mount = None
         self.window_title = cfg["game_window"]["title"]
         self.fps = 0 # Frame per seconds
         # Timer
@@ -436,21 +423,9 @@ class KeyBoardController():
             1,
             int(cfg.get("route", {}).get("jump_alignment_nudge_ms", 30)),
         )
-        self.timed_jump_horizontal_hold_ms = max(
-            0,
-            int(cfg.get("route", {}).get(
-                "timed_jump_horizontal_hold_ms", 500
-            )),
-        )
         self.rope_climb_runup_ms = max(
             0,
             int(cfg.get("route", {}).get("rope_climb_runup_ms", 180)),
-        )
-        self.rope_climb_stationary_up_lead_ms = max(
-            0,
-            int(cfg.get("route", {}).get(
-                "rope_climb_stationary_up_lead_ms", 35
-            )),
         )
         self.rope_climb_align_nudge_ms = max(
             1,
@@ -1124,8 +1099,6 @@ class KeyBoardController():
         '''
         Release all key
         '''
-        self._abort_scheduled_directional_jump()
-        self.cancel_scheduled_rope_mount()
         release_all_keys()
         self._invalidate_facing_cache()
 
@@ -1196,10 +1169,6 @@ class KeyBoardController():
                     cmd_left_right = self.cmd_left_right
                 if cmd_up_down is None:
                     cmd_up_down = self.cmd_up_down
-
-        if self._scheduled_directional_jump_brakes_movement():
-            cmd_left_right = "none"
-            cmd_up_down = "none"
 
         keys = []
         if cmd_left_right in {"left", "right"}:
@@ -1309,376 +1278,6 @@ class KeyBoardController():
             and cmd_left_right in {"left", "right"}
             and cmd_up_down in {"none", "stop"}
         )
-
-    def _ensure_scheduled_jump_lock(self):
-        """Lazily initialize timer state for lightweight ``__new__`` tests."""
-        lock = getattr(self, "_scheduled_jump_lock", None)
-        if lock is None:
-            lock = threading.RLock()
-            self._scheduled_jump_lock = lock
-        if not hasattr(self, "_scheduled_jump_generation"):
-            self._scheduled_jump_generation = 0
-        if not hasattr(self, "_scheduled_jump"):
-            self._scheduled_jump = None
-        return lock
-
-    def scheduled_directional_jump_status(self, token=None):
-        """Return a copy of the current one-shot timer state."""
-        with self._ensure_scheduled_jump_lock():
-            scheduled = getattr(self, "_scheduled_jump", None)
-            if not isinstance(scheduled, dict) or (
-                    token is not None and scheduled.get("token") != token):
-                return None
-            return dict(scheduled)
-
-    def cancel_scheduled_directional_jump(self, token=None):
-        """Cancel a WZ jump unless its atomic air/landing phase has begun."""
-        with self._ensure_scheduled_jump_lock():
-            scheduled = getattr(self, "_scheduled_jump", None)
-            if not isinstance(scheduled, dict) or (
-                    token is not None and scheduled.get("token") != token):
-                return False
-            if scheduled.get("state") in {
-                    "firing", "airborne", "braking"}:
-                return False
-            self._scheduled_jump_generation += 1
-            timer = scheduled.get("timer")
-            if timer is not None:
-                timer.cancel()
-            scheduled["state"] = "cancelled"
-            scheduled["timer"] = None
-            scheduled["finished_at"] = time.monotonic()
-            return True
-
-    def _abort_scheduled_directional_jump(self):
-        """Force-cancel every timer during a safety RELEASE_ALL."""
-        with self._ensure_scheduled_jump_lock():
-            scheduled = getattr(self, "_scheduled_jump", None)
-            if not isinstance(scheduled, dict):
-                return False
-            self._scheduled_jump_generation += 1
-            timer = scheduled.get("timer")
-            if timer is not None:
-                timer.cancel()
-            scheduled["state"] = "cancelled"
-            scheduled["timer"] = None
-            scheduled["finished_at"] = time.monotonic()
-            return True
-
-    def _scheduled_jump_horizontal_hold_seconds(self):
-        try:
-            milliseconds = float(getattr(
-                self, "timed_jump_horizontal_hold_ms", 500
-            ))
-        except (TypeError, ValueError, OverflowError):
-            milliseconds = 500.0
-        if not math.isfinite(milliseconds):
-            milliseconds = 500.0
-        return max(0.0, milliseconds) / 1000.0
-
-    def _scheduled_directional_jump_brakes_movement(self, now=None):
-        """Keep stale worker snapshots from reasserting a landing direction."""
-        now = time.monotonic() if now is None else float(now)
-        with self._ensure_scheduled_jump_lock():
-            scheduled = getattr(self, "_scheduled_jump", None)
-            if not isinstance(scheduled, dict):
-                return False
-            state = scheduled.get("state")
-            if state == "braking":
-                return True
-            if state != "fired":
-                return False
-            finished_at = scheduled.get("finished_at")
-        try:
-            finished_at = float(finished_at)
-            confirmation_ms = float(self.cfg.get("route", {}).get(
-                "timed_jump_confirmation_timeout_ms", 450
-            ))
-        except (TypeError, ValueError, OverflowError, AttributeError):
-            return False
-        return (
-            math.isfinite(finished_at)
-            and math.isfinite(confirmation_ms)
-            and now - finished_at <= max(50.0, confirmation_ms) / 1000.0
-        )
-
-    def _finish_scheduled_directional_jump(self, generation, token):
-        """Release horizontal input at the measured short-platform landing."""
-        with self._ensure_scheduled_jump_lock():
-            scheduled = getattr(self, "_scheduled_jump", None)
-            if not isinstance(scheduled, dict) or \
-                    generation != self._scheduled_jump_generation or \
-                    scheduled.get("token") != token or \
-                    scheduled.get("state") != "airborne":
-                return
-            scheduled["state"] = "braking"
-            scheduled["timer"] = None
-
-        # Publish the stopped logical command before touching HID. A worker
-        # that wakes during this callback will therefore request the same
-        # empty state instead of restoring the pre-jump direction.
-        with self._ensure_command_lock():
-            self.cmd_left_right = "none"
-            self.cmd_up_down = "none"
-            self.cmd_action = "none"
-            self._last_source_action = "none"
-
-        success = set_key_state([])
-        finished_at = time.monotonic()
-        if success:
-            with self._ensure_command_lock():
-                self.cmd_left_right_last = "none"
-                self.cmd_up_down_last = "none"
-                self.direction_held_since = None
-                self.direction_held_generation = None
-        else:
-            self._invalidate_facing_cache()
-
-        with self._ensure_scheduled_jump_lock():
-            scheduled = getattr(self, "_scheduled_jump", None)
-            if not isinstance(scheduled, dict) or \
-                    generation != self._scheduled_jump_generation or \
-                    scheduled.get("token") != token or \
-                    scheduled.get("state") != "braking":
-                return
-            scheduled["state"] = "fired" if success else "failed"
-            scheduled["finished_at"] = finished_at
-            if success:
-                scheduled["braked_at"] = finished_at
-
-    def _execute_scheduled_directional_jump(self, generation, token):
-        """Timer callback; validate ownership immediately before HID output."""
-        with self._ensure_scheduled_jump_lock():
-            scheduled = getattr(self, "_scheduled_jump", None)
-            if not isinstance(scheduled, dict) or \
-                    generation != self._scheduled_jump_generation or \
-                    scheduled.get("token") != token or \
-                    scheduled.get("state") != "pending":
-                return
-            scheduled["state"] = "firing"
-            direction = scheduled["direction"]
-
-        cmd_left_right, cmd_up_down, cmd_action = self._command_snapshot()
-        command_still_owned = (
-            cmd_left_right == direction
-            and cmd_up_down in {"none", "stop"}
-            and cmd_action in {"none", "stop"}
-            and not getattr(self, "is_need_force_heal", False)
-        )
-        jumped_at = time.monotonic()
-        success = bool(
-            command_still_owned
-            and self.perform_directional_jump(direction)
-        )
-        if not success:
-            with self._ensure_scheduled_jump_lock():
-                scheduled = getattr(self, "_scheduled_jump", None)
-                if isinstance(scheduled, dict) and \
-                        generation == self._scheduled_jump_generation and \
-                        scheduled.get("token") == token and \
-                        scheduled.get("state") == "firing":
-                    scheduled["state"] = "failed"
-                    scheduled["timer"] = None
-                    scheduled["finished_at"] = time.monotonic()
-            return
-
-        release_due_at = (
-            jumped_at + self._scheduled_jump_horizontal_hold_seconds()
-        )
-        release_delay = max(0.0, release_due_at - time.monotonic())
-        timer = threading.Timer(
-            release_delay,
-            self._finish_scheduled_directional_jump,
-            args=(generation, token),
-        )
-        timer.daemon = True
-        with self._ensure_scheduled_jump_lock():
-            scheduled = getattr(self, "_scheduled_jump", None)
-            if not isinstance(scheduled, dict) or \
-                    generation != self._scheduled_jump_generation or \
-                    scheduled.get("token") != token or \
-                    scheduled.get("state") != "firing":
-                timer.cancel()
-                return
-            scheduled["state"] = "airborne"
-            scheduled["jumped_at"] = jumped_at
-            scheduled["release_due_at"] = release_due_at
-            scheduled["timer"] = timer
-        timer.start()
-
-    def schedule_directional_jump(self, direction, delay_seconds, token):
-        """Schedule exactly one directional Jump independently of vision FPS."""
-        if direction not in {"left", "right"} or token is None:
-            return False
-        try:
-            delay_seconds = float(delay_seconds)
-        except (TypeError, ValueError, OverflowError):
-            return False
-        if not math.isfinite(delay_seconds) or not 0.0 <= delay_seconds <= 5.0:
-            return False
-
-        lock = self._ensure_scheduled_jump_lock()
-        with lock:
-            existing = getattr(self, "_scheduled_jump", None)
-            if isinstance(existing, dict) and \
-                    existing.get("token") == token and \
-                    existing.get("state") in {
-                        "pending", "firing", "airborne", "braking", "fired"
-                    }:
-                return True
-            if isinstance(existing, dict) and existing.get("state") in {
-                    "firing", "airborne", "braking"}:
-                return False
-            if isinstance(existing, dict):
-                timer = existing.get("timer")
-                if timer is not None:
-                    timer.cancel()
-
-            self._scheduled_jump_generation += 1
-            generation = self._scheduled_jump_generation
-            due_at = time.monotonic() + delay_seconds
-            timer = threading.Timer(
-                delay_seconds,
-                self._execute_scheduled_directional_jump,
-                args=(generation, token),
-            )
-            timer.daemon = True
-            self._scheduled_jump = {
-                "token": token,
-                "direction": direction,
-                "state": "pending",
-                "scheduled_at": time.monotonic(),
-                "due_at": due_at,
-                "timer": timer,
-            }
-            # Install the already-arbitrated movement snapshot before a
-            # zero-delay timer can inspect it or send the Jump TAP.
-            self.set_command(f"{direction} none none")
-            timer.start()
-            return True
-
-    def _ensure_scheduled_rope_mount_lock(self):
-        """Lazily initialize the rope timer for lightweight tests."""
-        lock = getattr(self, "_scheduled_rope_mount_lock", None)
-        if lock is None:
-            lock = threading.RLock()
-            self._scheduled_rope_mount_lock = lock
-        if not hasattr(self, "_scheduled_rope_mount_generation"):
-            self._scheduled_rope_mount_generation = 0
-        if not hasattr(self, "_scheduled_rope_mount"):
-            self._scheduled_rope_mount = None
-        return lock
-
-    def scheduled_rope_mount_status(self, token=None):
-        """Return a copy of the current timed rope-mount state."""
-        with self._ensure_scheduled_rope_mount_lock():
-            scheduled = getattr(self, "_scheduled_rope_mount", None)
-            if not isinstance(scheduled, dict) or (
-                    token is not None and scheduled.get("token") != token):
-                return None
-            return dict(scheduled)
-
-    def cancel_scheduled_rope_mount(self, token=None):
-        """Cancel one not-yet-fired rope mount, optionally by token."""
-        with self._ensure_scheduled_rope_mount_lock():
-            scheduled = getattr(self, "_scheduled_rope_mount", None)
-            if not isinstance(scheduled, dict) or (
-                    token is not None and scheduled.get("token") != token):
-                return False
-            # Once the callback owns the transaction, cancelling it cannot
-            # undo an Up/Jump report that may already have reached the game.
-            # Callers must treat firing/fired as non-interruptible.
-            if scheduled.get("state") != "pending":
-                return False
-            self._scheduled_rope_mount_generation += 1
-            timer = scheduled.get("timer")
-            if timer is not None:
-                timer.cancel()
-            scheduled["state"] = "cancelled"
-            scheduled["timer"] = None
-            scheduled["finished_at"] = time.monotonic()
-            return True
-
-    def _execute_scheduled_rope_mount(self, generation, token):
-        """Timer callback that changes a horizontal run into Up + Jump."""
-        with self._ensure_scheduled_rope_mount_lock():
-            scheduled = getattr(self, "_scheduled_rope_mount", None)
-            if not isinstance(scheduled, dict) or \
-                    generation != self._scheduled_rope_mount_generation or \
-                    scheduled.get("token") != token or \
-                    scheduled.get("state") != "pending":
-                return
-            scheduled["state"] = "firing"
-            direction = scheduled["direction"]
-            cmd_left_right, cmd_up_down, cmd_action = self._command_snapshot()
-            command_still_owned = (
-                cmd_left_right == direction
-                and cmd_up_down in {"none", "stop"}
-                and cmd_action in {"none", "stop", "rope_hold"}
-                and not getattr(self, "is_need_force_heal", False)
-            )
-            success = bool(
-                command_still_owned and self.perform_rope_mount(direction)
-            )
-            finished_at = time.monotonic()
-            scheduled["state"] = "fired" if success else "failed"
-            scheduled["timer"] = None
-            scheduled["finished_at"] = finished_at
-            if success:
-                scheduled["fired_at"] = finished_at
-                # The normal worker must preserve the Up state installed by
-                # perform_rope_mount until the next vision frame confirms the
-                # ascent.  Leaving the scheduled approach command here would
-                # immediately replace Up with another horizontal STATE.
-                with self._ensure_command_lock():
-                    self.cmd_left_right = "none"
-                    self.cmd_up_down = "up"
-                    self.cmd_action = "rope_hold"
-                    self._last_source_action = "rope_hold"
-
-    def schedule_rope_mount(self, direction, delay_seconds, token):
-        """Schedule one rope mount independently of the vision cadence."""
-        if direction not in {"left", "right"} or token is None:
-            return False
-        try:
-            delay_seconds = float(delay_seconds)
-        except (TypeError, ValueError, OverflowError):
-            return False
-        if not math.isfinite(delay_seconds) or not 0.0 <= delay_seconds <= 5.0:
-            return False
-
-        lock = self._ensure_scheduled_rope_mount_lock()
-        with lock:
-            existing = getattr(self, "_scheduled_rope_mount", None)
-            if isinstance(existing, dict) and \
-                    existing.get("token") == token and \
-                    existing.get("state") in {"pending", "firing"}:
-                return True
-            if isinstance(existing, dict):
-                timer = existing.get("timer")
-                if timer is not None:
-                    timer.cancel()
-
-            self._scheduled_rope_mount_generation += 1
-            generation = self._scheduled_rope_mount_generation
-            due_at = time.monotonic() + delay_seconds
-            timer = threading.Timer(
-                delay_seconds,
-                self._execute_scheduled_rope_mount,
-                args=(generation, token),
-            )
-            timer.daemon = True
-            self._scheduled_rope_mount = {
-                "token": token,
-                "direction": direction,
-                "state": "pending",
-                "scheduled_at": time.monotonic(),
-                "due_at": due_at,
-                "timer": timer,
-            }
-            self.set_command(f"{direction} none none")
-            timer.start()
-            return True
 
     def perform_directional_jump(self, direction):
         """Hold the requested direction and jump immediately."""
@@ -1844,7 +1443,7 @@ class KeyBoardController():
                 self._invalidate_facing_cache()
                 return False
             now = time.monotonic()
-            held_since = self._record_horizontal_motion(
+            self._record_horizontal_motion(
                 direction,
                 now=now,
                 generation=_input_state_generation(),
@@ -1852,17 +1451,8 @@ class KeyBoardController():
             with self._ensure_command_lock():
                 self.cmd_up_down_last = "none"
 
-            required_runup = max(
-                0.0, float(self.rope_climb_runup_ms) / 1000.0
-            )
-            remaining_runup = max(
-                0.0, required_runup - (now - held_since)
-            )
-            if remaining_runup > 0.0:
-                time.sleep(remaining_runup)
-
-            # The run-up wait is deliberately inside the HID transaction, but
-            # pause/capture loss can still clear the permission gate.
+            # The 60 Hz vision frame has already confirmed the speed-adjusted
+            # spatial point. Never add a host-side run-up wait here.
             if not _regular_input_allowed():
                 self._invalidate_facing_cache()
                 return False
@@ -1933,12 +1523,8 @@ class KeyBoardController():
             with self._ensure_command_lock():
                 self.cmd_up_down_last = "up"
 
-            up_lead = max(
-                0.0,
-                float(self.rope_climb_stationary_up_lead_ms) / 1000.0,
-            )
-            if up_lead > 0:
-                time.sleep(up_lead)
+            # STATE acknowledgement provides ordering; no fixed Up lead is
+            # added after the exact minimap alignment was observed.
             if not _regular_input_allowed():
                 self._invalidate_facing_cache()
                 return False

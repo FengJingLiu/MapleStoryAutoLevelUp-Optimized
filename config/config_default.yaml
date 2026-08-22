@@ -505,15 +505,8 @@ route:
   jump_down_cooldown: 3.0     # ⏱️ Cooldown (in seconds) for 'jump down' action to prevent continuous descent
   jump_up_settle_delay: 0.6   # 🛑 Seconds to stop horizontal movement before a stationary jump
   jump_alignment_nudge_ms: 30 # ↔️ Duration of each left/right centering pulse
-  # Horizontal WZ jumps are armed one observed cadence early. The timer uses
-  # measured Hero speed to project the captured minimap point forward, then
-  # subtracts HID latency and registration residual from the launch deadline.
-  timed_jump_enable: true
-  timed_jump_input_lead_ms: 35
-  timed_jump_max_lookahead_ms: 1200
-  timed_jump_frame_age_limit_ms: 500
-  timed_jump_horizontal_hold_ms: 500 # Release horizontal input before a short landing platform can be overrun
-  timed_jump_confirmation_timeout_ms: 450
+  # WZ jumps fire on the 60 Hz Hero minimap sample. Current measured speed
+  # moves the spatial trigger inside the physically reachable launch band.
   # Draw an azure segment manually from the current platform toward the rope.
   # Seeing any part of that segment lets the bot predict its far endpoint as
   # the rope x, generate its own runway, and mount with a directional jump.
@@ -526,10 +519,7 @@ route:
   rope_climb_align_brake_delay: 0.10 # Release continuous movement before fine alignment
   rope_climb_align_crossing_tolerance: 3 # Accept a small overshoot instead of reversing into oscillation
   rope_climb_settle_delay: 0.15    # Reposition-only pause; skipped when already running toward the rope
-  rope_climb_runup_ms: 180         # Minimum directional momentum before Up + Jump (existing run time counts)
-  rope_climb_stationary_up_lead_ms: 35 # Exact-x mount: hold Up briefly before the Jump TAP
-  rope_climb_launch_lead_ms: 100   # Start farther out by one 10 FPS vision/HID interval before the theoretical apex point
-  rope_climb_running_prediction_margin: 4 # Hand-painted-route prediction margin; WZ trajectories use observed frame motion only
+  rope_climb_runup_ms: 180         # Physics-only runway length used when drawing the spatial approach
   rope_climb_align_nudge_ms: 30    # Duration of each takeoff-position correction pulse
   rope_climb_position_timeout: 0.9 # Switch runway side if backing up makes no x progress
   rope_climb_retry_interval: 0.9   # Retry when an attempt produces no continued upward progress
@@ -821,10 +811,12 @@ email:
 system:
   # ⚙️ System Settings
   # Controls performance and behavior of core system threads.
-  fps_limit_main: 10                # 🚥 Main loop FPS – controls how fast the main thread runs
+  fps_limit_main: 64                # Headroom to consume every 60 Hz capture frame
+  fps_limit_mob: 10                 # Latest-frame YOLO/OCR target rate
+  vision_max_age_seconds: 0.30      # Reject stale combat evidence
   fps_limit_ui_viz: 5               # UI preview only; detection remains at native resolution
   ui_viz_max_size: [720, 1280]      # [height, width] sent to Qt to avoid flooding its event queue
-  fps_limit_keyboard_controller: 30 # 🚥 Keyboard controller thread FPS
+  fps_limit_keyboard_controller: 60 # Match the minimap navigation cadence
   fps_limit_window_capturor: 15     # 🚥 Window capture thread FPS
   fps_limit_route_recorder: 10      # 🚥 Route recorder FPS
   fps_limit_auto_dice_roller: 1     # 🚥 Auto rice roller FPS

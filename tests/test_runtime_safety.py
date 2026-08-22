@@ -544,7 +544,6 @@ class AutoBotLifecycleTests(unittest.TestCase):
                 "rope_climb_align_crossing_tolerance": 3,
                 "rope_climb_settle_delay": 0.15,
                 "rope_climb_runup_ms": 180,
-                "rope_climb_running_prediction_margin": 4,
                 "rope_climb_position_timeout": 0.9,
                 "rope_climb_retry_interval": 0.9,
                 "rope_climb_min_progress": 2,
@@ -706,6 +705,7 @@ class AutoBotLifecycleTests(unittest.TestCase):
         bot.color_code[(0, 255, 128)] = "right none jump"
         bot.img_route[10, 10] = (0, 255, 128)
         bot._wz_navigation_enabled = True
+        bot._wz_current_speed_px_per_sec = 21.3575
         bot._wz_combat_checkpoint_route_index = None
         bot._wz_combat_checkpoint_clear_since = None
         bot._wz_combat_checkpoint_cleared_route_index = None
@@ -722,7 +722,7 @@ class AutoBotLifecycleTests(unittest.TestCase):
         bot.wz_navigation.combat_checkpoint_reached.assert_called_once_with(
             0,
             (10, 10),
-            braking_distance=5,
+            braking_distance=0,
         )
         bot.check_reach_goal()
 
@@ -740,313 +740,63 @@ class AutoBotLifecycleTests(unittest.TestCase):
         )
         self.assertTrue(bot._wz_route_jump_atomic_pending)
 
-    def test_p3_left_compound_jump_brakes_before_launch_band(self):
-        bot = self._route_color_bot()
-        bot.cfg["system"] = {"fps_limit_main": 10}
-        bot.cfg["wz_navigation"] = {
-            "motion": {"walk_speed_px_per_sec": 21.3575},
-        }
-        bot._wz_navigation_enabled = True
-        route_leg = SimpleNamespace(
-            action="JUMP",
-            source=(146, 10),
-            target=(84, 10),
-            combat_checkpoint=None,
-            jump_source=(93, 10),
-            jump_trigger_bounds=(93, 8, 95, 12),
-        )
-        bot.wz_navigation = SimpleNamespace(
-            jump_active=False,
-            walk_target_crossed=Mock(return_value=False),
-            route_legs=(route_leg,),
-            registration=SimpleNamespace(residual_p95_px=1.208),
-        )
-        bot.img_route = np.zeros((21, 160, 3), dtype=np.uint8)
-        bot.img_routes = [bot.img_route]
-        bot.img_route[10, 93:147] = (255, 0, 0)
-
-        self.assertEqual(bot._wz_edge_jump_braking_distance(), 5)
-
-        bot.loc_player_global = (101, 10)
-        bot.update_cmd_by_route()
-        self.assertEqual(
-            (bot.cmd_move_x, bot.cmd_move_y, bot.cmd_action),
-            ("left", "none", "none"),
-        )
-
-        bot.loc_player_global = (100, 10)
-        bot.update_cmd_by_route()
-        self.assertEqual(
-            (bot.cmd_move_x, bot.cmd_move_y, bot.cmd_action),
-            ("none", "none", "jump_align_left"),
-        )
-
-        bot.loc_player_global = (92, 10)
-        bot.update_cmd_by_route()
-        self.assertEqual(
-            (bot.cmd_move_x, bot.cmd_move_y, bot.cmd_action),
-            ("none", "none", "jump_align_right"),
-        )
-
-        bot.loc_player_global = (95, 10)
-        bot.update_cmd_by_route()
-        self.assertEqual(
-            (bot.cmd_move_x, bot.cmd_move_y, bot.cmd_action),
-            ("left", "none", "jump"),
-        )
-        self.assertTrue(bot._wz_route_jump_atomic_pending)
-        self.assertEqual(bot._wz_route_jump_atomic_route_index, 0)
-
-        # After dispatch, the same helper must yield to the landing goal.
-        bot._wz_route_jump_atomic_pending = False
-        bot.loc_player_global = (84, 10)
-        bot.img_route[10, 84] = (255, 255, 0)
-        bot.update_cmd_by_route()
-        self.assertEqual(bot.cmd_action, "goal")
-
-    def test_low_fps_wz_jump_arms_speed_based_timer_before_next_frame(self):
-        bot = self._route_color_bot()
-        bot.cfg["system"] = {"fps_limit_main": 2}
-        bot.cfg["wz_navigation"] = {
-            "motion": {"walk_speed_px_per_sec": 21.3575},
-        }
-        bot.cfg["route"].update({
-            "timed_jump_enable": True,
-            "timed_jump_input_lead_ms": 35,
-            "timed_jump_max_lookahead_ms": 1200,
-            "timed_jump_frame_age_limit_ms": 500,
-            "timed_jump_confirmation_timeout_ms": 450,
-        })
-        bot._wz_navigation_enabled = True
-        bot._current_capture_frame_token = ("capture", 9.8)
-        bot._wz_navigation_sample_interval_seconds = 0.5
-        bot.loc_player_global = (138, 291)
-        schedule = Mock(return_value=True)
-        bot.kb = SimpleNamespace(
-            same_direction_move_seconds=Mock(return_value=1.0),
-            schedule_directional_jump=schedule,
-            scheduled_directional_jump_status=Mock(return_value=None),
-            cancel_scheduled_directional_jump=Mock(return_value=True),
-        )
-        route_leg = SimpleNamespace(
-            action="JUMP",
-            source=(96, 291),
-            target=(158, 291),
-            edge_ids=("jump:p3:p4",),
-            combat_checkpoint=None,
-            jump_source=(149, 291),
-            jump_trigger_bounds=(147, 289, 149, 293),
-        )
-        bot.wz_navigation = SimpleNamespace(
-            resource_generation=7,
-            jump_active=False,
-            walk_target_crossed=Mock(return_value=False),
-            route_legs=(route_leg,),
-            registration=SimpleNamespace(residual_p95_px=1.208),
-        )
-
-        with patch(
-            "src.engine.MapleStoryAutoLevelUp.time.monotonic",
-            return_value=10.0,
-        ):
-            bot.update_cmd_by_route()
-            self.assertEqual(
-                (bot.cmd_move_x, bot.cmd_move_y, bot.cmd_action),
-                ("right", "none", "none"),
-            )
-            self.assertTrue(bot.finalize_wz_timed_directional_jump())
-
-        schedule.assert_called_once()
-        direction, delay, token = schedule.call_args.args
-        self.assertEqual(direction, "right")
-        self.assertEqual(token[:2], (7, 0))
-        self.assertEqual(token[-2:], (148, 158))
-        # At 2 FPS the next sample is 500 ms away; the independent timer fires
-        # near the middle of the rendered 147..149 safe launch band instead of
-        # waiting for its outer foothold-edge pixel.
-        self.assertGreater(delay, 0.17)
-        self.assertLess(delay, 0.19)
-        self.assertLess(delay, 0.5)
-        self.assertEqual(bot._wz_timed_jump_route_index, 0)
-
-    def test_airborne_timed_jump_keeps_input_ownership_until_brake(self):
-        bot = self._route_color_bot()
-        token = (7, 0, ("jump:p3:p4",), "right", 149, 158)
-        status = {"state": "airborne", "jumped_at": 10.0}
-        cancel = Mock(return_value=False)
-        bot.kb = SimpleNamespace(
-            scheduled_directional_jump_status=Mock(return_value=status),
-            cancel_scheduled_directional_jump=cancel,
-        )
-        bot._wz_timed_jump_token = token
-        bot._wz_timed_jump_route_index = 0
-        bot._wz_timed_jump_direction = "right"
-
-        self.assertTrue(bot._wz_timed_jump_owns_input(now=10.4))
-        self.assertFalse(bot._cancel_wz_timed_directional_jump())
-
-        cancel.assert_called_once_with(token)
-        self.assertEqual(bot._wz_timed_jump_token, token)
-        self.assertEqual(bot._wz_timed_jump_route_index, 0)
-
-    def test_timed_jump_candidate_is_not_armed_after_combat_overrides_route(self):
-        bot = self._route_color_bot()
-        bot.cfg["system"] = {"fps_limit_main": 2}
-        bot.cfg["wz_navigation"] = {
-            "motion": {"walk_speed_px_per_sec": 21.3575},
-        }
-        bot.cfg["route"]["timed_jump_enable"] = True
-        bot._wz_navigation_enabled = True
-        bot.loc_player_global = (138, 291)
-        schedule = Mock(return_value=True)
-        bot.kb = SimpleNamespace(
-            same_direction_move_seconds=Mock(return_value=0.0),
-            schedule_directional_jump=schedule,
-            scheduled_directional_jump_status=Mock(return_value=None),
-            cancel_scheduled_directional_jump=Mock(return_value=True),
-        )
-        bot.wz_navigation = SimpleNamespace(
-            resource_generation=8,
-            jump_active=False,
-            route_legs=(SimpleNamespace(
-                action="JUMP",
-                source=(96, 291),
-                target=(158, 291),
-                edge_ids=("jump:p3:p4",),
-                combat_checkpoint=None,
-                jump_source=(149, 291),
-                jump_trigger_bounds=(147, 289, 149, 293),
-            ),),
-            registration=SimpleNamespace(residual_p95_px=1.208),
-        )
-
-        bot.update_cmd_by_route()
-        self.assertIsNotNone(bot._wz_timed_jump_candidate)
-        bot.cmd_move_x = "right"
-        bot.cmd_move_y = "none"
-        bot.cmd_action = "attack"
-
-        self.assertFalse(bot.finalize_wz_timed_directional_jump())
-        schedule.assert_not_called()
 
     def test_wz_navigation_sample_tracks_real_cadence_and_horizontal_step(self):
         bot = self._route_color_bot()
 
-        bot._record_wz_navigation_sample((100, 291), 10.0)
+        bot._record_wz_navigation_sample(
+            (100, 291), 10.0, ("right", "none", "none")
+        )
         self.assertIsNone(bot._wz_navigation_sample_interval_seconds)
         self.assertEqual(bot._wz_navigation_sample_step_x, 0.0)
 
-        bot._record_wz_navigation_sample((122, 291), 11.0)
+        bot._record_wz_navigation_sample(
+            (122, 291), 11.0, ("right", "none", "none")
+        )
         self.assertEqual(bot._wz_navigation_sample_interval_seconds, 1.0)
         self.assertEqual(bot._wz_navigation_sample_step_x, 22.0)
 
         # A platform transition is not horizontal run speed and must not make
         # later edge braking more conservative than the real same-level step.
-        bot._record_wz_navigation_sample((130, 280), 12.0)
+        bot._record_wz_navigation_sample(
+            (130, 280), 12.0, ("right", "none", "none")
+        )
         self.assertEqual(bot._wz_navigation_sample_interval_seconds, 1.0)
         self.assertEqual(bot._wz_navigation_sample_step_x, 0.0)
 
-    def test_p3_edge_jump_guard_sweeps_both_boundaries_pixel_by_pixel(self):
+    def test_spatial_jump_moves_trigger_earlier_at_cruise_speed(self):
         bot = self._route_color_bot()
-        bot.cfg["system"] = {"fps_limit_main": 10}
-        bot.cfg["wz_navigation"] = {
-            "motion": {"walk_speed_px_per_sec": 21.3575},
-        }
         bot._wz_navigation_enabled = True
-        bot._wz_navigation_sample_interval_seconds = 1.0
-        bot._wz_navigation_sample_step_x = 22.0
+        bot.cfg["wz_navigation"] = {
+            "motion": {"walk_speed_px_per_sec": 20.0},
+        }
         bot.wz_navigation = SimpleNamespace(
-            registration=SimpleNamespace(residual_p95_px=1.208),
-            route_legs=(),
+            active=True,
+            jump_active=False,
+            route_legs=(SimpleNamespace(
+                action="JUMP",
+                jump_source=(106, 20),
+                target=(120, 20),
+                jump_trigger_bounds=(100, 18, 106, 22),
+            ),),
         )
-        braking_distance = bot._wz_edge_jump_braking_distance()
-        self.assertEqual(braking_distance, 25)
+        bot.loc_player_global = (102, 20)
 
-        right_leg = SimpleNamespace(
-            action="JUMP",
-            source=(96, 291),
-            target=(158, 291),
-            jump_source=(149, 291),
-            jump_trigger_bounds=(147, 289, 149, 293),
-        )
-        left_leg = SimpleNamespace(
-            action="JUMP",
-            source=(146, 291),
-            target=(84, 291),
-            jump_source=(93, 291),
-            jump_trigger_bounds=(93, 289, 95, 293),
+        bot._wz_current_speed_px_per_sec = 0.0
+        self.assertTrue(bot._apply_wz_spatial_directional_jump())
+        self.assertEqual(
+            (bot.cmd_move_x, bot.cmd_move_y, bot.cmd_action),
+            ("right", "none", "none"),
         )
 
-        for direction, leg in (("right", right_leg), ("left", left_leg)):
-            bot.wz_navigation.route_legs = (leg,)
-            for player_x in range(93, 150):
-                with self.subTest(direction=direction, player_x=player_x):
-                    bot.loc_player_global = (player_x, 291)
-                    bot.cmd_move_x = "none"
-                    bot.cmd_move_y = "none"
-                    bot.cmd_action = "none"
-                    bot._wz_route_jump_atomic_pending = False
-                    bot._wz_route_jump_atomic_route_index = None
-                    bot._wz_edge_jump_alignment_route_index = None
+        bot._wz_current_speed_px_per_sec = 20.0
+        self.assertTrue(bot._apply_wz_spatial_directional_jump())
+        self.assertEqual(
+            (bot.cmd_move_x, bot.cmd_move_y, bot.cmd_action),
+            ("right", "none", "jump"),
+        )
+        self.assertTrue(bot._wz_route_jump_atomic_pending)
 
-                    handled = bot._align_compound_wz_edge_jump(
-                        braking_distance
-                    )
-                    if direction == "right":
-                        if 147 <= player_x <= 149:
-                            self.assertTrue(handled)
-                            self.assertEqual(
-                                (bot.cmd_move_x, bot.cmd_action),
-                                ("right", "jump"),
-                            )
-                        elif 0 < 147 - player_x <= braking_distance:
-                            self.assertTrue(handled)
-                            self.assertEqual(
-                                (bot.cmd_move_x, bot.cmd_action),
-                                ("none", "jump_align_right"),
-                            )
-                        else:
-                            self.assertFalse(handled)
-                            # One observed 22 px navigation step still cannot
-                            # skip the right launch band from this coordinate.
-                            self.assertLess(player_x + 22, 147)
-                    else:
-                        if 93 <= player_x <= 95:
-                            self.assertTrue(handled)
-                            self.assertEqual(
-                                (bot.cmd_move_x, bot.cmd_action),
-                                ("left", "jump"),
-                            )
-                        elif 0 < player_x - 95 <= braking_distance:
-                            self.assertTrue(handled)
-                            self.assertEqual(
-                                (bot.cmd_move_x, bot.cmd_action),
-                                ("none", "jump_align_left"),
-                            )
-                        else:
-                            self.assertFalse(handled)
-                            # The matching leftward step also stops short of
-                            # the x=93..95 launch band.
-                            self.assertGreater(player_x - 22, 95)
-
-        # If a delayed sample lands one pixel outside either edge, the only
-        # permitted correction points back toward P3 rather than into empty
-        # space.
-        for leg, player_x, expected_action in (
-            (right_leg, 150, "jump_align_left"),
-            (left_leg, 92, "jump_align_right"),
-        ):
-            with self.subTest(overshoot_x=player_x):
-                bot.wz_navigation.route_legs = (leg,)
-                bot.loc_player_global = (player_x, 291)
-                bot._wz_route_jump_atomic_pending = False
-                bot._wz_route_jump_atomic_route_index = None
-                bot._wz_edge_jump_alignment_route_index = None
-                self.assertTrue(bot._align_compound_wz_edge_jump(
-                    braking_distance
-                ))
-                self.assertEqual(bot.cmd_move_x, "none")
-                self.assertEqual(bot.cmd_action, expected_action)
 
     def test_ground_ladder_route_aligns_x_before_pressing_up(self):
         bot = self._route_color_bot()
@@ -1174,6 +924,10 @@ class AutoBotLifecycleTests(unittest.TestCase):
         bot = self._route_color_bot()
         bot.color_code[(255, 127, 0)] = "left none jump"
         bot._wz_navigation_enabled = True
+        bot._wz_current_speed_px_per_sec = 20.0
+        bot.cfg["wz_navigation"] = {
+            "motion": {"walk_speed_px_per_sec": 20.0},
+        }
         route1 = bot.img_route
         route1[10, 10] = (255, 255, 0)
         route2 = np.zeros_like(route1)
@@ -1184,7 +938,12 @@ class AutoBotLifecycleTests(unittest.TestCase):
             walk_target_crossed=Mock(return_value=False),
             route_legs=(
                 SimpleNamespace(action="WALK"),
-                SimpleNamespace(action="JUMP"),
+                SimpleNamespace(
+                    action="JUMP",
+                    jump_source=(10, 10),
+                    target=(0, 10),
+                    jump_trigger_bounds=(8, 8, 10, 12),
+                ),
             ),
         )
 
@@ -1193,6 +952,13 @@ class AutoBotLifecycleTests(unittest.TestCase):
         bot.check_reach_goal()
 
         self.assertEqual(bot.idx_routes, 1)
+        self.assertEqual(
+            (bot.cmd_move_x, bot.cmd_move_y, bot.cmd_action),
+            ("none", "none", "none"),
+        )
+        # The newly selected route is evaluated from the next fresh minimap
+        # frame instead of dispatching a stale previous-frame jump.
+        bot.update_cmd_by_route()
         self.assertEqual(
             (bot.cmd_move_x, bot.cmd_move_y, bot.cmd_action),
             ("left", "none", "jump"),
@@ -1740,6 +1506,10 @@ class AutoBotLifecycleTests(unittest.TestCase):
     def test_rope_guide_keeps_same_direction_run_until_mount_point(self):
         bot = self._route_color_bot()
         bot.kb.cmd_left_right_last = "right"
+        bot._wz_current_speed_px_per_sec = 20.0
+        bot.cfg["wz_navigation"] = {
+            "motion": {"walk_speed_px_per_sec": 20.0},
+        }
         self._draw_rope_guide(bot, start=(11, 10), end=(18, 10))
 
         with patch(
@@ -1762,46 +1532,19 @@ class AutoBotLifecycleTests(unittest.TestCase):
         ):
             bot.update_cmd_by_route()
 
+        self.assertEqual(bot._rope_climb_state["phase"], "running_approach")
+        self.assertIsInstance(bot._rope_spatial_mount_candidate, dict)
+        with patch(
+            "src.engine.MapleStoryAutoLevelUp.time.monotonic",
+            return_value=100.1,
+        ):
+            self.assertTrue(bot.finalize_rope_spatial_mount())
         self.assertEqual(bot._rope_climb_state["phase"], "mount_request")
         self.assertEqual(bot._rope_climb_state["attempts"], 1)
         self.assertEqual(bot.cmd_move_x, "right")
         self.assertEqual(bot.cmd_move_y, "up")
         self.assertEqual(bot.cmd_action, "rope_mount_right")
 
-    def test_fast_rope_approach_predicts_runway_crossing_one_frame_early(self):
-        bot = self._route_color_bot()
-        bot.img_route = np.zeros((21, 40, 3), dtype=np.uint8)
-        bot.img_routes = [bot.img_route]
-        bot.loc_player_global = (30, 10)
-        bot.kb.cmd_left_right_last = "left"
-        self._draw_rope_guide(bot, start=(12, 10), end=(22, 10))
-
-        with patch(
-            "src.engine.MapleStoryAutoLevelUp.time.monotonic",
-            return_value=100.0,
-        ):
-            bot.update_cmd_by_route()
-
-        self.assertEqual(bot._rope_climb_state["target"], (12, 10))
-        self.assertEqual(bot._rope_climb_state["start_x"], 16)
-        self.assertEqual(
-            bot._rope_climb_state["phase"], "running_approach"
-        )
-
-        # Six minimap pixels of motion in one frame would cross the x=16
-        # runway on the next frame. Trigger now at x=24 instead of waiting
-        # until the already-moving Hero has overshot it.
-        bot.loc_player_global = (24, 10)
-        with patch(
-            "src.engine.MapleStoryAutoLevelUp.time.monotonic",
-            return_value=100.1,
-        ):
-            bot.update_cmd_by_route()
-
-        self.assertEqual(bot._rope_climb_state["phase"], "mount_request")
-        self.assertEqual(bot.cmd_move_x, "left")
-        self.assertEqual(bot.cmd_move_y, "up")
-        self.assertEqual(bot.cmd_action, "rope_mount_left")
 
     def test_rope_runway_settles_then_keeps_mount_request_visible(self):
         bot = self._route_color_bot()
@@ -1872,12 +1615,15 @@ class AutoBotLifecycleTests(unittest.TestCase):
 
     def test_wz_rope_mount_runs_from_physics_staging_to_launch(self):
         bot = self._route_color_bot()
+        bot._wz_current_speed_px_per_sec = 20.0
+        bot.cfg["wz_navigation"] = {
+            "motion": {"walk_speed_px_per_sec": 20.0},
+        }
         mount_plan = SimpleNamespace(
             contact=(18, 10),
             vertical_gap_px=4.0,
             jump_height_px=14.0,
             jump_distance_px=11.0,
-            launch_lead_px=2,
             launch_offset_px=3,
             staging_offset_px=7,
             predicted_contact_height_px=10.0,
@@ -1922,120 +1668,36 @@ class AutoBotLifecycleTests(unittest.TestCase):
         self.assertEqual(bot.cmd_move_x, "right")
         self.assertEqual(bot.cmd_action, "rope_hold")
 
-        bot.loc_player_global = (14, 10)
+        bot.loc_player_global = (15, 10)
         with patch(
             "src.engine.MapleStoryAutoLevelUp.time.monotonic",
             return_value=100.26,
         ):
             bot.update_cmd_by_route()
 
+        self.assertEqual(
+            bot._rope_climb_state["phase"], "running_approach"
+        )
+        self.assertIsInstance(bot._rope_spatial_mount_candidate, dict)
+        with patch(
+            "src.engine.MapleStoryAutoLevelUp.time.monotonic",
+            return_value=100.26,
+        ):
+            self.assertTrue(bot.finalize_rope_spatial_mount())
         self.assertEqual(bot._rope_climb_state["phase"], "mount_request")
         self.assertEqual(bot.cmd_move_x, "right")
         self.assertEqual(bot.cmd_move_y, "up")
         self.assertEqual(bot.cmd_action, "rope_mount_right")
 
-    def test_wz_rope_mount_arms_independent_timer_before_launch(self):
-        bot = self._route_color_bot()
-        bot.cfg["system"] = {"fps_limit_main": 10}
-        bot.cfg["wz_navigation"] = {
-            "motion": {"walk_speed_px_per_sec": 20.0}
-        }
-        bot.kb.schedule_rope_mount = Mock(return_value=True)
-        bot.kb.scheduled_rope_mount_status = Mock(return_value=None)
-        bot.kb.cancel_scheduled_rope_mount = Mock(return_value=True)
-        bot.kb.same_direction_move_seconds = Mock(return_value=0.25)
-        mount_plan = SimpleNamespace(
-            contact=(18, 10),
-            vertical_gap_px=4.0,
-            jump_height_px=14.0,
-            jump_distance_px=11.0,
-            launch_lead_px=2,
-            launch_offset_px=3,
-            staging_offset_px=7,
-            predicted_contact_height_px=10.0,
-            contact_clearance_px=6.0,
-            reachable_at_contact=True,
-            approach_direction=None,
-        )
-        bot.wz_navigation = SimpleNamespace(
-            active=True,
-            jump_active=False,
-            walk_target_crossed=Mock(return_value=False),
-            route_legs=(SimpleNamespace(
-                rope_mount=mount_plan,
-                target=(18, 3),
-            ),),
-        )
-        bot.loc_player_global = (11, 10)
-        self._draw_rope_guide(bot, start=(11, 10), end=(18, 10))
-        bot.img_route[10, 18] = (0, 191, 255)
 
-        with patch(
-            "src.engine.MapleStoryAutoLevelUp.time.monotonic",
-            return_value=100.0,
-        ):
-            bot.update_cmd_by_route()
-        with patch(
-            "src.engine.MapleStoryAutoLevelUp.time.monotonic",
-            return_value=100.16,
-        ):
-            bot.update_cmd_by_route()
-
-        bot.loc_player_global = (14, 10)
-        with patch(
-            "src.engine.MapleStoryAutoLevelUp.time.monotonic",
-            return_value=100.26,
-        ):
-            bot.update_cmd_by_route()
-
-        self.assertEqual(bot._rope_climb_state["phase"], "running_approach")
-        self.assertIsInstance(bot._rope_timed_mount_candidate, dict)
-        self.assertEqual(
-            (bot.cmd_move_x, bot.cmd_move_y, bot.cmd_action),
-            ("right", "none", "none"),
-        )
-
-        with patch(
-            "src.engine.MapleStoryAutoLevelUp.time.monotonic",
-            return_value=100.26,
-        ):
-            self.assertTrue(bot.finalize_rope_timed_mount())
-
-        self.assertEqual(bot._rope_climb_state["phase"], "timed_mount")
-        direction, delay, token = bot.kb.schedule_rope_mount.call_args.args
-        self.assertEqual(direction, "right")
-        self.assertGreaterEqual(delay, 0.0)
-        self.assertLess(delay, 0.1)
-        self.assertEqual(bot._rope_climb_state["timed_mount_token"], token)
-
-    def test_fired_rope_timer_cannot_be_deferred_by_late_combat(self):
-        bot = self._route_color_bot()
-        bot._rope_climb_active = True
-        bot._rope_climb_combat_deferred = False
-        bot._rope_climb_combat_deferred_at = None
-        bot._rope_climb_state = {
-            "phase": "timed_mount",
-            "timed_mount_token": ("rope", 1),
-        }
-        bot.kb.scheduled_rope_mount_status = Mock(return_value={
-            "state": "fired",
-            "finished_at": 100.0,
-        })
-
-        with patch(
-            "src.engine.MapleStoryAutoLevelUp.time.monotonic",
-            return_value=100.01,
-        ):
-            bot._set_rope_climb_combat_deferred(True)
-
-        self.assertFalse(bot._rope_climb_combat_deferred)
-        self.assertEqual(bot._rope_climb_state["phase"], "timed_mount")
 
     def test_calibrated_wz_rope_mount_runs_through_launch_window(self):
         bot = self._route_color_bot()
+        bot._wz_current_speed_px_per_sec = 20.0
         bot.img_route = np.zeros((21, 80, 3), dtype=np.uint8)
         bot.img_routes = [bot.img_route]
         bot.cfg["wz_navigation"] = {
+            "motion": {"walk_speed_px_per_sec": 20.0},
             "rope_mount_calibration": {
                 "map_id": "100040110",
                 "approach_direction": "right",
@@ -2048,7 +1710,6 @@ class AutoBotLifecycleTests(unittest.TestCase):
             vertical_gap_px=4.0,
             jump_height_px=14.0,
             jump_distance_px=11.0,
-            launch_lead_px=2,
             launch_offset_px=8,
             staging_offset_px=12,
             predicted_contact_height_px=10.0,
@@ -2087,15 +1748,21 @@ class AutoBotLifecycleTests(unittest.TestCase):
             bot.update_cmd_by_route()
         self.assertEqual(state["phase"], "running_approach")
 
-        # Seven observed pixels predict the Hero moving from 18 px before the
-        # rope to 11 px before it, which lies inside the measured 8..14 window.
-        bot.loc_player_global = (32, 10)
+        # At full measured speed the live trigger is the early (14 px) edge.
+        bot.loc_player_global = (36, 10)
         with patch(
             "src.engine.MapleStoryAutoLevelUp.time.monotonic",
             return_value=100.26,
         ):
             bot.update_cmd_by_route()
 
+        self.assertEqual(state["phase"], "running_approach")
+        self.assertIsInstance(bot._rope_spatial_mount_candidate, dict)
+        with patch(
+            "src.engine.MapleStoryAutoLevelUp.time.monotonic",
+            return_value=100.26,
+        ):
+            self.assertTrue(bot.finalize_rope_spatial_mount())
         self.assertEqual(state["phase"], "mount_request")
         self.assertEqual(bot.cmd_move_x, "right")
         self.assertEqual(bot.cmd_move_y, "up")
@@ -2106,6 +1773,7 @@ class AutoBotLifecycleTests(unittest.TestCase):
         bot.img_route = np.zeros((21, 80, 3), dtype=np.uint8)
         bot.img_routes = [bot.img_route]
         bot.cfg["wz_navigation"] = {
+            "motion": {"walk_speed_px_per_sec": 20.0},
             "rope_mount_calibration": {
                 "map_id": "100040110",
                 "approach_direction": "right",
@@ -2118,7 +1786,6 @@ class AutoBotLifecycleTests(unittest.TestCase):
             vertical_gap_px=4.0,
             jump_height_px=14.0,
             jump_distance_px=11.0,
-            launch_lead_px=2,
             launch_offset_px=8,
             staging_offset_px=12,
             predicted_contact_height_px=10.0,
@@ -2203,9 +1870,11 @@ class AutoBotLifecycleTests(unittest.TestCase):
 
     def test_calibrated_rope_recovers_late_acquisition_from_dynamic_runway(self):
         bot = self._route_color_bot()
+        bot._wz_current_speed_px_per_sec = 20.0
         bot.img_route = np.zeros((21, 80, 3), dtype=np.uint8)
         bot.img_routes = [bot.img_route]
         bot.cfg["wz_navigation"] = {
+            "motion": {"walk_speed_px_per_sec": 20.0},
             "rope_mount_calibration": {
                 "map_id": "100040110",
                 "approach_direction": "right",
@@ -2218,7 +1887,6 @@ class AutoBotLifecycleTests(unittest.TestCase):
             vertical_gap_px=4.0,
             jump_height_px=14.0,
             jump_distance_px=11.0,
-            launch_lead_px=2,
             launch_offset_px=8,
             staging_offset_px=12,
             predicted_contact_height_px=10.0,
@@ -2284,17 +1952,28 @@ class AutoBotLifecycleTests(unittest.TestCase):
         self.assertEqual(state["phase"], "running_approach")
         self.assertEqual(bot.cmd_move_x, "right")
 
-        bot.loc_player_global = (37, 10)
+        bot.loc_player_global = (36, 10)
         with patch(
             "src.engine.MapleStoryAutoLevelUp.time.monotonic",
             return_value=101.36,
         ):
             bot.update_cmd_by_route()
+        self.assertEqual(state["phase"], "running_approach")
+        self.assertIsInstance(bot._rope_spatial_mount_candidate, dict)
+        with patch(
+            "src.engine.MapleStoryAutoLevelUp.time.monotonic",
+            return_value=101.36,
+        ):
+            self.assertTrue(bot.finalize_rope_spatial_mount())
         self.assertEqual(state["phase"], "mount_request")
         self.assertEqual(bot.cmd_action, "rope_mount_right")
 
-    def test_calibrated_wz_rope_mount_does_not_jump_at_delayed_near_edge(self):
+    def test_calibrated_wz_rope_mount_slow_run_uses_late_window_edge(self):
         bot = self._route_color_bot()
+        bot._wz_current_speed_px_per_sec = 0.0
+        bot.cfg["wz_navigation"] = {
+            "motion": {"walk_speed_px_per_sec": 20.0},
+        }
         bot.img_route = np.zeros((21, 80, 3), dtype=np.uint8)
         bot.img_routes = [bot.img_route]
         bot._rope_climb_active = True
@@ -2330,9 +2009,8 @@ class AutoBotLifecycleTests(unittest.TestCase):
             "position_brake_started_at": None,
             "position_last_dx": None,
         }
-        # The current position is exactly 8 px before the rope, but three
-        # observed pixels of in-flight command latency predict a 5 px press,
-        # which the manual calibration proved is too late.
+        # A just-started Hero has no measured momentum, so the live spatial
+        # trigger deliberately waits until the late (8 px) edge.
         bot.loc_player_global = (42, 10)
 
         with patch(
@@ -2341,9 +2019,17 @@ class AutoBotLifecycleTests(unittest.TestCase):
         ):
             self.assertTrue(bot._update_active_rope_climb())
 
-        self.assertEqual(bot._rope_climb_state["phase"], "position")
-        self.assertEqual(bot._rope_climb_state["side"], "left")
-        self.assertEqual(bot.cmd_action, "rope_hold")
+        self.assertEqual(
+            bot._rope_climb_state["phase"], "running_approach"
+        )
+        self.assertIsInstance(bot._rope_spatial_mount_candidate, dict)
+        with patch(
+            "src.engine.MapleStoryAutoLevelUp.time.monotonic",
+            return_value=100.1,
+        ):
+            self.assertTrue(bot.finalize_rope_spatial_mount())
+        self.assertEqual(bot._rope_climb_state["phase"], "mount_request")
+        self.assertEqual(bot.cmd_action, "rope_mount_right")
 
     def test_failed_rope_mount_retries_from_opposite_side(self):
         bot = self._route_color_bot()

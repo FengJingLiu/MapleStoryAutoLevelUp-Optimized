@@ -59,49 +59,16 @@ class HuntingState(State):
             if not recovered:
                 self.bot.update_cmd_by_random()
 
-        # Arm a latency-compensated WZ Jump only after monster arbitration and
-        # stuck recovery have kept the route's horizontal approach command.
-        # Its one-shot timer then runs independently of the next vision frame.
-        finalize_timed_jump = getattr(
-            self.bot, "finalize_wz_timed_directional_jump", None
+        # A rope launch is committed only after the current mob snapshot has
+        # kept the 60 Hz spatial trigger. It publishes Up + Jump immediately;
+        # no host timer or latency projection remains in this path.
+        finalize_spatial_rope = getattr(
+            self.bot, "finalize_rope_spatial_mount", None
         )
-        timed_jump_armed = bool(
-            callable(finalize_timed_jump) and finalize_timed_jump()
-        )
-        timed_jump_owner = getattr(
-            self.bot, "_wz_timed_jump_owns_input", None
-        )
-        timed_jump_owns_input = bool(
-            callable(timed_jump_owner) and timed_jump_owner()
-        )
+        if callable(finalize_spatial_rope):
+            finalize_spatial_rope()
 
-        # A WZ rope approach uses the same two-phase arbitration: route
-        # planning reserves a timer candidate, monsters may still cancel it,
-        # and only this point arms the one-shot independently of vision FPS.
-        finalize_timed_rope = getattr(
-            self.bot, "finalize_rope_timed_mount", None
-        )
-        rope_timer_armed = bool(
-            callable(finalize_timed_rope) and finalize_timed_rope()
-        )
-        timed_rope_owner = getattr(
-            self.bot, "_rope_timed_mount_owns_input", None
-        )
-        rope_timer_owns_input = bool(
-            callable(timed_rope_owner) and timed_rope_owner()
-        )
-
-        # send command to keyboard controller
-        # Both schedulers install their already-arbitrated input before their
-        # timer starts. A zero-delay Jump may already be airborne, or a rope
-        # callback may already have replaced horizontal movement with Up, so
-        # the final frame command must not overwrite either transaction.
-        if not (
-            timed_jump_armed
-            or timed_jump_owns_input
-            or rope_timer_armed
-            or rope_timer_owns_input
-        ):
-            self.bot.kb.set_command(self.bot.cmd_move_x + ' ' + \
-                                    self.bot.cmd_move_y + ' ' + \
-                                    self.bot.cmd_action)
+        # Send the one fully arbitrated frame command to the keyboard worker.
+        self.bot.kb.set_command(self.bot.cmd_move_x + ' ' + \
+                                self.bot.cmd_move_y + ' ' + \
+                                self.bot.cmd_action)

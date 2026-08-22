@@ -868,253 +868,6 @@ class KeyboardControllerEsp32RoutingTests(unittest.TestCase):
         self.assertIsNone(controller.direction_held_since)
 
     @staticmethod
-    def make_scheduled_jump_controller():
-        controller = (
-            KeyboardControllerEsp32RoutingTests
-            .make_directional_jump_controller()
-        )
-        controller.cmd_left_right = "none"
-        controller.cmd_up_down = "none"
-        controller.cmd_action = "none"
-        controller._last_source_action = "none"
-        controller.is_need_force_heal = False
-        controller.timed_jump_horizontal_hold_ms = 500
-        controller.perform_directional_jump = Mock(return_value=True)
-        return controller
-
-    def test_scheduled_jump_timer_fires_once_without_worker_polling(self):
-        controller = self.make_scheduled_jump_controller()
-        controller_module._input_allowed.set()
-        timers = []
-
-        class FakeTimer:
-            def __init__(self, delay, callback, args=()):
-                self.delay = delay
-                self.callback = callback
-                self.args = args
-                self.daemon = False
-                self.cancelled = False
-                self.started = False
-                timers.append(self)
-
-            def start(self):
-                self.started = True
-
-            def cancel(self):
-                self.cancelled = True
-
-            def fire(self):
-                if not self.cancelled:
-                    self.callback(*self.args)
-
-        token = (7, 2, "edge")
-        with patch.object(controller_module.threading, "Timer", FakeTimer):
-            self.assertTrue(controller.schedule_directional_jump(
-                "right", 0.225, token
-            ))
-
-        self.assertEqual(len(timers), 1)
-        self.assertTrue(timers[0].started)
-        self.assertEqual(timers[0].delay, 0.225)
-        self.assertEqual(
-            controller._command_snapshot(), ("right", "none", "none")
-        )
-        self.assertEqual(
-            controller.scheduled_directional_jump_status(token)["state"],
-            "pending",
-        )
-
-        with patch.object(controller_module.threading, "Timer", FakeTimer):
-            timers[0].fire()
-
-        controller.perform_directional_jump.assert_called_once_with("right")
-        self.assertEqual(len(timers), 2)
-        self.assertTrue(timers[1].started)
-        self.assertGreater(timers[1].delay, 0.45)
-        self.assertLessEqual(timers[1].delay, 0.5)
-        self.assertEqual(
-            controller.scheduled_directional_jump_status(token)["state"],
-            "airborne",
-        )
-        self.assertFalse(controller.cancel_scheduled_directional_jump(token))
-        self.assertFalse(timers[1].cancelled)
-
-        timers[1].fire()
-
-        controller_module._input_client.set_state.assert_called_once_with([])
-        self.assertEqual(
-            controller.scheduled_directional_jump_status(token)["state"],
-            "fired",
-        )
-        self.assertEqual(
-            controller._command_snapshot(), ("none", "none", "none")
-        )
-
-    def test_scheduled_jump_is_cancelled_when_route_command_changes(self):
-        controller = self.make_scheduled_jump_controller()
-        timers = []
-
-        class FakeTimer:
-            def __init__(self, _delay, callback, args=()):
-                self.callback = callback
-                self.args = args
-                self.daemon = False
-                self.cancelled = False
-                timers.append(self)
-
-            def start(self):
-                pass
-
-            def cancel(self):
-                self.cancelled = True
-
-            def fire(self):
-                if not self.cancelled:
-                    self.callback(*self.args)
-
-        token = (8, 0, "edge")
-        with patch.object(controller_module.threading, "Timer", FakeTimer):
-            self.assertTrue(controller.schedule_directional_jump(
-                "left", 0.4, token
-            ))
-        controller.set_command("none none none")
-        timers[0].fire()
-
-        controller.perform_directional_jump.assert_not_called()
-        self.assertEqual(
-            controller.scheduled_directional_jump_status(token)["state"],
-            "failed",
-        )
-
-        with patch.object(controller_module.threading, "Timer", FakeTimer):
-            self.assertTrue(controller.schedule_directional_jump(
-                "left", 0.4, (8, 1, "edge")
-            ))
-        self.assertTrue(controller.cancel_scheduled_directional_jump())
-        self.assertTrue(timers[1].cancelled)
-        self.assertEqual(
-            controller.scheduled_directional_jump_status()["state"],
-            "cancelled",
-        )
-
-    def test_scheduled_rope_mount_fires_once_and_preserves_up(self):
-        controller = self.make_rope_controller()
-        controller.cmd_left_right = "none"
-        controller.cmd_up_down = "none"
-        controller.cmd_action = "none"
-        controller._last_source_action = "none"
-        controller.is_need_force_heal = False
-        controller.perform_rope_mount = Mock(return_value=True)
-        timers = []
-
-        class FakeTimer:
-            def __init__(self, delay, callback, args=()):
-                self.delay = delay
-                self.callback = callback
-                self.args = args
-                self.daemon = False
-                self.cancelled = False
-                timers.append(self)
-
-            def start(self):
-                pass
-
-            def cancel(self):
-                self.cancelled = True
-
-            def fire(self):
-                if not self.cancelled:
-                    self.callback(*self.args)
-
-        token = (3, "rope", 1)
-        with patch.object(controller_module.threading, "Timer", FakeTimer):
-            self.assertTrue(controller.schedule_rope_mount(
-                "right", 0.18, token
-            ))
-
-        self.assertEqual(
-            controller._command_snapshot(), ("right", "none", "none")
-        )
-        self.assertEqual(
-            controller.scheduled_rope_mount_status(token)["state"],
-            "pending",
-        )
-
-        timers[0].fire()
-
-        controller.perform_rope_mount.assert_called_once_with("right")
-        self.assertEqual(
-            controller.scheduled_rope_mount_status(token)["state"],
-            "fired",
-        )
-        self.assertEqual(
-            controller._command_snapshot(), ("none", "up", "rope_hold")
-        )
-        self.assertFalse(controller.cancel_scheduled_rope_mount(token))
-        self.assertEqual(
-            controller.scheduled_rope_mount_status(token)["state"],
-            "fired",
-        )
-
-        # The same route/rope token can recur on the next patrol loop. A
-        # completed prior attempt must create a fresh timer, not masquerade as
-        # the new attempt.
-        controller.set_command("right none none")
-        with patch.object(controller_module.threading, "Timer", FakeTimer):
-            self.assertTrue(controller.schedule_rope_mount(
-                "right", 0.18, token
-            ))
-        self.assertEqual(len(timers), 2)
-        self.assertEqual(
-            controller.scheduled_rope_mount_status(token)["state"],
-            "pending",
-        )
-        self.assertEqual(
-            controller._command_snapshot(), ("right", "none", "none")
-        )
-
-    def test_scheduled_rope_mount_rejects_a_replaced_command(self):
-        controller = self.make_rope_controller()
-        controller.cmd_left_right = "none"
-        controller.cmd_up_down = "none"
-        controller.cmd_action = "none"
-        controller._last_source_action = "none"
-        controller.is_need_force_heal = False
-        controller.perform_rope_mount = Mock(return_value=True)
-        timers = []
-
-        class FakeTimer:
-            def __init__(self, _delay, callback, args=()):
-                self.callback = callback
-                self.args = args
-                self.daemon = False
-                timers.append(self)
-
-            def start(self):
-                pass
-
-            def cancel(self):
-                pass
-
-            def fire(self):
-                self.callback(*self.args)
-
-        token = (4, "rope", 1)
-        with patch.object(controller_module.threading, "Timer", FakeTimer):
-            self.assertTrue(controller.schedule_rope_mount(
-                "left", 0.18, token
-            ))
-        controller.set_command("none none none")
-
-        timers[0].fire()
-
-        controller.perform_rope_mount.assert_not_called()
-        self.assertEqual(
-            controller.scheduled_rope_mount_status(token)["state"],
-            "failed",
-        )
-
-    @staticmethod
     def make_stationary_jump_controller():
         controller = controller_module.KeyBoardController.__new__(
             controller_module.KeyBoardController
@@ -1142,6 +895,7 @@ class KeyboardControllerEsp32RoutingTests(unittest.TestCase):
         controller.rope_climb_align_nudge_ms = 30
         controller.cfg = {"key": {"jump": "space"}}
         return controller
+
 
     def test_stationary_jump_stops_and_settles_before_tap(self):
         controller_module._input_allowed.set()
@@ -1359,26 +1113,17 @@ class KeyboardControllerEsp32RoutingTests(unittest.TestCase):
         )
         self.assertIsNone(controller.cached_facing)
 
-    def test_rope_mount_runs_then_adds_up_and_jumps(self):
+    def test_rope_mount_adds_up_and_jumps_without_host_delay(self):
         controller_module._input_allowed.set()
         controller = self.make_rope_controller()
-        calls_seen_during_runup = []
-
-        def record_runup(duration):
-            self.assertEqual(duration, 0.18)
-            calls_seen_during_runup.extend(
-                controller_module._input_client.method_calls
-            )
 
         with patch.object(
             controller_module.time,
             "sleep",
-            side_effect=record_runup,
         ) as sleep:
             self.assertTrue(controller.perform_rope_mount("left"))
 
-        sleep.assert_called_once_with(0.18)
-        self.assertEqual(calls_seen_during_runup, [call.set_state(["left"])])
+        sleep.assert_not_called()
         self.assertEqual(
             controller_module._input_client.method_calls,
             [
@@ -1392,15 +1137,14 @@ class KeyboardControllerEsp32RoutingTests(unittest.TestCase):
         self.assertEqual(controller.cmd_up_down_last, "up")
         self.assertEqual(controller.cached_facing, "left")
 
-    def test_stationary_rope_mount_holds_up_before_jump(self):
+    def test_stationary_rope_mount_orders_up_before_jump_without_delay(self):
         controller_module._input_allowed.set()
         controller = self.make_rope_controller()
-        controller.rope_climb_stationary_up_lead_ms = 35
 
         with patch.object(controller_module.time, "sleep") as sleep:
             self.assertTrue(controller.perform_stationary_rope_mount())
 
-        sleep.assert_called_once_with(0.035)
+        sleep.assert_not_called()
         self.assertEqual(
             controller_module._input_client.method_calls,
             [
@@ -1435,56 +1179,8 @@ class KeyboardControllerEsp32RoutingTests(unittest.TestCase):
         )
         self.assertIsNone(controller.direction_held_since)
 
-    def test_rope_mount_only_builds_missing_same_direction_runup(self):
-        controller_module._input_allowed.set()
-        controller = self.make_rope_controller()
-        controller.cmd_left_right_last = "left"
-        controller.direction_held_since = 99.9
 
-        with patch.object(
-            controller_module.time, "monotonic", return_value=100.0
-        ), patch.object(controller_module.time, "sleep") as sleep:
-            self.assertTrue(controller.perform_rope_mount("left"))
 
-        sleep.assert_called_once()
-        self.assertAlmostEqual(sleep.call_args.args[0], 0.08)
-
-    def test_movement_tracking_feeds_same_direction_rope_runup(self):
-        controller_module._input_allowed.set()
-        controller_module._input_client.state_continuity_token = None
-        controller = self.make_rope_controller()
-        controller.cmd_left_right_last = "none"
-
-        with patch.object(
-            controller_module.time, "monotonic", return_value=100.0
-        ):
-            self.assertTrue(
-                controller.update_movement_state("right", "none")
-            )
-        self.assertEqual(controller.direction_held_since, 100.0)
-
-        with patch.object(
-            controller_module.time, "monotonic", return_value=100.1
-        ), patch.object(controller_module.time, "sleep") as sleep:
-            self.assertTrue(controller.perform_rope_mount("right"))
-
-        sleep.assert_called_once()
-        self.assertAlmostEqual(sleep.call_args.args[0], 0.08)
-
-    def test_rope_mount_discards_hold_time_after_state_discontinuity(self):
-        controller_module._input_allowed.set()
-        controller_module._input_client.state_continuity_token = 8
-        controller = self.make_rope_controller()
-        controller.cmd_left_right_last = "right"
-        controller.direction_held_since = 99.0
-        controller.direction_held_generation = 7
-
-        with patch.object(
-            controller_module.time, "monotonic", return_value=100.0
-        ), patch.object(controller_module.time, "sleep") as sleep:
-            self.assertTrue(controller.perform_rope_mount("right"))
-
-        sleep.assert_called_once_with(0.18)
 
     def test_pause_during_rope_jump_prevents_final_up_state(self):
         controller_module._input_allowed.set()
@@ -1510,25 +1206,6 @@ class KeyboardControllerEsp32RoutingTests(unittest.TestCase):
         self.assertIsNone(controller.direction_held_since)
         self.assertIsNone(controller.direction_held_generation)
 
-    def test_pause_during_rope_runup_prevents_late_state_or_tap(self):
-        controller_module._input_allowed.set()
-        controller = self.make_rope_controller()
-
-        def pause_during_runup(_duration):
-            controller_module._input_allowed.clear()
-
-        with patch.object(
-            controller_module.time,
-            "sleep",
-            side_effect=pause_during_runup,
-        ):
-            self.assertFalse(controller.perform_rope_mount("right"))
-
-        self.assertEqual(
-            controller_module._input_client.method_calls,
-            [call.set_state(["right"])],
-        )
-        self.assertIsNone(controller.cached_facing)
 
     def test_pause_during_rope_up_state_prevents_late_jump(self):
         controller_module._input_allowed.set()

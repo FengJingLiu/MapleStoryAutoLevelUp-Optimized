@@ -614,12 +614,6 @@ class WzNavigationRuntime:
                 float(self.route_config.get("rope_climb_runup_ms", 180))
                 / 1000.0,
             ),
-            launch_lead_seconds=max(
-                0.0,
-                float(self.route_config.get(
-                    "rope_climb_launch_lead_ms", 100
-                )) / 1000.0,
-            ),
         )
 
     def _build_assets(
@@ -935,6 +929,16 @@ class WzNavigationRuntime:
             self._log(f"Map recognition unavailable: {exc}")
             return False
 
+    def invalidate_live_registration(self, reason: str) -> bool:
+        """Request exactly one new live SIFT registration on the next update."""
+        if self.wz_map is None or self.features is None:
+            return False
+        was_registered = self._has_live_registration
+        self._has_live_registration = False
+        self.registration_failures = 0
+        self._log(f"Live registration invalidated: {reason}")
+        return was_registered
+
     @staticmethod
     def _changed_enough(previous: float | None, current: float | None) -> bool:
         if current is None:
@@ -1064,36 +1068,36 @@ class WzNavigationRuntime:
         if self.wz_map is None:
             if not self._recognize_unknown_map(live_minimap_bgr, timestamp):
                 return None
-        else:
+        elif not self._has_live_registration:
             registration = self.catalog.register_selected(live_minimap_bgr)
             if registration is None:
                 self.registration_failures += 1
-                retain_bound_registration = (
-                    self.bound_map_id is not None
-                    and self._has_live_registration
-                    and self.registration is not None
-                )
-                if retain_bound_registration:
-                    if self.registration_failures == \
-                            self.registration_failure_limit:
-                        self._log(
-                            "Live registration temporarily unavailable; "
-                            "retaining configured map binding "
-                            f"{self.bound_map_id}"
-                        )
-                elif self.registration_failures < \
+                if self.registration_failures < \
                         self.registration_failure_limit:
                     return None
-                else:
+                if self.bound_map_id is None:
                     self._clear_active_map()
                     # Return first so the engine releases held input. The next
                     # frame performs the potentially expensive all-map scan
                     # while Hero is known to be idle.
                     return None
+                if self.registration_failures == \
+                        self.registration_failure_limit:
+                    self._log(
+                        "Live registration unavailable; retaining configured "
+                        f"map binding {self.bound_map_id} and input suspension"
+                    )
+                return None
             else:
                 self.registration = registration
                 self.registration_failures = 0
                 self._has_live_registration = True
+                self._log(
+                    "Cached live registration for high-rate navigation: "
+                    f"{registration.inlier_count}/"
+                    f"{registration.good_match_count} inliers, "
+                    f"scale={registration.effective_scale:.3f}"
+                )
 
         if player_live is None or self.registration is None or \
                 self.projection is None or self.wz_map is None:
@@ -1126,7 +1130,6 @@ class WzNavigationRuntime:
             previous_command,
             on_ladder=on_ladder,
         )
-        previous_generation = self.resource_generation
         self._maybe_rebuild_from_motion(
             observation,
             allow_rebuild=allow_motion_rebuild,
@@ -1152,10 +1155,6 @@ class WzNavigationRuntime:
                     ),
                 )
                 self._sync_platform_path_resources()
-        if self.resource_generation != previous_generation:
-            # The caller replaces route resources atomically after this update.
-            self.registration = self.catalog.register_selected(live_minimap_bgr) \
-                or self.registration
         return NavigationUpdate(
             map_id=self.wz_map.map_id,
             player_navigation=navigation,

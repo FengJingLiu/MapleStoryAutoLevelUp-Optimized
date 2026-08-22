@@ -188,6 +188,7 @@ class DirectionalAoeDecisionTests(unittest.TestCase):
         )
         self.assertTrue(bot._suppress_periodic_attack)
         self.assertFalse(bot._wz_route_jump_atomic_pending)
+        self.assertIsNone(bot._wz_route_jump_atomic_route_index)
         bot.get_monsters_in_range.assert_called_once()
 
     def test_reserved_stationary_wz_jump_yields_to_attackable_monster(self):
@@ -379,6 +380,7 @@ class DirectionalAoeDecisionTests(unittest.TestCase):
         bot._rope_climb_active = False
         bot._portal_sweep_active = False
         bot.is_on_ladder = False
+        bot.cmd_action = "none"
         bot.wz_navigation = SimpleNamespace(
             active=True,
             jump_active=False,
@@ -399,9 +401,6 @@ class DirectionalAoeDecisionTests(unittest.TestCase):
         bot._stationary_jump_proximity_active = True
         self.assertFalse(bot._scheduled_buff_allowed())
         bot._stationary_jump_proximity_active = False
-
-        bot._wz_timed_jump_owns_input = Mock(return_value=True)
-        self.assertFalse(bot._scheduled_buff_allowed())
 
     def test_buff_recovery_freezes_engine_route_state(self):
         bot = MapleStoryAutoBot.__new__(MapleStoryAutoBot)
@@ -669,48 +668,7 @@ class DirectionalAoeDecisionTests(unittest.TestCase):
             ("left", "none", "attack"),
         )
 
-    def test_timed_jump_candidate_ignores_expired_travel_combat_budget(self):
-        bot = self.make_bot([make_monster(150)])
-        bot.cfg["directional_aoe"]["enable"] = False
-        bot.wz_navigation = SimpleNamespace(
-            platform_state_machine_active=True,
-            platform_combat_priority=False,
-        )
-        bot._wz_timed_jump_candidate = {"direction": "right"}
-        bot.cmd_move_x = "right"
 
-        bot.update_cmd_by_mob_detection()
-
-        self.assertEqual(
-            (bot.cmd_move_x, bot.cmd_move_y, bot.cmd_action),
-            ("left", "none", "attack"),
-        )
-
-    def test_armed_but_unfired_timed_jump_is_cancelled_for_monster(self):
-        bot = self.make_bot([make_monster(150)])
-        bot.cfg["directional_aoe"]["enable"] = False
-        token = (8, 0, "jump:p3:p4")
-        cancel = Mock(return_value=True)
-        bot.kb = SimpleNamespace(
-            cached_facing="right",
-            scheduled_directional_jump_status=Mock(
-                return_value={"state": "pending"}
-            ),
-            cancel_scheduled_directional_jump=cancel,
-        )
-        bot._wz_timed_jump_token = token
-        bot._wz_timed_jump_route_index = 0
-        bot._wz_timed_jump_direction = "right"
-        bot.cmd_move_x = "right"
-
-        bot.update_cmd_by_mob_detection()
-
-        cancel.assert_called_once_with(token)
-        self.assertIsNone(bot._wz_timed_jump_token)
-        self.assertEqual(
-            (bot.cmd_move_x, bot.cmd_move_y, bot.cmd_action),
-            ("left", "none", "attack"),
-        )
 
     def test_directional_jump_two_sided_tie_uses_cached_facing(self):
         bot = self.make_bot([make_monster(150), make_monster(250)])

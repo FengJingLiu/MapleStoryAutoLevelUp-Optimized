@@ -351,15 +351,14 @@ def test_renderer_places_rope_staging_and_launch_from_actual_motion(tmp_path):
     assert mount.contact == (100, 96)
     assert mount.ground_y == 100
     assert mount.vertical_gap_px == 4.0
-    assert mount.launch_lead_px == 2
-    assert mount.launch_offset_px == 8
-    assert mount.staging_offset_px == 12
+    assert mount.launch_offset_px == 6
+    assert mount.staging_offset_px == 10
     assert mount.predicted_contact_height_px == pytest.approx(
-        11.10, abs=0.05
+        13.86, abs=0.05
     )
     assert mount.contact_clearance_px > 7.0
     assert mount.reachable_at_contact
-    assert tuple(routes[0][100, 88]) == (0, 127, 255)
+    assert tuple(routes[0][100, 90]) == (0, 127, 255)
 
 
 def test_rope_mount_uses_raw_measurements_not_graph_safety_discount(tmp_path):
@@ -392,7 +391,6 @@ def test_rope_mount_uses_raw_measurements_not_graph_safety_discount(tmp_path):
     ]
     assert rope_motion.jump_height_px == measured["jump_height_px"]
     assert rope_motion.jump_distance_px == measured["jump_distance_px"]
-    assert rope_motion.launch_lead_seconds == 0.10
     assert profile.jump_height_wz * projection.world_scale[1] == pytest.approx(
         measured["jump_height_px"] * 0.82
     )
@@ -987,11 +985,10 @@ def test_real_forest_floor_plan_follows_numbered_platform_loop():
     assert runtime.nearest_route_index((210, 29)) == top_right_index
     assert first_mount.contact == (102, 329)
     assert first_mount.vertical_gap_px == 4.0
-    assert first_mount.launch_lead_px == 2
-    assert first_mount.launch_offset_px == 8
-    assert first_mount.staging_offset_px == 12
+    assert first_mount.launch_offset_px == 6
+    assert first_mount.staging_offset_px == 10
     assert first_mount.predicted_contact_height_px == pytest.approx(
-        11.10, abs=0.05
+        13.86, abs=0.05
     )
     assert first_mount.contact_clearance_px > 7.0
     assert first_mount.reachable_at_contact
@@ -1161,7 +1158,7 @@ def test_selected_recorded_map_uses_configured_wz_binding(tmp_path):
     )
 
 
-def test_configured_binding_retains_last_live_registration_on_dropouts(
+def test_configured_binding_caches_registration_until_explicit_invalidation(
     tmp_path, monkeypatch
 ):
     _, _, canonical = _write_export(tmp_path)
@@ -1180,6 +1177,17 @@ def test_configured_binding_retains_last_live_registration_on_dropouts(
     runtime.bootstrap(canonical)
     player_live = (100, 80)
 
+    real_register = runtime.catalog.register_selected
+    calls = []
+
+    def register_once(live):
+        calls.append(live)
+        return real_register(live)
+
+    monkeypatch.setattr(
+        runtime.catalog, "register_selected", register_once
+    )
+
     first_update = runtime.update(
         canonical,
         player_live,
@@ -1190,9 +1198,6 @@ def test_configured_binding_retains_last_live_registration_on_dropouts(
     )
     assert first_update is not None
     live_registration = runtime.registration
-    monkeypatch.setattr(
-        runtime.catalog, "register_selected", lambda _live: None
-    )
 
     for timestamp in range(2, 7):
         update = runtime.update(
@@ -1206,13 +1211,25 @@ def test_configured_binding_retains_last_live_registration_on_dropouts(
         assert update is not None
         assert update.map_id == MAP_ID
 
+    assert len(calls) == 1
     assert runtime.registration is live_registration
-    assert runtime.registration_failures == 5
+    assert runtime.registration_failures == 0
     assert runtime.routes_rgb
-    assert any(
-        "retaining configured map binding" in message
-        for message in messages
-    )
+
+    runtime.invalidate_live_registration("test viewport change")
+    monkeypatch.setattr(runtime.catalog, "register_selected", lambda _live: None)
+    for timestamp in range(7, 11):
+        assert runtime.update(
+            canonical,
+            player_live,
+            on_ladder=False,
+            previous_command="none none none",
+            allow_motion_rebuild=False,
+            timestamp=float(timestamp),
+        ) is None
+
+    assert runtime.map_id == MAP_ID
+    assert any("input suspension" in message for message in messages)
 
 
 def test_auto_wz_does_not_apply_recorded_map_binding(tmp_path):
