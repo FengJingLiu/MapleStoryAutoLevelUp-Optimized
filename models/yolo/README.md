@@ -1,14 +1,14 @@
 # 1024 YOLO models
 
-`yolov8n_1024_rect_hero_mob_16000_v6_best.pt` is the default checkpoint for
+`yolov8n_1024_rect_hero_mob_level_ge10_all_pets_2860_best.pt` is the default checkpoint for
 both monster and Hero detection. Runtime inference is shared between class 0
 (`mob`) and class 1 (`hero`); the Hero class uses its independent `0.85`
 confidence threshold.
 
-- Source run: `yolov8n_1024_rect_hero_mob_16000_v6_cleanlabels`
+- Source run: `yolov8n_1024_rect_hero_mob_level_ge10_all_pets_2860`
 - Input size: `1024`
 - Classes: `mob`, `hero`
-- SHA-256: `2F6426A186059B782D841D79775AC6803F640BA83070D7A514613578E0DEEFD7`
+- SHA-256: `40E520F4C985D0D62696D11588AACC9F03E7DA175C472F95236AF4578C418B88`
 
 ## Crocodile Pond 2 fine-tune
 

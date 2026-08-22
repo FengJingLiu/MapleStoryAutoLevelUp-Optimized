@@ -33,7 +33,6 @@ class DirectionalAoeDecisionTests(unittest.TestCase):
             "directional_attack": {
                 "range_x": 100,
                 "range_y": 80,
-                "cooldown": 0.5,
             },
             "directional_aoe": {
                 "enable": True,
@@ -41,14 +40,12 @@ class DirectionalAoeDecisionTests(unittest.TestCase):
                 "range_x": 140,
                 "range_y": 100,
                 "cooldown": aoe_cooldown,
-                "attack_recovery_delay": 1.0,
             },
             "power_knockback": {
                 "enable": knockback_enabled,
                 "trigger_distance_x": knockback_distance,
                 "range_y": 80,
                 "cooldown": knockback_cooldown,
-                "attack_recovery_delay": 0.9,
             },
             "monster_detect": {
                 "backend": "yolo",
@@ -70,7 +67,6 @@ class DirectionalAoeDecisionTests(unittest.TestCase):
         bot.t_last_power_knockback = 0.0
         bot.kb = SimpleNamespace(
             cached_facing="right",
-            is_attack_recovering=lambda: False,
         )
         bot.get_monsters_in_range = Mock(return_value=list(monsters))
         return bot
@@ -109,6 +105,322 @@ class DirectionalAoeDecisionTests(unittest.TestCase):
         self.assertEqual(bot.cmd_action, "attack")
         self.assertEqual(bot.cmd_move_x, "left")
 
+    def test_visible_bow_target_attacks_without_normal_attack_cooldown(self):
+        bot = self.make_bot([make_monster(150)])
+        bot.cfg["directional_aoe"]["enable"] = False
+        bot.wz_navigation = SimpleNamespace(
+            patrol_strategy="ranged_safe_platforms"
+        )
+        bot.cmd_move_x = "right"
+        bot.t_last_attack = 9.8
+
+        with patch(
+            "src.engine.MapleStoryAutoLevelUp.time.time",
+            return_value=10.0,
+        ):
+            bot.update_cmd_by_mob_detection()
+
+        self.assertEqual(
+            (bot.cmd_move_x, bot.cmd_move_y, bot.cmd_action),
+            ("left", "none", "attack"),
+        )
+
+    def test_ranged_wz_patrol_reissues_normal_attack_without_delay(self):
+        bot = self.make_bot([make_monster(150)])
+        bot.cfg["directional_aoe"]["enable"] = False
+        bot.wz_navigation = SimpleNamespace(
+            patrol_strategy="ranged_safe_platforms"
+        )
+        bot.cmd_move_x = "right"
+        bot.t_last_attack = 9.99
+
+        with patch(
+            "src.engine.MapleStoryAutoLevelUp.time.time",
+            return_value=10.0,
+        ):
+            bot.update_cmd_by_mob_detection()
+
+        self.assertEqual(
+            (bot.cmd_move_x, bot.cmd_move_y, bot.cmd_action),
+            ("left", "none", "attack"),
+        )
+
+    def test_clear_before_move_plan_attacks_immediately(self):
+        bot = self.make_bot([make_monster(150)])
+        bot.cfg["directional_aoe"]["enable"] = False
+        bot.wz_navigation = SimpleNamespace(
+            patrol_strategy="ranged_safe_platforms",
+            plan=SimpleNamespace(combat_checkpoints=(object(),)),
+        )
+        bot.cmd_move_x = "right"
+        bot.t_last_attack = 9.8
+
+        with patch(
+            "src.engine.MapleStoryAutoLevelUp.time.time",
+            return_value=10.0,
+        ):
+            bot.update_cmd_by_mob_detection()
+
+        self.assertEqual(
+            (bot.cmd_move_x, bot.cmd_move_y, bot.cmd_action),
+            ("left", "none", "attack"),
+        )
+
+    def test_reserved_wz_jump_yields_to_attackable_monster(self):
+        bot = self.make_bot([make_monster(150)])
+        bot.cfg["directional_aoe"]["enable"] = False
+        bot.wz_navigation = SimpleNamespace(
+            patrol_strategy="ranged_safe_platforms",
+            plan=SimpleNamespace(combat_checkpoints=(object(),)),
+        )
+        bot.idx_routes = 3
+        bot.cmd_move_x = "right"
+        bot.cmd_move_y = "none"
+        bot.cmd_action = "jump"
+        bot._wz_route_jump_atomic_pending = True
+        bot._wz_route_jump_atomic_route_index = 3
+
+        bot.update_cmd_by_mob_detection()
+
+        self.assertEqual(
+            (bot.cmd_move_x, bot.cmd_move_y, bot.cmd_action),
+            ("left", "none", "attack"),
+        )
+        self.assertTrue(bot._suppress_periodic_attack)
+        self.assertFalse(bot._wz_route_jump_atomic_pending)
+        bot.get_monsters_in_range.assert_called_once()
+
+    def test_reserved_stationary_wz_jump_yields_to_attackable_monster(self):
+        bot = self.make_bot([make_monster(150)])
+        bot.cmd_move_x = "none"
+        bot.cmd_move_y = "none"
+        bot.cmd_action = "jump"
+        bot._wz_route_jump_atomic_pending = True
+        bot._wz_route_jump_atomic_route_index = 4
+        bot.idx_routes = 4
+
+        bot.update_cmd_by_mob_detection()
+
+        self.assertEqual(
+            (bot.cmd_move_x, bot.cmd_move_y, bot.cmd_action),
+            ("left", "none", "attack"),
+        )
+        self.assertTrue(bot._suppress_periodic_attack)
+        self.assertFalse(bot._wz_route_jump_atomic_pending)
+        bot.get_monsters_in_range.assert_called_once()
+
+    def test_both_sided_p1_checkpoint_attacks_monster_on_its_left(self):
+        bot = self.make_bot([make_monster(150)])
+        bot.cfg["directional_aoe"]["enable"] = False
+        checkpoint = SimpleNamespace(
+            facing="both",
+            label="P1 clear right outside",
+        )
+        bot.wz_navigation = SimpleNamespace(
+            patrol_strategy="ranged_safe_platforms",
+            plan=SimpleNamespace(combat_checkpoints=(checkpoint,)),
+            route_legs=(SimpleNamespace(combat_checkpoint=checkpoint),),
+        )
+        bot.idx_routes = 0
+        bot._wz_combat_checkpoint_route_index = 0
+        bot._wz_combat_checkpoint_clear_since = None
+        bot._wz_combat_checkpoint_cleared_route_index = None
+        bot.kb.cached_facing = "right"
+
+        bot.update_cmd_by_mob_detection()
+
+        self.assertEqual(
+            (bot.cmd_move_x, bot.cmd_move_y, bot.cmd_action),
+            ("left", "none", "attack"),
+        )
+
+    def test_wall_recovery_attacks_before_returning_to_safe_corridor(self):
+        bot = self.make_bot([make_monster(150)])
+        bot.wz_navigation = SimpleNamespace(
+            patrol_strategy="ranged_safe_platforms",
+            plan=SimpleNamespace(combat_checkpoints=(object(),)),
+            route_legs=(SimpleNamespace(recovery_path=0),),
+        )
+        bot.idx_routes = 0
+        bot.cmd_move_x = "right"
+
+        bot.update_cmd_by_mob_detection()
+
+        self.assertEqual(
+            (bot.cmd_move_x, bot.cmd_move_y, bot.cmd_action),
+            ("left", "none", "attack"),
+        )
+        self.assertTrue(bot._suppress_periodic_attack)
+
+    def test_wall_recovery_resumes_inward_walk_after_monsters_clear(self):
+        bot = self.make_bot([])
+        bot.wz_navigation = SimpleNamespace(
+            patrol_strategy="ranged_safe_platforms",
+            plan=SimpleNamespace(combat_checkpoints=(object(),)),
+            route_legs=(SimpleNamespace(recovery_path=0),),
+        )
+        bot.idx_routes = 0
+        bot.cmd_move_x = "right"
+
+        bot.update_cmd_by_mob_detection()
+
+        self.assertEqual(
+            (bot.cmd_move_x, bot.cmd_move_y, bot.cmd_action),
+            ("right", "none", "none"),
+        )
+
+    def test_combat_checkpoint_waits_for_quiet_window_before_advancing(self):
+        bot = MapleStoryAutoBot.__new__(MapleStoryAutoBot)
+        checkpoint = SimpleNamespace(
+            facing="left",
+            label="P3 clear P2",
+        )
+        bot.cfg = {
+            "wz_navigation": {"combat_clear_quiet_seconds": 0.8}
+        }
+        bot.idx_routes = 0
+        bot.img_routes = [object(), object()]
+        bot.wz_navigation = SimpleNamespace(route_legs=(
+            SimpleNamespace(combat_checkpoint=checkpoint),
+            SimpleNamespace(combat_checkpoint=None),
+        ))
+        bot.cmd_move_x = "right"
+        bot.cmd_move_y = "none"
+        bot.cmd_action = "goal"
+        bot.is_show_debug_window = False
+        bot._wz_combat_checkpoint_route_index = None
+        bot._wz_combat_checkpoint_clear_since = None
+        bot._wz_combat_checkpoint_cleared_route_index = None
+        bot._reset_rope_climb = Mock()
+        bot._reset_ladder_route_hold = Mock()
+        bot._route_has_local_continuation = Mock(return_value=True)
+        bot._wz_navigation_enabled = True
+
+        bot.check_reach_goal()
+
+        self.assertEqual(bot.idx_routes, 0)
+        self.assertEqual(
+            (bot.cmd_move_x, bot.cmd_move_y, bot.cmd_action),
+            ("none", "none", "none"),
+        )
+
+        with patch(
+            "src.engine.MapleStoryAutoLevelUp.time.monotonic",
+            side_effect=(10.0, 10.81),
+        ):
+            bot._observe_wz_combat_checkpoint(False)
+            bot._observe_wz_combat_checkpoint(False)
+
+        bot.cmd_action = "goal"
+        bot.check_reach_goal()
+
+        self.assertEqual(bot.idx_routes, 1)
+        self.assertIsNone(bot._wz_combat_checkpoint_route_index)
+
+    def test_checkpoint_aligns_to_safe_position_before_horizontal_jump(self):
+        bot = MapleStoryAutoBot.__new__(MapleStoryAutoBot)
+        checkpoint = SimpleNamespace(
+            facing="right",
+            label="P3 clear P4",
+        )
+        bot.cfg = {
+            "wz_navigation": {"combat_clear_quiet_seconds": 0.8}
+        }
+        bot.idx_routes = 0
+        bot.wz_navigation = SimpleNamespace(route_legs=(
+            SimpleNamespace(
+                action="WALK",
+                source=(96, 291),
+                target=(146, 291),
+                combat_checkpoint=checkpoint,
+            ),
+            SimpleNamespace(
+                action="JUMP",
+                source=(149, 291),
+                target=(158, 291),
+                combat_checkpoint=None,
+            ),
+        ))
+        bot.loc_player_global = (149, 291)
+        bot.cmd_move_x = "right"
+        bot.cmd_move_y = "none"
+        bot.cmd_action = "goal"
+        bot._wz_combat_checkpoint_route_index = None
+        bot._wz_combat_checkpoint_clear_since = None
+        bot._wz_combat_checkpoint_cleared_route_index = None
+
+        self.assertTrue(bot._hold_at_wz_combat_checkpoint())
+
+        self.assertEqual(
+            (bot.cmd_move_x, bot.cmd_move_y, bot.cmd_action),
+            ("none", "none", "jump_align_left"),
+        )
+        bot._observe_wz_combat_checkpoint(False)
+        self.assertIsNone(bot._wz_combat_checkpoint_clear_since)
+        self.assertIsNone(bot._wz_combat_checkpoint_cleared_route_index)
+
+        bot.loc_player_global = (146, 291)
+        bot.cmd_action = "goal"
+        self.assertTrue(bot._hold_at_wz_combat_checkpoint())
+        self.assertEqual(bot.cmd_action, "none")
+        with patch(
+            "src.engine.MapleStoryAutoLevelUp.time.monotonic",
+            side_effect=(10.0, 10.81),
+        ):
+            bot._observe_wz_combat_checkpoint(False)
+            bot._observe_wz_combat_checkpoint(False)
+
+        self.assertEqual(bot._wz_combat_checkpoint_cleared_route_index, 0)
+
+    def test_wz_buff_gate_blocks_only_jump_transactions(self):
+        bot = MapleStoryAutoBot.__new__(MapleStoryAutoBot)
+        bot._wz_navigation_enabled = True
+        bot._stationary_jump_proximity_active = False
+        bot._rope_climb_active = False
+        bot._portal_sweep_active = False
+        bot.is_on_ladder = False
+        bot.wz_navigation = SimpleNamespace(
+            active=True,
+            jump_active=False,
+        )
+
+        self.assertTrue(bot._scheduled_buff_allowed())
+
+        bot.wz_navigation.jump_active = True
+        self.assertFalse(bot._scheduled_buff_allowed())
+        bot.wz_navigation.jump_active = False
+
+        bot._rope_climb_active = True
+        bot.is_on_ladder = True
+        self.assertTrue(bot._scheduled_buff_allowed())
+        bot._rope_climb_active = False
+        bot.is_on_ladder = False
+
+        bot._stationary_jump_proximity_active = True
+        self.assertFalse(bot._scheduled_buff_allowed())
+        bot._stationary_jump_proximity_active = False
+
+        bot._wz_timed_jump_owns_input = Mock(return_value=True)
+        self.assertFalse(bot._scheduled_buff_allowed())
+
+    def test_buff_recovery_freezes_engine_route_state(self):
+        bot = MapleStoryAutoBot.__new__(MapleStoryAutoBot)
+        bot.cmd_move_x = "right"
+        bot.cmd_move_y = "up"
+        bot.cmd_action = "jump"
+        bot.kb = SimpleNamespace(
+            is_buff_recovery_active=Mock(return_value=True),
+            set_command=Mock(),
+        )
+
+        self.assertTrue(bot._hold_for_scheduled_buff_recovery())
+
+        self.assertEqual(
+            (bot.cmd_move_x, bot.cmd_move_y, bot.cmd_action),
+            ("none", "none", "none"),
+        )
+        bot.kb.set_command.assert_called_once_with("none none none")
+
     def test_light_blue_rope_approach_yields_to_attackable_monster(self):
         bot = self.make_bot([make_monster(150)], threshold=3)
         bot._rope_climb_active = True
@@ -134,24 +446,36 @@ class DirectionalAoeDecisionTests(unittest.TestCase):
         self.assertEqual(bot.cmd_move_y, "none")
         self.assertTrue(bot._rope_climb_combat_deferred)
 
-    def test_rope_mount_request_still_blocks_combat(self):
+    def test_rope_mount_request_yields_before_hid_dispatch(self):
         bot = self.make_bot([make_monster(150)], threshold=3)
+        bot.cfg["directional_aoe"]["enable"] = False
+        bot.loc_player_global = (10, 10)
         bot._rope_climb_active = True
-        bot._rope_climb_state = {"phase": "mount_request"}
+        bot._rope_climb_state = {
+            "phase": "mount_request",
+            "started_at": 1.0,
+            "position_last_progress_at": 1.0,
+        }
+        bot.wz_navigation = SimpleNamespace(
+            platform_state_machine_active=True,
+            platform_combat_priority=False,
+        )
         bot.cmd_move_x = "left"
         bot.cmd_move_y = "up"
         bot.cmd_action = "rope_mount_left"
-        bot.get_monsters_in_range = Mock(
-            side_effect=AssertionError("combat must not interrupt mounting")
-        )
 
-        bot.update_cmd_by_mob_detection()
+        with patch(
+            "src.engine.MapleStoryAutoLevelUp.time.monotonic",
+            return_value=10.0,
+        ):
+            bot.update_cmd_by_mob_detection()
 
         self.assertEqual(
             (bot.cmd_move_x, bot.cmd_move_y, bot.cmd_action),
-            ("left", "up", "rope_mount_left"),
+            ("left", "none", "attack"),
         )
-        bot.get_monsters_in_range.assert_not_called()
+        self.assertTrue(bot._rope_climb_combat_deferred)
+        bot.get_monsters_in_range.assert_called_once()
 
     def test_light_blue_rope_approach_rearms_after_monsters_disappear(self):
         bot = self.make_bot([], threshold=3)
@@ -231,7 +555,7 @@ class DirectionalAoeDecisionTests(unittest.TestCase):
         self.assertEqual(bot.cmd_action, "attack")
         self.assertEqual(bot.cmd_move_x, "left")
 
-    def test_stationary_jump_waits_while_attack_is_cooling_down(self):
+    def test_stationary_jump_yields_without_normal_attack_cooldown(self):
         bot = self.make_bot([make_monster(150)])
         bot.cfg["directional_aoe"]["enable"] = False
         bot._stationary_jump_proximity_active = True
@@ -246,7 +570,7 @@ class DirectionalAoeDecisionTests(unittest.TestCase):
 
         self.assertEqual(
             (bot.cmd_move_x, bot.cmd_move_y, bot.cmd_action),
-            ("none", "none", "none"),
+            ("left", "none", "attack"),
         )
 
     def test_stationary_jump_two_sided_tie_uses_cached_facing(self):
@@ -281,7 +605,7 @@ class DirectionalAoeDecisionTests(unittest.TestCase):
         self.assertEqual(bot.cmd_action, "attack")
         self.assertEqual(bot.cmd_move_x, "left")
 
-    def test_directional_jump_waits_while_attack_is_cooling_down(self):
+    def test_directional_jump_yields_without_normal_attack_cooldown(self):
         bot = self.make_bot([make_monster(150)])
         bot.cfg["directional_aoe"]["enable"] = False
         bot.cmd_move_x = "right"
@@ -297,7 +621,64 @@ class DirectionalAoeDecisionTests(unittest.TestCase):
 
         self.assertEqual(
             (bot.cmd_move_x, bot.cmd_move_y, bot.cmd_action),
-            ("none", "none", "none"),
+            ("left", "none", "attack"),
+        )
+
+    def test_vertical_drop_jump_yields_to_attackable_monster(self):
+        bot = self.make_bot([make_monster(150)])
+        bot.cfg["directional_aoe"]["enable"] = False
+        bot.cmd_move_x = "none"
+        bot.cmd_move_y = "down"
+        bot.cmd_action = "jump"
+
+        bot.update_cmd_by_mob_detection()
+
+        self.assertEqual(
+            (bot.cmd_move_x, bot.cmd_move_y, bot.cmd_action),
+            ("left", "none", "attack"),
+        )
+
+    def test_timed_jump_candidate_ignores_expired_travel_combat_budget(self):
+        bot = self.make_bot([make_monster(150)])
+        bot.cfg["directional_aoe"]["enable"] = False
+        bot.wz_navigation = SimpleNamespace(
+            platform_state_machine_active=True,
+            platform_combat_priority=False,
+        )
+        bot._wz_timed_jump_candidate = {"direction": "right"}
+        bot.cmd_move_x = "right"
+
+        bot.update_cmd_by_mob_detection()
+
+        self.assertEqual(
+            (bot.cmd_move_x, bot.cmd_move_y, bot.cmd_action),
+            ("left", "none", "attack"),
+        )
+
+    def test_armed_but_unfired_timed_jump_is_cancelled_for_monster(self):
+        bot = self.make_bot([make_monster(150)])
+        bot.cfg["directional_aoe"]["enable"] = False
+        token = (8, 0, "jump:p3:p4")
+        cancel = Mock(return_value=True)
+        bot.kb = SimpleNamespace(
+            cached_facing="right",
+            scheduled_directional_jump_status=Mock(
+                return_value={"state": "pending"}
+            ),
+            cancel_scheduled_directional_jump=cancel,
+        )
+        bot._wz_timed_jump_token = token
+        bot._wz_timed_jump_route_index = 0
+        bot._wz_timed_jump_direction = "right"
+        bot.cmd_move_x = "right"
+
+        bot.update_cmd_by_mob_detection()
+
+        cancel.assert_called_once_with(token)
+        self.assertIsNone(bot._wz_timed_jump_token)
+        self.assertEqual(
+            (bot.cmd_move_x, bot.cmd_move_y, bot.cmd_action),
+            ("left", "none", "attack"),
         )
 
     def test_directional_jump_two_sided_tie_uses_cached_facing(self):
@@ -468,7 +849,6 @@ class DirectionalAoeDecisionTests(unittest.TestCase):
                 "range_x": 140.5,
                 "range_y": 100,
                 "cooldown": 1.0,
-                "attack_recovery_delay": 1.0,
             },
         }
 
@@ -690,7 +1070,6 @@ class DirectionalAoeDecisionTests(unittest.TestCase):
                 "trigger_distance_x": 40.5,
                 "range_y": 80,
                 "cooldown": 1.0,
-                "attack_recovery_delay": 0.9,
             },
         }
 

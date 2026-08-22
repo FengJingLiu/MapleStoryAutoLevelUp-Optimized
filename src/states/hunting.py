@@ -34,9 +34,39 @@ class HuntingState(State):
         # Get attack commend by detecting mobs near players
         self.bot.update_cmd_by_mob_detection()
 
+        # Platform dwell/quiet transitions are evaluated only after this
+        # frame's final monster-range and terrain arbitration.
+        platform_combat_update = getattr(
+            self.bot, "update_wz_platform_combat_state", None
+        )
+        if callable(platform_combat_update) and platform_combat_update():
+            # The runtime has replaced the temporary path. Do not emit one
+            # last command from the retired patrol leg before installation on
+            # the next minimap update.
+            self.bot.cmd_move_x = "none"
+            self.bot.cmd_move_y = "none"
+            self.bot.cmd_action = "none"
+
         # If player stuck for too long, perform a random command
         if self.bot.is_player_stuck():
-            self.bot.update_cmd_by_random()
+            deterministic_recovery = getattr(
+                self.bot, "recover_wz_platform_navigation", None
+            )
+            recovered = bool(
+                callable(deterministic_recovery)
+                and deterministic_recovery()
+            )
+            if not recovered:
+                self.bot.update_cmd_by_random()
+
+        # Arm a latency-compensated WZ Jump only after monster arbitration and
+        # stuck recovery have kept the route's horizontal approach command.
+        # Its one-shot timer then runs independently of the next vision frame.
+        finalize_timed_jump = getattr(
+            self.bot, "finalize_wz_timed_directional_jump", None
+        )
+        if callable(finalize_timed_jump):
+            finalize_timed_jump()
 
         # send command to keyboard controller
         self.bot.kb.set_command(self.bot.cmd_move_x + ' ' + \

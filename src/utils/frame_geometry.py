@@ -238,16 +238,18 @@ def scale_runtime_pixel_config(
         scale_x,
         scale_y,
     )
-    _scale_scalar(
-        result, ("nametag", "pet", "yolo_name_vertical_gap"), scale_y
-    )
     _scale_xy(
         result,
-        ("nametag", "pet", "yolo_name_search_tolerance"),
+        ("nametag", "pet", "yolo_ocr_max_box_size"),
         scale_x,
         scale_y,
     )
-    _scale_scalar(result, ("nametag", "pet", "yolo_name_max_gap"), scale_y)
+    _scale_xy(
+        result,
+        ("nametag", "pet", "yolo_ocr_max_hero_distance"),
+        scale_x,
+        scale_y,
+    )
 
     for key in (
         "local_search_radius",

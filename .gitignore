@@ -1,17 +1,22 @@
 build/
 datasets/
 
-# Ignore ad-hoc images and recordings by default. The allow-list below keeps
-# recognition templates, map assets, UI resources, and test fixtures versioned.
+# Keep generated/binary assets local. Existing historical assets remain in the
+# repository, but new images, videos, and model weights are never recorded.
 *.png
 *.jpg
 *.jpeg
 *.gif
 *.bmp
 *.webp
+*.svg
+*.ico
+*.avif
+*.jxl
 *.tif
 *.tiff
 *.heic
+*.psd
 *.mp4
 *.avi
 *.mov
@@ -20,26 +25,19 @@ datasets/
 *.webm
 *.m4v
 *.flv
-
-!maps/**
-!minimaps/**
-!monster/**
-!rune/**
-!numbers/**
-!misc/**
-!media/**
-!tests/fixtures/**
+*.mpeg
+*.mpg
+*.3gp
+*.mts
+*.m2ts
+*.pt
+*.pth
+*.onnx
+*.engine
+*.ckpt
 
 screenshot/
-!nametag/
-nametag/*
-!nametag/liu_muning.png
-!nametag/liu_muning_medal.png
-!nametag/liu_muning_pet.png
-!nametag/liu_muning_appearance_climb.png
-!nametag/liu_muning_appearance_stand_left.png
-!nametag/liu_muning_appearance_stand_right.png
-!nametag/liu_muning_overhead_smile.png
+nametag/
 video/
 dist/
 .venv/

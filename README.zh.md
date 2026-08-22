@@ -117,7 +117,7 @@ game_window:
 pip install -r requirements.txt
 ```
 
-本分支預設以 `models/yolo/yolov8n_1024_rect_hero_mob_16000_v6_best.pt`
+本分支預設以 `models/yolo/yolov8n_1024_rect_hero_mob_level_ge10_all_pets_2860_best.pt`
 同時辨識怪物並定位自己的角色。Windows + NVIDIA 顯示卡建議先安裝 CUDA
 版 PyTorch，再安裝其餘依賴：
 
@@ -262,7 +262,6 @@ directional_aoe:
   range_x: 350
   range_y: 70
   cooldown: 0.9
-  attack_recovery_delay: 0.9
 ```
 
 若左右兩側都達到門檻，會先選怪物較多的一側；數量相同時選最近的一側。
@@ -281,7 +280,6 @@ power_knockback:
   trigger_distance_x: 100     # 水平中心距離，包含臨界值
   range_y: 70
   cooldown: 0.9
-  attack_recovery_delay: 0.9
 ```
 
 任一近身怪會令同側暫時不可射箭；若另一側有可射的怪物，會優先攻擊另一側。
@@ -294,6 +292,10 @@ power_knockback:
 
 ## 支援地圖
 請參考 config/config_data.yaml
+
+## WZ 自动识别与寻路
+
+可以直接匹配当前小地图与 WZ 导出数据，自动生成平台、绳索、传送门和怪物覆盖路线，不再手绘 `route*.png`。配置、导出及“树林的底层”验证结果见 [WZ 自动地图识别与寻路](docs/WZ_AUTO_NAVIGATION.zh-CN.md)。
 
 ## 想製作新地圖？→ Route Recorder
 

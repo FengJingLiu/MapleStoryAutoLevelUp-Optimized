@@ -1,0 +1,33 @@
+{
+  "total_attempts": 7,
+  "successes": 7,
+  "failures": 0,
+  "rope_x_estimate": 164.0,
+  "approaches": {
+    "right": {
+      "successful_attempts": 6,
+      "failed_attempts": 0,
+      "observed_success_window_px": [
+        6.0,
+        13.238
+      ],
+      "recommended_window_px": [
+        8.08,
+        13.229
+      ],
+      "failed_lead_distances_px": [],
+      "ready": false
+    },
+    "left": {
+      "successful_attempts": 1,
+      "failed_attempts": 0,
+      "observed_success_window_px": [
+        3.0,
+        3.0
+      ],
+      "recommended_window_px": null,
+      "failed_lead_distances_px": [],
+      "ready": false
+    }
+  }
+}

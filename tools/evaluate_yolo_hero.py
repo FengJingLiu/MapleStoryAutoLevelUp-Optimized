@@ -25,7 +25,7 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=(
             ROOT
-            / "models/yolo/yolov8n_1024_rect_hero_mob_16000_v6_best.pt"
+            / "models/yolo/yolov8n_1024_rect_hero_mob_level_ge10_all_pets_2860_best.pt"
         ),
     )
     parser.add_argument(

@@ -5,4 +5,4 @@ pyinstaller --noconsole --onefile src/main.py -p . ^
   --collect-submodules serial ^
   --additional-hooks-dir=pyinstaller_hooks ^
   --collect-all ultralytics ^
-  --add-data "models\yolo\yolov8n_1024_rect_hero_mob_16000_v6_best.pt;models\yolo"
+  --add-data "models\yolo\yolov8n_1024_rect_hero_mob_level_ge10_all_pets_2860_best.pt;models\yolo"

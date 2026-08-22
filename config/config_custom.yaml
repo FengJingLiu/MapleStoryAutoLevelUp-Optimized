@@ -10,11 +10,12 @@ buff_skill:
   - t
   - y
 directional_aoe:
-  range_x: 400
+  cooldown: 0.0
+  range_x: 370
+  range_y: 80
 directional_attack:
-  cooldown: 0.65
-  range_x: 400
-  range_y: 60
+  range_x: 370
+  range_y: 80
 game_window:
   auto_resize: false
   preserve_native_resolution: true
@@ -26,15 +27,20 @@ key:
   directional_attack: a
   jump: alt
 monster_detect:
-  confidence: 0.6
+  confidence: 0.7
   min_box_height: 40
   min_box_width: 40
 nametag:
   appearance:
     enable: false
   name: liu_muning
+  pet:
+    enable: true
+    yolo_ocr_text: "\u82B1\u8611\u83C7\u4ED4"
   template_reference_size:
   - 2160
   - 3840
 power_knockback:
   trigger_distance_x: 40
+watchdog:
+  last_attack_timeout_action: go_home

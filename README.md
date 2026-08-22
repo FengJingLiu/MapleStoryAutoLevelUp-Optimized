@@ -234,7 +234,7 @@ pip install -r requirements.txt
 ```
 
 Monster and screen-space Hero detection share the default
-`models/yolo/yolov8n_1024_rect_hero_mob_16000_v6_best.pt` checkpoint:
+`models/yolo/yolov8n_1024_rect_hero_mob_level_ge10_all_pets_2860_best.pt` checkpoint:
 
 ```yaml
 nametag:
@@ -309,7 +309,6 @@ directional_aoe:
   range_x: 350
   range_y: 70
   cooldown: 0.9
-  attack_recovery_delay: 0.9
 ```
 
 If both sides reach the threshold, the bot chooses the side with more
@@ -329,7 +328,6 @@ power_knockback:
   trigger_distance_x: 100     # Inclusive horizontal center distance
   range_y: 70
   cooldown: 0.9
-  attack_recovery_delay: 0.9
 ```
 
 A close monster blocks bow attacks on its whole side. If the opposite side has
@@ -343,6 +341,10 @@ when no side has a valid bow target. The distance is expressed in the original
 
 ## Supported Map
 Please refer to config/config_data.yaml
+
+## Automatic WZ navigation
+
+The bot can match the live minimap against exported WZ canvases and generate platform, rope, portal, and monster-coverage routes in memory. See the [Chinese WZ navigation guide](docs/WZ_AUTO_NAVIGATION.zh-CN.md) for setup and the validated `forest_floor` example.
 
 ## Want to Make a New Map? → Route Recorder
 

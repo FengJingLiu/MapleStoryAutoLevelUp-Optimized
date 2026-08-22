@@ -80,8 +80,13 @@ def test_default_uses_shared_hero_and_mob_yolo():
     assert marker["yolo"]["confidence"] == 0.85
     assert marker["max_stale_frames"] == -1
     assert cfg["monster_detect"]["model_path"].endswith(
-        "yolov8n_1024_rect_hero_mob_16000_v6_best.pt"
+        "yolov8n_1024_rect_hero_mob_level_ge10_all_pets_2860_best.pt"
     )
+    assert cfg["monster_detect"]["preprocess_size"] == [768, 1366]
+    assert cfg["monster_detect"]["imgsz"] == 1280
+    assert cfg["monster_detect"]["confidence"] == 0.55
+    assert cfg["monster_detect"]["iou"] == 0.70
+    assert cfg["monster_detect"]["max_det"] == 100
     assert cfg["monster_detect"]["min_box_width"] == 20
     assert cfg["monster_detect"]["min_box_height"] == 20
 
@@ -100,12 +105,17 @@ def test_custom_capture_and_absolute_mouse_use_4k_reference():
     assert cfg["nametag"]["overhead_marker"]["enable"] is True
     assert cfg["nametag"]["overhead_marker"]["backend"] == "yolo"
     assert cfg["monster_detect"]["model_path"] == \
-        "models/yolo/yolov8n_1024_rect_hero_mob_16000_v6_best.pt"
+        "models/yolo/yolov8n_1024_rect_hero_mob_level_ge10_all_pets_2860_best.pt"
     assert cfg["monster_detect"]["class_name"] == "mob"
-    assert cfg["monster_detect"]["confidence"] == 0.6
     assert cfg["monster_detect"]["min_box_width"] == 40
     assert cfg["monster_detect"]["min_box_height"] == 40
-    assert cfg["nametag"]["pet"]["enable"] is False
+    assert cfg["monster_detect"]["preprocess_size"] == [768, 1366]
+    assert cfg["monster_detect"]["imgsz"] == 1280
+    assert cfg["monster_detect"]["confidence"] == 0.7
+    assert cfg["monster_detect"]["iou"] == 0.70
+    assert cfg["monster_detect"]["max_det"] == 100
+    assert cfg["nametag"]["pet"]["enable"] is True
+    assert cfg["nametag"]["pet"]["yolo_ocr_text"] == "花蘑菇仔"
     assert cfg["esp32_hid"]["absolute_desktop_rect"] == [0, 0, 3840, 2160]
     # The capture card sees Magpie's scaled output, so points must map back to
     # the physical source client before Windows receives the absolute report.
@@ -115,3 +125,10 @@ def test_custom_capture_and_absolute_mouse_use_4k_reference():
     ) == (16917, 16983)
     assert cfg["auto_relogin"]["enable"] is True
     assert cfg["auto_relogin"]["remote_mouse_mode"] == "absolute"
+
+
+def test_only_rope_mount_has_a_configured_runup():
+    cfg = load_yaml("config_default.yaml")
+
+    assert "directional_jump_runup_ms" not in cfg["route"]
+    assert cfg["route"]["rope_climb_runup_ms"] == 180

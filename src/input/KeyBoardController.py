@@ -30,8 +30,6 @@ _input_error_lock = threading.Lock()
 _last_input_error_time = 0.0
 _input_allowed = threading.Event()
 _input_transaction_lock = threading.RLock()
-_input_recovery_lock = threading.Lock()
-_input_recovery_until = 0.0
 
 
 ABSOLUTE_MOUSE_MAX_COORDINATE = 32767
@@ -176,31 +174,6 @@ def capture_point_to_absolute_hid(cfg, x, y, frame_width, frame_height):
     return absolute_x, absolute_y
 
 
-def input_recovery_remaining():
-    """Return the remaining global HID lockout after an attack."""
-    with _input_recovery_lock:
-        return max(0.0, _input_recovery_until - time.monotonic())
-
-
-def _set_input_recovery(duration, started_at=None):
-    """Block every non-safety HID command until the attack recovery ends."""
-    global _input_recovery_until
-    duration = max(0.0, float(duration))
-    started_at = time.monotonic() if started_at is None else float(started_at)
-    with _input_recovery_lock:
-        _input_recovery_until = max(
-            _input_recovery_until,
-            started_at + duration,
-        )
-
-
-def clear_input_recovery():
-    """Clear the attack lockout when replacing or closing the controller."""
-    global _input_recovery_until
-    with _input_recovery_lock:
-        _input_recovery_until = 0.0
-
-
 def _log_input_error(message):
     """Limit repeated transport error messages while the ESP32 reconnects."""
     global _last_input_error_time
@@ -223,7 +196,6 @@ def configure_esp32_input(cfg):
     # check, then wait for it to leave the shared HID transaction.
     _input_allowed.clear()
     with _input_transaction_lock:
-        clear_input_recovery()
         with _input_client_lock:
             previous, _input_client = _input_client, None
         if previous is not None:
@@ -246,7 +218,6 @@ def close_esp32_input(client=None):
                 return
             closing, _input_client = _input_client, None
         _input_allowed.clear()
-        clear_input_recovery()
         if closing is not None:
             closing.close()
 
@@ -303,7 +274,7 @@ def _call_input(method, *args):
 
 
 def _regular_input_allowed():
-    return _input_allowed.is_set() and input_recovery_remaining() <= 0.0
+    return _input_allowed.is_set()
 
 
 def _input_state_generation():
@@ -387,7 +358,9 @@ class KeyBoardController():
     '''
     KeyBoardController
     '''
-    def __init__(self, cfg, connect_input=True, capture_available=True):
+    def __init__(
+            self, cfg, connect_input=True, capture_available=True,
+            scheduled_buff_allowed=None):
         self.cfg = cfg
         validate_absolute_mouse_config(cfg)
         self.cmd_action = "none"
@@ -399,10 +372,16 @@ class KeyBoardController():
         self.command_lock = threading.RLock()
         self.cached_facing = None
         # Monotonic timestamp for the currently held horizontal direction.
-        # Running jumps and rope mounting use this to preserve an existing
-        # same-direction run instead of stopping and rebuilding momentum.
+        # Directional jumps preserve it without waiting; rope mounting uses
+        # the elapsed duration when its trajectory still requires momentum.
         self.direction_held_since = None
         self.direction_held_generation = None
+        # One-shot host timer used by latency-compensated WZ edge jumps.  It
+        # runs independently of both the low-FPS vision loop and this worker's
+        # 30 FPS command polling.
+        self._scheduled_jump_lock = threading.RLock()
+        self._scheduled_jump_generation = 0
+        self._scheduled_jump = None
         self.window_title = cfg["game_window"]["title"]
         self.fps = 0 # Frame per seconds
         # Timer
@@ -414,9 +393,15 @@ class KeyBoardController():
         self.t_last_run = time.time()
         self.t_last_skill = 0.0 # Last time character perform action(attack, cast spell, ...)
         self.t_last_buff_cast = [0] * len(self.cfg["buff_skill"]["keys"]) # Last time cast buff skill
+        self.buff_recovery_until = 0.0
+        if scheduled_buff_allowed is not None and not callable(
+                scheduled_buff_allowed):
+            raise TypeError("scheduled_buff_allowed must be callable")
+        self.scheduled_buff_allowed = scheduled_buff_allowed
         # Flags
         self.is_enable = bool(connect_input)
         self.capture_available = bool(capture_available)
+        self.minimap_available = True
         self.session_recovery_active = False
         self.game_ui_active = False
         self.is_need_force_heal = False
@@ -428,32 +413,17 @@ class KeyBoardController():
         self.character_turn_delay = max(
             0.0, float(directional_cfg.get("character_turn_delay", 0.08))
         )
-        self.attack_recovery_delay = max(
-            0.0, float(directional_cfg.get("attack_recovery_delay", 0.90))
-        )
         directional_aoe_cfg = self.cfg.get("directional_aoe", {})
         self.directional_aoe_key = self.cfg.get("key", {}).get(
             "aoe_skill", ""
-        )
-        self.directional_aoe_recovery_delay = max(
-            0.0,
-            float(directional_aoe_cfg.get("attack_recovery_delay", 0.90)),
         )
         power_knockback_cfg = self.cfg.get("power_knockback", {})
         self.power_knockback_key = self.cfg.get("key", {}).get(
             "power_knockback", ""
         )
-        self.power_knockback_recovery_delay = max(
-            0.0,
-            float(power_knockback_cfg.get("attack_recovery_delay", 0.90)),
-        )
         self.jump_up_settle_delay = max(
             0.0,
             float(cfg.get("route", {}).get("jump_up_settle_delay", 0.15)),
-        )
-        self.directional_jump_runup_ms = max(
-            0,
-            int(cfg.get("route", {}).get("directional_jump_runup_ms", 180)),
         )
         self.jump_alignment_nudge_ms = max(
             1,
@@ -607,11 +577,27 @@ class KeyBoardController():
                     _input_allowed.set()
         return True
 
+    def set_minimap_available(self, available):
+        """Gate normal automation while the gameplay minimap is absent."""
+        available = bool(available)
+        if available == self.minimap_available:
+            return False
+        self.minimap_available = available
+        if not available:
+            _input_allowed.clear()
+            self.release_all_key()
+        else:
+            with _input_transaction_lock:
+                if self._automation_input_active():
+                    _input_allowed.set()
+        return True
+
     def _automation_input_active(self):
         """Return whether the normal movement/action worker may emit HID."""
         return bool(
             getattr(self, "is_enable", False)
             and getattr(self, "capture_available", True)
+            and getattr(self, "minimap_available", True)
             and not getattr(self, "session_recovery_active", False)
             and not getattr(self, "game_ui_active", False)
             and not getattr(self, "is_terminated", False)
@@ -992,9 +978,95 @@ class KeyBoardController():
             if self.cmd_action == action:
                 self.cmd_action = "none"
 
-    def is_attack_recovering(self):
-        """Return whether the global post-attack input gate is active."""
-        return input_recovery_remaining() > 0.0
+    def _buff_action_cooldown(self):
+        try:
+            value = float(self.cfg.get("buff_skill", {}).get(
+                "action_cooldown", 1.0
+            ))
+        except (TypeError, ValueError):
+            value = 1.0
+        return max(0.0, value)
+
+    def _buff_recovery_active(self, now=None):
+        """Return whether a completed Buff still owns the action window."""
+        now = time.monotonic() if now is None else float(now)
+        return now < float(getattr(self, "buff_recovery_until", 0.0))
+
+    def is_buff_recovery_active(self):
+        """Expose the Buff animation gate to the vision/navigation loop."""
+        return self._buff_recovery_active()
+
+    def _scheduled_buff_is_safe(self, command=None):
+        """Let ready Buffs preempt ordinary input, but never a Jump."""
+        if command is None:
+            command = self._command_snapshot()
+        _, _, cmd_action = command
+        jump_transaction = (
+            cmd_action == "jump"
+            or str(cmd_action).startswith("jump_")
+            # Rope mounting includes the Jump TAP used to catch the rope.
+            or str(cmd_action).startswith("rope_mount_")
+        )
+        if jump_transaction:
+            return False
+        allowed = getattr(self, "scheduled_buff_allowed", None)
+        return allowed is None or bool(allowed())
+
+    def _try_cast_ready_buff(self):
+        """Stop movement, cast one ready Buff, then reserve its recovery."""
+        if getattr(self, "is_need_force_heal", False) or \
+                not self._scheduled_buff_is_safe():
+            return False
+
+        with _input_transaction_lock:
+            if not _regular_input_allowed() or \
+                    not self._scheduled_buff_is_safe():
+                return False
+
+            now = time.time()
+            action_cooldown = self._buff_action_cooldown()
+            for i, buff_skill_key in enumerate(
+                    self.cfg.get("buff_skill", {}).get("keys", ())):
+                if not buff_skill_key:
+                    continue
+                cooldown = self.cfg["buff_skill"]["cooldown"][i]
+                if now - self.t_last_buff_cast[i] < cooldown:
+                    continue
+
+                # A Buff is an exclusive action, not a TAP inserted between
+                # a stale movement snapshot and a newly queued route jump.
+                success, _ = _invoke_input("set_state", [])
+                if not success:
+                    self._invalidate_facing_cache()
+                    return False
+                with self._ensure_command_lock():
+                    self.cmd_left_right_last = "none"
+                    self.cmd_up_down_last = "none"
+                    self.direction_held_since = None
+                    self.direction_held_generation = None
+
+                if not _regular_input_allowed():
+                    self._invalidate_facing_cache()
+                    return False
+                success, _ = _invoke_input(
+                    "tap", str(buff_skill_key).strip(), 50
+                )
+                if not success:
+                    return False
+
+                cast_at = time.time()
+                self.t_last_buff_cast[i] = cast_at
+                self.t_last_skill = cast_at
+                self.buff_recovery_until = (
+                    time.monotonic() + action_cooldown
+                )
+                logger.info(
+                    f"[Buff] Press buff skill key: '{buff_skill_key}' "
+                    f"(cooldown: {cooldown}s); hold navigation for "
+                    f"{action_cooldown:.2f}s"
+                )
+                return True
+        return False
 
     def is_game_window_active(self):
         '''
@@ -1033,6 +1105,7 @@ class KeyBoardController():
         '''
         Release all key
         '''
+        self.cancel_scheduled_directional_jump()
         release_all_keys()
         self._invalidate_facing_cache()
 
@@ -1047,6 +1120,51 @@ class KeyBoardController():
             self.cmd_up_down_last = ""
             self.direction_held_since = None
             self.direction_held_generation = None
+
+    def _record_horizontal_motion(
+            self, direction, *, now=None, generation=None):
+        """Record uninterrupted same-direction HID movement."""
+        now = time.monotonic() if now is None else float(now)
+        if generation is None:
+            generation = _input_state_generation()
+        with self._ensure_command_lock():
+            previous_direction = getattr(self, "cmd_left_right_last", "")
+            held_since = getattr(self, "direction_held_since", None)
+            held_generation = getattr(
+                self, "direction_held_generation", None
+            )
+            if direction in {"left", "right"}:
+                if previous_direction != direction or held_since is None \
+                        or held_since > now \
+                        or held_generation != generation:
+                    held_since = now
+                self.direction_held_since = held_since
+                self.direction_held_generation = generation
+                self.cached_facing = direction
+            else:
+                held_since = None
+                self.direction_held_since = None
+                self.direction_held_generation = None
+            self.cmd_left_right_last = direction
+            return held_since
+
+    def same_direction_move_seconds(self, direction=None, *, now=None):
+        """Return Hero's uninterrupted current horizontal-input duration."""
+        now = time.monotonic() if now is None else float(now)
+        generation = _input_state_generation()
+        with self._ensure_command_lock():
+            current_direction = getattr(self, "cmd_left_right_last", "")
+            held_since = getattr(self, "direction_held_since", None)
+            held_generation = getattr(
+                self, "direction_held_generation", None
+            )
+        if direction is not None and direction != current_direction:
+            return 0.0
+        if current_direction not in {"left", "right"} or \
+                held_since is None or held_since > now or \
+                held_generation != generation:
+            return 0.0
+        return now - float(held_since)
 
     def update_movement_state(self, cmd_left_right=None, cmd_up_down=None):
         """Send both movement axes as one deduplicated HID report."""
@@ -1081,28 +1199,14 @@ class KeyBoardController():
             return False
         now = time.monotonic()
         generation = _input_state_generation()
+        self._record_horizontal_motion(
+            cmd_left_right, now=now, generation=generation
+        )
         with self._ensure_command_lock():
-            previous_direction = getattr(self, "cmd_left_right_last", "")
-            held_since = getattr(self, "direction_held_since", None)
-            held_generation = getattr(
-                self, "direction_held_generation", None
-            )
-            if cmd_left_right in {"left", "right"}:
-                if previous_direction != cmd_left_right or held_since is None \
-                        or held_since > now \
-                        or held_generation != generation:
-                    self.direction_held_since = now
-                self.direction_held_generation = generation
-                self.cached_facing = cmd_left_right
-            else:
-                self.direction_held_since = None
-                self.direction_held_generation = None
-            self.cmd_left_right_last = cmd_left_right
             self.cmd_up_down_last = cmd_up_down
         return True
 
-    def perform_directional_attack(
-            self, direction, attack_key=None, recovery_delay=None):
+    def perform_directional_attack(self, direction, attack_key=None):
         """Turn, release movement, and attack as one indivisible HID action."""
         if direction not in {"left", "right"}:
             return False
@@ -1110,10 +1214,6 @@ class KeyBoardController():
             attack_key = self.attack_key
         if not isinstance(attack_key, str) or not attack_key.strip():
             return False
-        if recovery_delay is None:
-            recovery_delay = self.attack_recovery_delay
-        recovery_delay = max(0.0, float(recovery_delay))
-
         with _input_transaction_lock:
             if not _regular_input_allowed():
                 return False
@@ -1126,9 +1226,8 @@ class KeyBoardController():
                 if not success:
                     self._invalidate_facing_cache()
                     return False
+                self._record_horizontal_motion(direction)
                 with self._ensure_command_lock():
-                    self.cached_facing = direction
-                    self.cmd_left_right_last = direction
                     self.cmd_up_down_last = "none"
 
                 if self.character_turn_delay > 0:
@@ -1139,8 +1238,8 @@ class KeyBoardController():
                     self._invalidate_facing_cache()
                     return False
 
-            # Stop movement before firing and throughout the recovery. Releasing
-            # a direction does not change the cached in-game facing.
+            # Stop movement before firing. Releasing a direction does not
+            # change the cached in-game facing.
             success, _ = _invoke_input("set_state", [])
             if not success:
                 self._invalidate_facing_cache()
@@ -1166,13 +1265,6 @@ class KeyBoardController():
                 self._invalidate_facing_cache()
                 return False
 
-            # Begin recovery after the TAP call returns. Besides guaranteeing
-            # the full configured animation margin after the key release, this
-            # is conservative when an ACK is delayed or the TAP result is
-            # uncertain: no command can leak through immediately after timeout.
-            _set_input_recovery(
-                recovery_delay,
-            )
             self.t_last_skill = time.time()
             return True
 
@@ -1194,8 +1286,120 @@ class KeyBoardController():
             and cmd_up_down in {"none", "stop"}
         )
 
+    def _ensure_scheduled_jump_lock(self):
+        """Lazily initialize timer state for lightweight ``__new__`` tests."""
+        lock = getattr(self, "_scheduled_jump_lock", None)
+        if lock is None:
+            lock = threading.RLock()
+            self._scheduled_jump_lock = lock
+        if not hasattr(self, "_scheduled_jump_generation"):
+            self._scheduled_jump_generation = 0
+        if not hasattr(self, "_scheduled_jump"):
+            self._scheduled_jump = None
+        return lock
+
+    def scheduled_directional_jump_status(self, token=None):
+        """Return a copy of the current one-shot timer state."""
+        with self._ensure_scheduled_jump_lock():
+            scheduled = getattr(self, "_scheduled_jump", None)
+            if not isinstance(scheduled, dict) or (
+                    token is not None and scheduled.get("token") != token):
+                return None
+            return dict(scheduled)
+
+    def cancel_scheduled_directional_jump(self, token=None):
+        """Cancel a not-yet-fired WZ jump, optionally only for one token."""
+        with self._ensure_scheduled_jump_lock():
+            scheduled = getattr(self, "_scheduled_jump", None)
+            if not isinstance(scheduled, dict) or (
+                    token is not None and scheduled.get("token") != token):
+                return False
+            self._scheduled_jump_generation += 1
+            timer = scheduled.get("timer")
+            if timer is not None:
+                timer.cancel()
+            scheduled["state"] = "cancelled"
+            scheduled["timer"] = None
+            scheduled["finished_at"] = time.monotonic()
+            return True
+
+    def _execute_scheduled_directional_jump(self, generation, token):
+        """Timer callback; validate ownership immediately before HID output."""
+        with self._ensure_scheduled_jump_lock():
+            scheduled = getattr(self, "_scheduled_jump", None)
+            if not isinstance(scheduled, dict) or \
+                    generation != self._scheduled_jump_generation or \
+                    scheduled.get("token") != token or \
+                    scheduled.get("state") != "pending":
+                return
+            scheduled["state"] = "firing"
+            direction = scheduled["direction"]
+            cmd_left_right, cmd_up_down, cmd_action = self._command_snapshot()
+            command_still_owned = (
+                cmd_left_right == direction
+                and cmd_up_down in {"none", "stop"}
+                and cmd_action in {"none", "stop"}
+                and not getattr(self, "is_need_force_heal", False)
+            )
+            success = bool(
+                command_still_owned
+                and self.perform_directional_jump(direction)
+            )
+            finished_at = time.monotonic()
+            scheduled["state"] = "fired" if success else "failed"
+            scheduled["timer"] = None
+            scheduled["finished_at"] = finished_at
+            if success:
+                scheduled["fired_at"] = finished_at
+
+    def schedule_directional_jump(self, direction, delay_seconds, token):
+        """Schedule exactly one directional Jump independently of vision FPS."""
+        if direction not in {"left", "right"} or token is None:
+            return False
+        try:
+            delay_seconds = float(delay_seconds)
+        except (TypeError, ValueError, OverflowError):
+            return False
+        if not math.isfinite(delay_seconds) or not 0.0 <= delay_seconds <= 5.0:
+            return False
+
+        lock = self._ensure_scheduled_jump_lock()
+        with lock:
+            existing = getattr(self, "_scheduled_jump", None)
+            if isinstance(existing, dict) and \
+                    existing.get("token") == token and \
+                    existing.get("state") in {"pending", "firing", "fired"}:
+                return True
+            if isinstance(existing, dict):
+                timer = existing.get("timer")
+                if timer is not None:
+                    timer.cancel()
+
+            self._scheduled_jump_generation += 1
+            generation = self._scheduled_jump_generation
+            due_at = time.monotonic() + delay_seconds
+            timer = threading.Timer(
+                delay_seconds,
+                self._execute_scheduled_directional_jump,
+                args=(generation, token),
+            )
+            timer.daemon = True
+            self._scheduled_jump = {
+                "token": token,
+                "direction": direction,
+                "state": "pending",
+                "scheduled_at": time.monotonic(),
+                "due_at": due_at,
+                "timer": timer,
+            }
+            # Install the already-arbitrated movement snapshot before a
+            # zero-delay timer can inspect it or send the Jump TAP.
+            self.set_command(f"{direction} none none")
+            timer.start()
+            return True
+
     def perform_directional_jump(self, direction):
-        """Build any missing horizontal run-up, then jump without releasing it."""
+        """Hold the requested direction and jump immediately."""
         if direction not in {"left", "right"}:
             return False
 
@@ -1203,47 +1407,30 @@ class KeyBoardController():
             if not _regular_input_allowed():
                 return False
 
-            # The horizontal direction stays held through and after the TAP,
-            # preserving the momentum needed to reach a nearby rope.
+            # Keep horizontal input held through and after the immediate TAP.
             success, _ = _invoke_input("set_state", [direction])
             if not success:
                 self._invalidate_facing_cache()
                 return False
 
             now = time.monotonic()
-            generation = _input_state_generation()
-            with self._ensure_command_lock():
-                previous_direction = getattr(
-                    self, "cmd_left_right_last", ""
-                )
-                held_since = getattr(self, "direction_held_since", None)
-                held_generation = getattr(
-                    self, "direction_held_generation", None
-                )
-                if (
-                    previous_direction != direction
-                    or held_since is None
-                    or held_since > now
-                    or held_generation != generation
-                ):
-                    held_since = now
-                self.direction_held_since = held_since
-                self.direction_held_generation = generation
-                self.cached_facing = direction
-                self.cmd_left_right_last = direction
-                self.cmd_up_down_last = "none"
-
-            required_runup = max(
-                0.0,
-                float(getattr(self, "directional_jump_runup_ms", 180))
-                / 1000.0,
+            self._record_horizontal_motion(
+                direction,
+                now=now,
+                generation=_input_state_generation(),
             )
-            remaining_runup = max(0.0, required_runup - (now - held_since))
-            if remaining_runup > 0.0:
-                time.sleep(remaining_runup)
+            same_direction_seconds = self.same_direction_move_seconds(
+                direction, now=now
+            )
+            with self._ensure_command_lock():
+                self.cmd_up_down_last = "none"
+            logger.debug(
+                "[directional-jump] Immediate TAP after "
+                f"{same_direction_seconds:.3f}s moving {direction}"
+            )
 
-            # F1 pause or capture loss can occur during the run-up. Never send
-            # a delayed jump after regular input has been suspended.
+            # STATE can block on the ESP32 acknowledgement. Never send Jump
+            # after input was suspended while that request was in flight.
             if not _regular_input_allowed():
                 self._invalidate_facing_cache()
                 return False
@@ -1375,23 +1562,12 @@ class KeyBoardController():
                 self._invalidate_facing_cache()
                 return False
             now = time.monotonic()
-            generation = _input_state_generation()
+            held_since = self._record_horizontal_motion(
+                direction,
+                now=now,
+                generation=_input_state_generation(),
+            )
             with self._ensure_command_lock():
-                previous_direction = getattr(
-                    self, "cmd_left_right_last", ""
-                )
-                held_since = getattr(self, "direction_held_since", None)
-                held_generation = getattr(
-                    self, "direction_held_generation", None
-                )
-                if previous_direction != direction or held_since is None \
-                        or held_since > now \
-                        or held_generation != generation:
-                    held_since = now
-                self.direction_held_since = held_since
-                self.direction_held_generation = generation
-                self.cached_facing = direction
-                self.cmd_left_right_last = direction
                 self.cmd_up_down_last = "none"
 
             required_runup = max(
@@ -1571,27 +1747,32 @@ class KeyBoardController():
                     continue
                 was_input_active = True
 
-                # No HID reports may be sent during the attack animation. Drop
-                # no commands here: the main loop keeps replacing the command
-                # snapshot, and the newest one is applied when recovery ends.
-                if input_recovery_remaining() > 0.0:
-                    self.limit_fps()
-                    continue
-
                 cmd_left_right, cmd_up_down, cmd_action = \
                     self._command_snapshot()
 
-                # Forced healing takes precedence as soon as the attack
-                # recovery ends. It is still blocked by the recovery gate
-                # above, so no potion HID report can interrupt an animation.
+                # Forced healing takes precedence over the current command.
                 if self.is_need_force_heal:
                     cmd_action = "add_hp"
                     with self._ensure_command_lock():
                         self.cmd_action = cmd_action
 
-                # Rope climbing owns the frame even though it has no TAP. This
-                # prevents a buff from interrupting persistent direction/Up
-                # while the engine waits for the character to finish climbing.
+                # Buff animations can reject Jump/Up even after their HID TAP
+                # has completed. Keep the latest route command queued, release
+                # movement, and execute it only after the configured recovery.
+                if not self.is_need_force_heal and \
+                        self._buff_recovery_active():
+                    self.update_movement_state("none", "none")
+                    self.limit_fps()
+                    continue
+
+                # A due Buff outranks walking, attacking, and an established
+                # rope climb. _scheduled_buff_is_safe vetoes current or timed
+                # Jump transactions, so their launch timing remains atomic.
+                if self._try_cast_ready_buff():
+                    self.limit_fps()
+                    continue
+
+                # With no due Buff, preserve persistent Up while climbing.
                 if cmd_action == "rope_hold":
                     self.update_movement_state(
                         cmd_left_right, cmd_up_down
@@ -1599,24 +1780,17 @@ class KeyBoardController():
                     self.limit_fps()
                     continue
 
-                # Direction and attack must remain paired. This branch runs
-                # before buffs, movement, or healing and owns the HID output
-                # transaction until TAP has been sent.
+                # If no Buff or Jump owns the frame, keep direction and attack
+                # paired until the HID TAP has been sent.
                 if cmd_action in {
                         "attack", "directional_aoe", "power_knockback"} and \
                         self.cfg["bot"]["attack"] == "directional":
                     attack_key = None
-                    recovery_delay = None
                     if cmd_action == "directional_aoe":
                         attack_key = getattr(
                             self,
                             "directional_aoe_key",
                             self.cfg.get("key", {}).get("aoe_skill", ""),
-                        )
-                        recovery_delay = getattr(
-                            self,
-                            "directional_aoe_recovery_delay",
-                            self.attack_recovery_delay,
                         )
                     elif cmd_action == "power_knockback":
                         attack_key = getattr(
@@ -1626,15 +1800,9 @@ class KeyBoardController():
                                 "power_knockback", ""
                             ),
                         )
-                        recovery_delay = getattr(
-                            self,
-                            "power_knockback_recovery_delay",
-                            self.attack_recovery_delay,
-                        )
                     if self.perform_directional_attack(
                             cmd_left_right,
                             attack_key=attack_key,
-                            recovery_delay=recovery_delay,
                     ):
                         self._consume_action(cmd_action)
                     self.limit_fps()
@@ -1674,9 +1842,9 @@ class KeyBoardController():
                     self.limit_fps()
                     continue
 
-                # Orange/cyan route points request a running jump. If movement
-                # was just stopped or reversed, build the configured minimum
-                # horizontal momentum before the jump TAP.
+                # Orange/cyan route points request an immediate directional
+                # jump. Continuous same-direction movement is tracked, but
+                # never converted into a stale-coordinate run-up delay.
                 if self.is_directional_jump_command(
                     cmd_left_right, cmd_up_down, cmd_action
                 ):
@@ -1696,22 +1864,6 @@ class KeyBoardController():
                     self.limit_fps()
                     continue
 
-                # Buff skill. Do not delay a pending forced heal.
-                if not self.is_need_force_heal:
-                    for i, buff_skill_key in enumerate(
-                            self.cfg["buff_skill"]["keys"]):
-                        if not buff_skill_key:
-                            continue
-                        cooldown = self.cfg["buff_skill"]["cooldown"][i]
-                        if time.time() - self.t_last_buff_cast[i] >= cooldown and \
-                            time.time() - self.t_last_skill > self.cfg["buff_skill"]["action_cooldown"]:
-                            if press_key(buff_skill_key):
-                                logger.info(f"[Buff] Press buff skill key: '{buff_skill_key}' (cooldown: {cooldown}s)")
-                                # Only consume cooldown after ESP32 acknowledged it.
-                                self.t_last_buff_cast[i] = time.time()
-                                self.t_last_skill = time.time()
-                            break
-
                 # Movement is one atomic STATE report. The client suppresses an
                 # unchanged state, so the 30 FPS controller loop creates no
                 # repeated serial traffic while a direction remains held.
@@ -1728,6 +1880,9 @@ class KeyBoardController():
                         self._consume_action(cmd_action)
                 elif cmd_action == "attack":
                     if press_key(self.attack_key):
+                        with self._ensure_command_lock():
+                            self.direction_held_since = None
+                            self.direction_held_generation = None
                         self.t_last_skill = time.time()
                         self._consume_action(cmd_action)
                 elif cmd_action == "add_hp":

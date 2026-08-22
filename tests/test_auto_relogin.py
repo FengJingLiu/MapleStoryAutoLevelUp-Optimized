@@ -170,6 +170,7 @@ class AutoReloginTests(unittest.TestCase):
             is_terminated=False,
             is_need_force_heal=False,
             set_command=Mock(),
+            set_minimap_available=Mock(),
             release_all_key=Mock(),
             suspend_automation_for_session_recovery=Mock(),
             resume_automation_after_session_recovery=Mock(),
@@ -269,7 +270,7 @@ class AutoReloginTests(unittest.TestCase):
                 bot.kb.press_session_recovery_key.assert_not_called()
                 bot.kb.click_session_recovery_point.assert_not_called()
 
-    def test_reactive_recovery_uses_only_minimap_absence_as_its_gate(self):
+    def test_reactive_recovery_requires_stable_ocr_after_minimap_absence(self):
         bot = self.make_reactive_bot()
         bot._visible_page = "disconnect"
         bot._auto_relogin_current_minimap_structure.return_value = (
@@ -286,21 +287,33 @@ class AutoReloginTests(unittest.TestCase):
         self.assertTrue(self.show_and_check(
             bot, "disconnect", frame_token=2, now=10.1
         ))
-        self.assertEqual(bot._auto_relogin_state, "confirming")
-        self.assertEqual(bot._auto_relogin_pending_page, "disconnect")
-        bot.kb.suspend_automation_for_session_recovery.assert_called_once_with()
+        self.assertEqual(bot._auto_relogin_state, "idle")
+        self.assertEqual(bot._auto_relogin_entry_page, "disconnect")
+        bot.kb.set_command.assert_called_with("none none none")
+        bot.kb.set_minimap_available.assert_called_with(False)
+        bot.kb.suspend_automation_for_session_recovery.assert_not_called()
 
-    def test_reactive_recovery_waits_forever_on_unknown_frames(self):
+        self.assertTrue(self.show_and_check(
+            bot, "disconnect", frame_token=3, now=10.2
+        ))
+        self.assertEqual(bot._auto_relogin_state, "waiting_page")
+        bot.kb.suspend_automation_for_session_recovery.assert_called_once_with()
+        bot.kb.press_session_recovery_key.assert_called_once_with("enter")
+
+    def test_reactive_unknown_frame_yields_to_saved_minimap_pipeline(self):
         bot = self.make_reactive_bot()
 
-        self.assertTrue(self.show_and_check(
+        self.assertFalse(self.show_and_check(
             bot, None, frame_token=1, now=10.0
         ))
-        self.assertTrue(self.show_and_check(
+        self.assertFalse(self.show_and_check(
             bot, None, frame_token=2, now=10000.0
         ))
 
-        self.assertEqual(bot._auto_relogin_state, "waiting_page")
+        self.assertEqual(bot._auto_relogin_state, "idle")
+        bot.kb.set_command.assert_not_called()
+        bot.kb.set_minimap_available.assert_called_with(True)
+        bot.kb.suspend_automation_for_session_recovery.assert_not_called()
         bot.kb.press_session_recovery_key.assert_not_called()
         bot.kb.click_session_recovery_point.assert_not_called()
 
@@ -361,7 +374,8 @@ class AutoReloginTests(unittest.TestCase):
         self.assertTrue(self.show_and_check(
             bot, "world", frame_token=2, now=30.1
         ))
-        self.assertEqual(bot._auto_relogin_pending_page, "world")
+        self.assertEqual(bot._auto_relogin_state, "idle")
+        self.assertEqual(bot._auto_relogin_entry_page, "world")
         self.assertTrue(self.show_and_check(
             bot, "world", frame_token=3, now=30.2
         ))
@@ -374,13 +388,16 @@ class AutoReloginTests(unittest.TestCase):
         bot._auto_relogin_health_was_enabled = True
 
         self.assertTrue(self.show_and_check(
-            bot, None, frame_token=1, now=40.0
+            bot, "disconnect", frame_token=1, now=40.0
+        ))
+        self.assertTrue(self.show_and_check(
+            bot, "disconnect", frame_token=2, now=40.1
         ))
         bot._auto_relogin_current_minimap_structure.return_value = (
             1, 1, 100, 60
         )
         self.assertTrue(self.show_and_check(
-            bot, None, frame_token=2, now=40.1
+            bot, None, frame_token=3, now=40.2
         ))
 
         self.assertEqual(bot._auto_relogin_state, "idle")
@@ -1971,6 +1988,54 @@ class AutoReloginTests(unittest.TestCase):
             bot._auto_relogin_minimap_structure_valid((100, 100, 62, 32))
         )
         self.assertFalse(bot._auto_relogin_minimap_structure_valid(None))
+
+    def test_saved_minimap_hero_dot_recovers_from_border_scan_miss(self):
+        bot = MapleStoryAutoBot.__new__(MapleStoryAutoBot)
+        bot.minimap_geometry = {
+            "frame_size": (200, 400),
+            "minimap_rect": (10, 20, 60, 30),
+        }
+        bot.cfg = {
+            "minimap": {
+                "player_color": [136, 255, 255],
+                "player_color_tolerance": 0,
+                "player_min_component_area": 2,
+            }
+        }
+        bot.img_frame = np.zeros((200, 400, 3), dtype=np.uint8)
+        bot.img_frame[25:27, 30:32] = (136, 255, 255)
+
+        with patch(
+            "src.engine.MapleStoryAutoLevelUp.get_minimap_loc_size",
+            return_value=None,
+        ):
+            self.assertEqual(
+                bot._auto_relogin_current_minimap_structure(),
+                (9, 19, 62, 32),
+            )
+
+    def test_saved_minimap_crop_without_hero_dot_is_not_gameplay_evidence(self):
+        bot = MapleStoryAutoBot.__new__(MapleStoryAutoBot)
+        bot.minimap_geometry = {
+            "frame_size": (200, 400),
+            "minimap_rect": (10, 20, 60, 30),
+        }
+        bot.cfg = {
+            "minimap": {
+                "player_color": [136, 255, 255],
+                "player_color_tolerance": 0,
+                "player_min_component_area": 2,
+            }
+        }
+        bot.img_frame = np.zeros((200, 400, 3), dtype=np.uint8)
+
+        with patch(
+            "src.engine.MapleStoryAutoLevelUp.get_minimap_loc_size",
+            return_value=None,
+        ):
+            self.assertIsNone(
+                bot._auto_relogin_current_minimap_structure()
+            )
 
 
 if __name__ == "__main__":

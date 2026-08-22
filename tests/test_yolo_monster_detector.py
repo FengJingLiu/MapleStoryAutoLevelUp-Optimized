@@ -8,10 +8,12 @@ import cv2
 import numpy as np
 
 from src.engine.MapleStoryAutoLevelUp import MapleStoryAutoBot
+from src.navigation.wz_geometry import Point
 from src.vision.YoloMonsterDetector import (
     YoloMonsterDetector,
     resolve_model_path,
 )
+from src.vision.auto_relogin_ocr import RapidOcrError
 
 
 class FakeYoloModel:
@@ -94,6 +96,29 @@ class YoloMonsterDetectorTests(unittest.TestCase):
         self.assertIs(model.predict_calls[0]["source"], frame)
         self.assertEqual(model.predict_calls[0]["conf"], 0.4)
 
+    def test_preprocess_resizes_for_inference_and_maps_boxes_to_source(self):
+        detector, model = self.build_detector(
+            boxes=[
+                ((10, 10, 30, 40), 0.8, 3),
+            ],
+            preprocess_size=(50, 60),
+        )
+        frame = np.zeros((100, 120, 3), dtype=np.uint8)
+
+        detections = detector.detect(
+            frame,
+            roi=(15, 15, 61, 81),
+        )
+
+        self.assertEqual(model.predict_calls[0]["source"].shape, (50, 60, 3))
+        self.assertIsNot(model.predict_calls[0]["source"], frame)
+        self.assertEqual(detections[0]["position"], (20, 20))
+        self.assertEqual(detections[0]["size"], (60, 40))
+
+    def test_preprocess_size_rejects_invalid_values(self):
+        with self.assertRaisesRegex(ValueError, "preprocess_size"):
+            self.build_detector(preprocess_size=(768, 0))
+
     def test_warmup_uses_runtime_shape_and_only_runs_once(self):
         detector, model = self.build_detector()
 
@@ -104,6 +129,18 @@ class YoloMonsterDetectorTests(unittest.TestCase):
         self.assertEqual(
             model.predict_calls[0]["source"].shape,
             (700, 1296, 3),
+        )
+
+    def test_warmup_uses_configured_preprocess_shape(self):
+        detector, model = self.build_detector(
+            preprocess_size=(768, 1366),
+        )
+
+        detector.warmup(frame_size=(3840, 2160))
+
+        self.assertEqual(
+            model.predict_calls[0]["source"].shape,
+            (768, 1366, 3),
         )
 
     def test_one_prediction_cache_serves_hero_and_mob_classes(self):
@@ -392,83 +429,108 @@ class YoloMonsterEngineIntegrationTests(unittest.TestCase):
         self.assertEqual(bot.pending_overhead_marker_count, 0)
 
     @staticmethod
-    def _make_pet_filter_bot(frame, pet_template):
+    def _make_pet_filter_bot(frame):
         bot = MapleStoryAutoBot.__new__(MapleStoryAutoBot)
         bot.cfg = {
             "nametag": {
-                "enable": True,
+                "enable": False,
                 "pet": {
                     "enable": True,
                     "filter_yolo_mob": True,
-                    "yolo_name_diff_thres": 0.10,
-                    "yolo_name_vertical_gap": 3,
-                    "yolo_name_search_tolerance": [14, 8],
-                    "yolo_name_max_gap": 12,
+                    "yolo_ocr_text": "花蘑菇仔",
+                    "yolo_ocr_min_score": 0.8,
+                    "yolo_ocr_box_threshold": 0.2,
+                    "yolo_ocr_max_box_size": [45, 40],
+                    "yolo_ocr_max_hero_distance": [100, 60],
                 },
             },
-            "bot": {"mode": "normal"},
+            "game_window": {"coordinate_reference_size": [700, 1296]},
         }
         bot.img_frame = frame
-        bot.img_frame_gray = frame[:, :, 0]
         bot.img_frame_debug = frame.copy()
-        bot.img_nametag_pet = cv2.cvtColor(
-            pet_template, cv2.COLOR_GRAY2BGR
-        )
-        bot.img_nametag_pet_gray = pet_template
+        bot.loc_player = (100, 60)
+        bot.screen_player_location_valid = True
+        bot._pet_mob_ocr_locator = Mock()
+        bot._last_pet_mob_ocr_error = None
         return bot
 
-    def test_pet_name_directly_below_yolo_box_filters_that_mob(self):
-        frame = np.zeros((120, 180, 3), dtype=np.uint8)
-        pet_name = np.full((10, 42), 180, dtype=np.uint8)
-        pet_name[2:8, 5:37] = 240
-        # Detection center x=90; centered pet name starts at x=69.
-        frame[73:83, 69:111] = pet_name[:, :, None]
-        bot = self._make_pet_filter_bot(frame, pet_name)
-        pet_detection = {
+    @staticmethod
+    def _small_nearby_mob():
+        return {
             "name": "mob",
-            "position": (70, 30),
-            "size": (40, 40),
+            "position": (115, 45),
+            "size": (30, 35),
             "confidence": 0.8,
             "score": 0.2,
         }
+
+    def test_exact_pet_ocr_below_small_nearby_box_filters_that_mob(self):
+        frame = np.zeros((200, 400, 3), dtype=np.uint8)
+        bot = self._make_pet_filter_bot(frame)
+        bot._pet_mob_ocr_locator.locate.return_value = SimpleNamespace(
+            score=0.91,
+            box=((105, 74), (165, 74), (165, 88), (105, 88)),
+        )
+        pet_detection = self._small_nearby_mob()
 
         filtered = bot.filter_pet_yolo_detections([pet_detection])
 
         self.assertEqual(filtered, [])
+        args, kwargs = bot._pet_mob_ocr_locator.locate.call_args
+        self.assertIs(args[0], frame)
+        self.assertEqual(args[2], ("花蘑菇仔",))
+        self.assertEqual(kwargs["match_mode"], "exact")
+        self.assertEqual(kwargs["min_score"], 0.8)
 
-    def test_same_pet_name_elsewhere_does_not_filter_real_mob(self):
-        frame = np.zeros((120, 180, 3), dtype=np.uint8)
-        pet_name = np.full((10, 42), 180, dtype=np.uint8)
-        pet_name[2:8, 5:37] = 240
-        frame[90:100, 10:52] = pet_name[:, :, None]
-        bot = self._make_pet_filter_bot(frame, pet_name)
-        real_mob = {
-            "name": "mob",
-            "position": (70, 30),
-            "size": (40, 40),
-            "confidence": 0.8,
-            "score": 0.2,
-        }
-
-        filtered = bot.filter_pet_yolo_detections([real_mob])
-
-        self.assertEqual(filtered, [real_mob])
-
-    def test_pet_filter_is_inactive_without_a_loaded_pet_name(self):
-        frame = np.zeros((120, 180, 3), dtype=np.uint8)
-        bot = self._make_pet_filter_bot(
-            frame, np.full((10, 42), 180, dtype=np.uint8)
+    def test_pet_ocr_runs_only_for_small_boxes_near_hero(self):
+        frame = np.zeros((200, 400, 3), dtype=np.uint8)
+        bot = self._make_pet_filter_bot(frame)
+        bot._pet_mob_ocr_locator.locate.return_value = SimpleNamespace(
+            score=0.91,
+            box=((105, 74), (165, 74), (165, 88), (105, 88)),
         )
-        bot.img_nametag_pet = None
-        mob = {
-            "name": "mob",
-            "position": (70, 30),
-            "size": (40, 40),
-            "confidence": 0.8,
-            "score": 0.2,
-        }
+        nearby_small = self._small_nearby_mob()
+        far_small = {**nearby_small, "position": (260, 45)}
+        nearby_large = {**nearby_small, "size": (50, 55)}
+
+        filtered = bot.filter_pet_yolo_detections([
+            nearby_small,
+            far_small,
+            nearby_large,
+        ])
+
+        self.assertEqual(filtered, [far_small, nearby_large])
+        self.assertEqual(bot._pet_mob_ocr_locator.locate.call_count, 1)
+
+    def test_small_nearby_real_mob_is_kept_without_exact_pet_ocr(self):
+        frame = np.zeros((200, 400, 3), dtype=np.uint8)
+        bot = self._make_pet_filter_bot(frame)
+        bot._pet_mob_ocr_locator.locate.return_value = None
+        real_mob = self._small_nearby_mob()
+
+        self.assertEqual(
+            bot.filter_pet_yolo_detections([real_mob]),
+            [real_mob],
+        )
+
+    def test_pet_ocr_failure_keeps_small_nearby_mob(self):
+        frame = np.zeros((200, 400, 3), dtype=np.uint8)
+        bot = self._make_pet_filter_bot(frame)
+        bot._pet_mob_ocr_locator.locate.side_effect = RapidOcrError(
+            "engine unavailable"
+        )
+        mob = self._small_nearby_mob()
 
         self.assertEqual(bot.filter_pet_yolo_detections([mob]), [mob])
+
+    def test_pet_ocr_is_inactive_without_a_valid_hero_location(self):
+        frame = np.zeros((200, 400, 3), dtype=np.uint8)
+        bot = self._make_pet_filter_bot(frame)
+        bot.screen_player_location_valid = False
+        mob = self._small_nearby_mob()
+
+        self.assertEqual(bot.filter_pet_yolo_detections([mob]), [mob])
+        bot._pet_mob_ocr_locator.locate.assert_not_called()
 
     def test_normal_detection_uses_full_camera_and_attack_roi(self):
         bot = MapleStoryAutoBot.__new__(MapleStoryAutoBot)
@@ -622,6 +684,138 @@ class YoloMonsterEngineIntegrationTests(unittest.TestCase):
             (120, 30),
         )
 
+    def test_directional_targets_behind_wz_terrain_are_filtered(self):
+        bot = MapleStoryAutoBot.__new__(MapleStoryAutoBot)
+        bot.cfg = {
+            "bot": {"attack": "directional"},
+            "directional_attack": {"range_x": 120, "range_y": 100},
+            "monster_detect": {
+                "backend": "yolo",
+                "max_mob_area_trigger": 100,
+            },
+        }
+        bot.img_frame = np.zeros((100, 240, 3), dtype=np.uint8)
+        bot.loc_player = (100, 50)
+        bot.monsters_info = {}
+        blocked = {
+            "name": "mob",
+            "position": (130, 30),
+            "size": (40, 40),
+            "confidence": 0.9,
+        }
+        visible = {
+            "name": "mob",
+            "position": (180, 30),
+            "size": (40, 40),
+            "confidence": 0.9,
+        }
+        bot.monsters = [blocked, visible]
+        bot._projectile_terrain_blocker = Mock(
+            side_effect=lambda monster: (
+                object() if monster is blocked else None
+            )
+        )
+
+        self.assertEqual(
+            bot.get_monsters_in_attack_range(is_left=False),
+            [visible],
+        )
+        self.assertEqual(
+            bot._projectile_terrain_blocker.call_args_list,
+            [unittest.mock.call(blocked), unittest.mock.call(visible)],
+        )
+
+    def test_projectile_ray_converts_capture_pixels_with_wz_registration_scale(
+            self):
+        bot = MapleStoryAutoBot.__new__(MapleStoryAutoBot)
+        wz_map = SimpleNamespace(
+            first_horizontal_projectile_blocker=Mock(return_value=None)
+        )
+        bot.cfg = {
+            "wz_navigation": {
+                "projectile_terrain_check": True,
+                "projectile_height_wz": 30,
+                "projectile_clearance_wz": 8,
+            }
+        }
+        bot.wz_navigation = SimpleNamespace(
+            active=True,
+            jump_active=False,
+            projection=SimpleNamespace(
+                navigation_to_world=Mock(return_value=Point(100, 200))
+            ),
+            registration=SimpleNamespace(scale_x=2.8, scale_y=2.7),
+            wz_map=wz_map,
+            motion_profile=SimpleNamespace(character_half_width_wz=15),
+        )
+        bot.is_on_ladder = False
+        bot.loc_player_global = (50, 60)
+        bot.loc_player = (1000, 500)
+        bot.img_frame_debug = None
+        monster = {
+            "name": "mob",
+            "position": (1270, 450),
+            "size": (100, 100),
+        }
+
+        self.assertIsNone(bot._projectile_terrain_blocker(monster))
+
+        args, kwargs = wz_map.first_horizontal_projectile_blocker.call_args
+        self.assertEqual(args[0], Point(100, 170))
+        self.assertAlmostEqual(args[1], 100 + 320 / 2.8)
+        self.assertEqual(kwargs, {"clearance": 8.0, "origin_margin": 15.0})
+
+    def test_forest_floor_p1_tree_walls_do_not_block_projectiles(self):
+        bot = MapleStoryAutoBot.__new__(MapleStoryAutoBot)
+        decorative_tree = SimpleNamespace(
+            kind="wall",
+            geometry_id="wall:1:1:104",
+            point=Point(388, 60),
+        )
+        real_wall = SimpleNamespace(
+            kind="wall",
+            geometry_id="wall:9:9:999",
+            point=Point(450, 60),
+        )
+        wz_map = SimpleNamespace(
+            first_horizontal_projectile_blocker=Mock(
+                side_effect=(decorative_tree, real_wall)
+            )
+        )
+        bot.cfg = {
+            "wz_navigation": {
+                "projectile_terrain_check": True,
+                "projectile_height_wz": 30,
+                "projectile_clearance_wz": 8,
+            }
+        }
+        bot.wz_navigation = SimpleNamespace(
+            map_id="100040110",
+            active=True,
+            jump_active=False,
+            projection=SimpleNamespace(
+                navigation_to_world=Mock(return_value=Point(453, 98))
+            ),
+            registration=SimpleNamespace(scale_x=2.8, scale_y=2.8),
+            wz_map=wz_map,
+            motion_profile=SimpleNamespace(character_half_width_wz=15),
+        )
+        bot.is_on_ladder = False
+        bot.loc_player_global = (67, 333)
+        bot.loc_player = (1000, 500)
+        bot.img_frame_debug = None
+        monster = {
+            "name": "mob",
+            "position": (700, 450),
+            "size": (100, 100),
+        }
+
+        self.assertIsNone(bot._projectile_terrain_blocker(monster))
+        self.assertIs(
+            bot._projectile_terrain_blocker(monster),
+            real_wall,
+        )
+
     def test_template_backend_keeps_smallest_template_overlap_threshold(self):
         bot = MapleStoryAutoBot.__new__(MapleStoryAutoBot)
         bot.cfg = {
@@ -687,6 +881,7 @@ class YoloMonsterEngineIntegrationTests(unittest.TestCase):
                 cfg["monster_detect"]
             ),
             model_path="model.pt",
+            preprocess_size=None,
             imgsz=1024,
             confidence=0.4,
             device="cpu",

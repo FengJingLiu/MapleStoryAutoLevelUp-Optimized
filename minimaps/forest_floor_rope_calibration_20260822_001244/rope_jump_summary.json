@@ -1,0 +1,30 @@
+{
+  "total_attempts": 12,
+  "successes": 6,
+  "failures": 6,
+  "rope_x_estimate": 164.0,
+  "approaches": {
+    "right": {
+      "successful_attempts": 6,
+      "failed_attempts": 6,
+      "excluded_not_moving_attempts": 0,
+      "observed_success_window_px": [
+        8.0,
+        14.0
+      ],
+      "recommended_window_px": [
+        10.25,
+        14.0
+      ],
+      "failed_lead_distances_px": [
+        6.0,
+        6.0,
+        6.0,
+        17.0,
+        17.0,
+        17.0
+      ],
+      "ready": true
+    }
+  }
+}

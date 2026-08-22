@@ -465,6 +465,9 @@ class MainWindow(QMainWindow):
         # Load map list from directory
         self.list_widget_maps = QListWidget()
         self.list_widget_maps.itemClicked.connect(self.on_map_selected)
+        auto_item = QListWidgetItem("__auto_wz__ (WZ 自动识别)")
+        auto_item.setData(Qt.UserRole, "__auto_wz__")
+        self.list_widget_maps.addItem(auto_item)
         minimap_dir = "minimaps"
         for name in os.listdir(minimap_dir):
             if name.startswith("."):
@@ -573,7 +576,6 @@ class MainWindow(QMainWindow):
 
         gbox.setLayout(layout)
         return gbox
-        logger.info(f"[UI] Map selected: {map_name}")
 
     def create_target_program_gbox(self):
         '''
@@ -789,14 +791,17 @@ class MainWindow(QMainWindow):
         index = self.attack_mode.currentIndex()  # Get selected index
         if index == 0:
             atk_cfg = self.cfg["directional_attack"]
+            self.attack_cooldown.setText("0")
+            self.attack_cooldown.setEnabled(False)
         elif index == 1:
             atk_cfg = self.cfg["aoe_skill"]
+            self.attack_cooldown.setText(str(atk_cfg["cooldown"]))
+            self.attack_cooldown.setEnabled(True)
         else:
             atk_cfg = None
 
         if atk_cfg:
             self.attack_range_x.setText(str(atk_cfg["range_x"]))
-            self.attack_cooldown.setText(str(atk_cfg["cooldown"]))
             self.attack_range_y.setText(str(atk_cfg["range_y"]))
 
     def apply_config_to_ui(self):
@@ -805,11 +810,14 @@ class MainWindow(QMainWindow):
         if self.cfg["bot"]["attack"] == "directional":
             self.attack_mode.setCurrentIndex(0)
             atk_cfg = self.cfg["directional_attack"]
+            self.attack_cooldown.setText("0")
+            self.attack_cooldown.setEnabled(False)
         elif self.cfg["bot"]["attack"] == "aoe_skill":
             self.attack_mode.setCurrentIndex(1)
             atk_cfg = self.cfg["aoe_skill"]
+            self.attack_cooldown.setText(str(atk_cfg["cooldown"]))
+            self.attack_cooldown.setEnabled(True)
         self.attack_range_x.setText(str(atk_cfg["range_x"]))
-        self.attack_cooldown.setText(str(atk_cfg["cooldown"]))
         self.attack_range_y.setText(str(atk_cfg["range_y"]))
         self.power_knockback_distance.setText(str(
             self.cfg.get("power_knockback", {}).get(
@@ -916,12 +924,18 @@ class MainWindow(QMainWindow):
         logger.info(f"[UI] user change tab to {tab_name}")
 
     def on_map_selected(self, item):
-        # Parse English name from item text
-        map_name = item.text().split(" (")[0]
+        # UserRole is authoritative for both recorded maps and virtual WZ mode.
+        map_name = item.data(Qt.UserRole) or item.text().split(" (")[0]
         self.selected_map = map_name
 
-        map_path = os.path.join("minimaps", map_name)
-        self.label_map_info.setText(f"Selected map: {map_path}")
+        if map_name == "__auto_wz__":
+            self.label_map_info.setText(
+                "Selected map: automatic WZ minimap recognition"
+            )
+        else:
+            map_path = os.path.join("minimaps", map_name)
+            self.label_map_info.setText(f"Selected map: {map_path}")
+        logger.info(f"[UI] Map selected: {map_name}")
 
     def on_mode_checkbox_toggle(self, toggled_checkbox):
         '''
@@ -972,6 +986,9 @@ class MainWindow(QMainWindow):
     def toggle_start_ui(self):
         if self.button_start_pause.isChecked(): # When start autobot
             self.update_cfg_from_main_ui()
+            # Do not leave the prior legacy route pixmap visible while WZ
+            # bootstrap/localization is producing its first temporary path.
+            clear_debug_canvas(self.route_map_canvas)
 
             # Save UI config to tmp file
             cfg_path = "config/.config_tmp.yaml"
@@ -1045,7 +1062,7 @@ class MainWindow(QMainWindow):
             self.cfg["key"]["directional_attack"] = self.basic_attack_key.get_key()
             self.cfg["directional_attack"]["range_x"] = int(self.attack_range_x.text())
             self.cfg["directional_attack"]["range_y"] = int(self.attack_range_y.text())
-            self.cfg["directional_attack"]["cooldown"] = float(self.attack_cooldown.text())
+            self.cfg["directional_attack"].pop("cooldown", None)
         elif self.attack_mode.currentText() == "AOE Skill":
             self.cfg["bot"]["attack"] = "aoe_skill"
             self.cfg["key"]["aoe_skill"] = self.basic_attack_key.get_key()

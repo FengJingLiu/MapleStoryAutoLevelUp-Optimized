@@ -4,6 +4,7 @@ from pathlib import Path
 import sys
 from time import perf_counter
 
+import cv2
 import numpy as np
 
 
@@ -55,6 +56,7 @@ class YoloMonsterDetector:
         model_path,
         *,
         imgsz=1024,
+        preprocess_size=None,
         confidence=0.4,
         iou=0.7,
         max_det=100,
@@ -70,6 +72,7 @@ class YoloMonsterDetector:
             )
 
         self.imgsz = int(imgsz)
+        self.preprocess_size = self._parse_preprocess_size(preprocess_size)
         self.confidence = float(confidence)
         self.iou = float(iou)
         self.max_det = int(max_det)
@@ -110,6 +113,7 @@ class YoloMonsterDetector:
         self.config_signature = (
             str(self.model_path),
             self.imgsz,
+            self.preprocess_size,
             self.confidence,
             self.iou,
             self.max_det,
@@ -131,6 +135,20 @@ class YoloMonsterDetector:
             return "cpu"
         return 0 if torch.cuda.is_available() else "cpu"
 
+    @staticmethod
+    def _parse_preprocess_size(value):
+        """Return an optional ``(height, width)`` inference source size."""
+        if value is None:
+            return None
+        if not isinstance(value, (list, tuple)) or len(value) != 2:
+            raise ValueError(
+                "YOLO preprocess_size must be [height, width]"
+            )
+        height, width = (int(item) for item in value)
+        if height <= 0 or width <= 0:
+            raise ValueError("YOLO preprocess_size values must be positive")
+        return height, width
+
     @classmethod
     def signature_from_config(cls, config):
         """Return the runtime signature without loading the model."""
@@ -140,6 +158,7 @@ class YoloMonsterDetector:
         return (
             str(model_path),
             int(config.get("imgsz", 1024)),
+            cls._parse_preprocess_size(config.get("preprocess_size")),
             float(config.get("confidence", 0.4)),
             float(config.get("iou", 0.7)),
             int(config.get("max_det", 100)),
@@ -152,13 +171,14 @@ class YoloMonsterDetector:
     def inference_signature_from_config(cls, config):
         """Return settings that determine whether one model can be shared."""
         signature = cls.signature_from_config(config)
-        return signature[:2] + signature[3:7]
+        return signature[:3] + signature[4:8]
 
     @classmethod
     def from_config(cls, config):
         return cls(
             config["model_path"],
             imgsz=config.get("imgsz", 1024),
+            preprocess_size=config.get("preprocess_size"),
             confidence=config.get("confidence", 0.4),
             iou=config.get("iou", 0.7),
             max_det=config.get("max_det", 100),
@@ -176,6 +196,27 @@ class YoloMonsterDetector:
                 f"YOLO class {class_name!r} is missing; classes={self.names}"
             )
         return class_id
+
+    def _prepare_inference_frame(self, frame):
+        """Normalize only YOLO input while retaining capture-frame geometry."""
+        frame_h, frame_w = frame.shape[:2]
+        if self.preprocess_size is None:
+            return frame, 1.0, 1.0
+
+        target_h, target_w = self.preprocess_size
+        if (frame_h, frame_w) == (target_h, target_w):
+            return frame, 1.0, 1.0
+
+        inference_frame = cv2.resize(
+            frame,
+            (target_w, target_h),
+            interpolation=cv2.INTER_AREA,
+        )
+        return (
+            inference_frame,
+            frame_w / target_w,
+            frame_h / target_h,
+        )
 
     def detect(
         self,
@@ -230,6 +271,7 @@ class YoloMonsterDetector:
         prediction_key = None if cache_key is None else (
             cache_key,
             frame.shape,
+            self.preprocess_size,
             model_confidence,
             self.iou,
             self.max_det,
@@ -239,8 +281,10 @@ class YoloMonsterDetector:
                 prediction_key == self._prediction_cache_key:
             xyxy, confidences, class_ids = self._prediction_cache
         else:
+            inference_frame, scale_x, scale_y = \
+                self._prepare_inference_frame(frame)
             results = self.model.predict(
-                source=frame,
+                source=inference_frame,
                 imgsz=self.imgsz,
                 conf=model_confidence,
                 iou=self.iou,
@@ -257,7 +301,11 @@ class YoloMonsterDetector:
             boxes = getattr(results[0], "boxes", None)
             if boxes is None:
                 return []
-            xyxy = _to_numpy(getattr(boxes, "xyxy", None)).reshape(-1, 4)
+            xyxy = _to_numpy(
+                getattr(boxes, "xyxy", None)
+            ).reshape(-1, 4).astype(np.float32, copy=True)
+            xyxy[:, (0, 2)] *= scale_x
+            xyxy[:, (1, 3)] *= scale_y
             confidences = _to_numpy(getattr(boxes, "conf", None)).reshape(-1)
             class_ids = _to_numpy(getattr(boxes, "cls", None)).reshape(-1)
             if prediction_key is not None:

@@ -44,7 +44,6 @@ def _config():
         "directional_attack": {
             "range_x": 350,
             "range_y": 70,
-            "cooldown": 0.9,
         },
         "directional_aoe": {
             "enable": True,
@@ -52,14 +51,12 @@ def _config():
             "range_x": 420,
             "range_y": 110,
             "cooldown": 1.2,
-            "attack_recovery_delay": 1.0,
         },
         "power_knockback": {
             "enable": True,
             "trigger_distance_x": 100,
             "range_y": 70,
             "cooldown": 0.9,
-            "attack_recovery_delay": 0.95,
         },
         "monster_detect": {
             "search_box_margin": 50,
@@ -101,9 +98,8 @@ def _config():
             "pet": {
                 "medal_offset": [37, 17],
                 "medal_search_tolerance": [28, 10],
-                "yolo_name_vertical_gap": 3,
-                "yolo_name_search_tolerance": [14, 8],
-                "yolo_name_max_gap": 12,
+                "yolo_ocr_max_box_size": [45, 40],
+                "yolo_ocr_max_hero_distance": [100, 60],
             },
             "appearance": {
                 "local_search_radius": 90,
@@ -177,14 +173,12 @@ def test_scales_full_frame_pixel_settings_without_mutating_source():
         "range_x": 1260,
         "range_y": 220,
         "cooldown": 1.2,
-        "attack_recovery_delay": 1.0,
     }
     assert scaled["power_knockback"] == {
         "enable": True,
         "trigger_distance_x": 300,
         "range_y": 140,
         "cooldown": 0.9,
-        "attack_recovery_delay": 0.95,
     }
     assert scaled["monster_detect"]["search_box_margin"] == 150
     assert scaled["monster_detect"]["max_mob_area_trigger"] == 9000
@@ -222,9 +216,8 @@ def test_scales_nametag_anchors_and_template_offsets():
     assert nametag["medal"]["search_tolerance"] == [54, 12]
     assert nametag["pet"]["medal_offset"] == [111, 34]
     assert nametag["pet"]["medal_search_tolerance"] == [84, 20]
-    assert nametag["pet"]["yolo_name_vertical_gap"] == 6
-    assert nametag["pet"]["yolo_name_search_tolerance"] == [42, 16]
-    assert nametag["pet"]["yolo_name_max_gap"] == 24
+    assert nametag["pet"]["yolo_ocr_max_box_size"] == [135, 80]
+    assert nametag["pet"]["yolo_ocr_max_hero_distance"] == [300, 120]
     assert nametag["appearance"]["local_search_radius"] == 270
     assert nametag["appearance"]["validation_distance"] == 90
     assert nametag["appearance"]["climb_validation_distance"] == 240

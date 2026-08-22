@@ -235,9 +235,7 @@ directional_attack:
   # For examples, Mage’s Magic Claw, Thief’s dart throw, or even a snail shell toss are all directional attack
   range_x: 350               # ↔️ Horizontal attack range (in pixels)
   range_y: 70                # ↕️ Vertical attack range (in pixels)
-  cooldown: 0.9              # ⏱️ Time between attacks (in seconds)
   character_turn_delay: 0.08 # 🔄 Hold a new facing direction before attacking
-  attack_recovery_delay: 0.90 # 🏹 Block every other input after attack TAP completes
 
 power_knockback:
   # 🏹 Archer close-range fallback (Power Knock-Back / 强力击退)
@@ -247,7 +245,6 @@ power_knockback:
   trigger_distance_x: 100     # ↔️ Inclusive center-to-center close distance (pixels)
   range_y: 70                 # ↕️ Total vertical detection range (pixels)
   cooldown: 0.9               # ⏱️ Minimum time between Power Knock-Back uses
-  attack_recovery_delay: 0.90 # 🏹 Block every other input after the S TAP completes
 directional_aoe:
   # 🏹 Single-sided AoE (for example, an archer's multi-target skill)
   # While bot.attack is "directional", count monsters separately on each side.
@@ -257,7 +254,6 @@ directional_aoe:
   range_x: 350                 # ↔️ One-sided horizontal skill range (in pixels)
   range_y: 70                  # ↕️ Vertical skill range (in pixels)
   cooldown: 0.9                # ⏱️ Time between directional AoE casts (in seconds)
-  attack_recovery_delay: 0.90  # 🏹 Block other input after the AoE TAP completes
 
 aoe_skill:
   # 💥 AoE Skill
@@ -385,14 +381,14 @@ nametag:
     diff_thres: 0.16            # Pet-name SQDIFF threshold
     medal_offset: [37, 17]      # Medal top-left relative to pet-name top-left
     medal_search_tolerance: [28, 10]
-    # When YOLO labels the pet as a mob, verify the configured pet name in the
-    # narrow area immediately below that box and remove only that detection.
-    # This avoids a broad player-area mask that could hide a real nearby mob.
+    # OCR is intentionally restricted to small boxes beside Hero. A detection
+    # is removed only when the narrow band below it exactly reads this pet name.
     filter_yolo_mob: True
-    yolo_name_diff_thres: 0.10   # Stricter than identity recovery matching
-    yolo_name_vertical_gap: 3   # Expected pixels between pet box and pet name
-    yolo_name_search_tolerance: [14, 8] # Local [x, y] tolerance around the box
-    yolo_name_max_gap: 12        # Maximum actual gap from box bottom to name
+    yolo_ocr_text: ""             # Exact Chinese pet name; empty disables filtering
+    yolo_ocr_min_score: 0.80      # Minimum RapidOCR text confidence
+    yolo_ocr_box_threshold: 0.20  # RapidOCR text-box proposal threshold
+    yolo_ocr_max_box_size: [45, 40] # Candidate [width, height]
+    yolo_ocr_max_hero_distance: [100, 60] # Max center delta [x, y]
 
   # Optional fourth anchor: the character's tiger hood/head. Under a freshly
   # detected Hero anchor, climbing vs standing templates determine ladder state.
@@ -443,11 +439,13 @@ character:
 monster_detect:
   # 🐌 Monster Detection
   # Automatically detect monsters around your character.
-  # The 1024 YOLO backend replaces per-map sprite template matching.
+  # Normalize Magpie's 4K upscale back to the native 1366x768 game raster
+  # before YOLO, then map detections back into capture-frame coordinates.
   backend: "yolo"             # Options: "yolo" or legacy "template"
-  model_path: "models/yolo/yolov8n_1024_rect_hero_mob_16000_v6_best.pt"
-  imgsz: 1024                 # Must match the new model's intended inference size
-  confidence: 0.40            # Minimum YOLO confidence
+  model_path: "models/yolo/yolov8n_1024_rect_hero_mob_level_ge10_all_pets_2860_best.pt"
+  preprocess_size: [768, 1366] # [height, width] used only by YOLO inference
+  imgsz: 1280                 # Larger feature maps separate crowded native-size mobs
+  confidence: 0.55            # Minimum YOLO confidence
   iou: 0.70                   # YOLO NMS IoU threshold
   max_det: 100                # Maximum mob boxes per camera frame
   # Croko's 4K boxes are roughly 70-85 px high, or 23-28 px at the legacy
@@ -526,21 +524,29 @@ route:
   jump_down_cooldown: 3.0     # ⏱️ Cooldown (in seconds) for 'jump down' action to prevent continuous descent
   jump_up_settle_delay: 0.6   # 🛑 Seconds to stop horizontal movement before a stationary jump
   jump_alignment_nudge_ms: 30 # ↔️ Duration of each left/right centering pulse
-  directional_jump_runup_ms: 180 # Minimum direction hold before a left/right jump; preserves rope-catching momentum
+  # Horizontal WZ jumps are armed one observed cadence early. The timer uses
+  # measured Hero speed to project the captured minimap point forward, then
+  # subtracts HID latency and registration residual from the launch deadline.
+  timed_jump_enable: true
+  timed_jump_input_lead_ms: 35
+  timed_jump_max_lookahead_ms: 1200
+  timed_jump_frame_age_limit_ms: 500
+  timed_jump_confirmation_timeout_ms: 450
   # Draw an azure segment manually from the current platform toward the rope.
   # Seeing any part of that segment lets the bot predict its far endpoint as
   # the rope x, generate its own runway, and mount with a directional jump.
   rope_climb_detection_range: 10   # Distance from Hero to acquire a climb guide segment
   rope_climb_target_color: [0, 191, 255] # Explicit arrow-tip RGB; fixes the rope endpoint independently of Hero position
   rope_climb_arrow_bind_distance: 3 # Maximum pixels between an arrow tip and its light-blue guide
-  rope_climb_runup_distance: 8     # Generated takeoff offset to the left/right of the rope
-  rope_climb_align_tolerance: 1    # Accepted minimap x error at the generated takeoff point
+  rope_climb_runup_distance: 8     # Hand-painted-route fallback; WZ routes calculate staging/launch from measured motion
+  rope_climb_align_tolerance: 1    # Accepted minimap x error at the generated staging/launch point
   rope_climb_align_hold_distance: 6 # Hold direction outside this radius; use short correction pulses only nearby
   rope_climb_align_brake_delay: 0.10 # Release continuous movement before fine alignment
   rope_climb_align_crossing_tolerance: 3 # Accept a small overshoot instead of reversing into oscillation
   rope_climb_settle_delay: 0.15    # Reposition-only pause; skipped when already running toward the rope
   rope_climb_runup_ms: 180         # Minimum directional momentum before Up + Jump (existing run time counts)
-  rope_climb_running_prediction_margin: 4 # Extra native minimap pixels added to one-frame motion prediction
+  rope_climb_launch_lead_ms: 100   # Start farther out by one 10 FPS vision/HID interval before the theoretical apex point
+  rope_climb_running_prediction_margin: 4 # Hand-painted-route prediction margin; WZ trajectories use observed frame motion only
   rope_climb_align_nudge_ms: 30    # Duration of each takeoff-position correction pulse
   rope_climb_position_timeout: 0.9 # Switch runway side if backing up makes no x progress
   rope_climb_retry_interval: 0.9   # Retry when an attempt produces no continued upward progress
@@ -557,6 +563,11 @@ route:
   portal_sweep_repeat_interval: 0.2 # Minimum seconds between pulses on an unchanged frame
   portal_sweep_exit_distance: 10  # Minimum sudden minimap displacement for success
   portal_sweep_max_duration: 6.0  # Release control after a failed activation attempt
+  auto_line_thickness: 3          # WZ-generated horizontal route width
+  auto_action_half_width: 3       # WZ-generated action trigger half-width
+  auto_action_half_height: 2      # WZ-generated action trigger half-height
+  auto_goal_half_width: 3         # WZ-generated checkpoint half-width
+  auto_goal_half_height: 2        # WZ-generated checkpoint half-height
 
   # 🎨 Color-coded(RGB) actions for route navigation
   # "<left-right command, up-down command, action>"
@@ -580,6 +591,78 @@ route:
   color_code_up_down:
     "127,127,127": "none up none"       # ⚪ Gray
     "255,255,127": "none down none"     # 🟡 Light yellow
+
+wz_navigation:
+  # Consume the stable JSON/canvas contract exported from the game WZ files.
+  # When enabled, hand-painted route*.png files are replaced by an in-memory
+  # foothold/rope/portal graph.
+  enable: true
+  geometry_dir: "../SuperHumanMapleStory/var/all-maps-with-canvases"
+  candidate_map_ids: []           # Optional 9-digit allow-list; empty scans all canvases
+  map_bindings:                   # Bound map selection enables WZ and bypasses the full scan
+    forest_floor: 100040110
+  bootstrap_from_selected_map: true # Use an existing map.png as first-frame evidence
+  registration_failure_limit: 3  # Auto-WZ failures before rematching; explicit bindings stay locked
+  recognition_retry_interval: 10.0 # Seconds between expensive full-catalog retries
+  hero_snap_distance_wz: 120
+  spawn_snap_distance_wz: 140
+  portal_snap_distance_wz: 160
+  rope_attach_tolerance_wz: 90
+  platform_edge_margin_wz: 18
+  jump_launch_margin_wz: 2       # Hero center may approach this close to a platform edge before takeoff
+  jump_landing_margin_wz: 15     # Keep one character half-width on the landing platform
+  jump_wall_clearance_wz: 8
+  minimum_drop_overlap_wz: 30
+  spawn_sweep_padding_wz: 55
+  # Horizontal projectile line-of-sight plus spawn-free firing-platform patrol.
+  # Enable for bow/gun skills; melee and through-wall skills should leave it off.
+  projectile_terrain_check: true
+  projectile_terrain_debug: false # Draw the changing blocker ray in Game Window Viz
+  projectile_height_wz: 30       # Arrow height above Hero's supporting foothold
+  projectile_clearance_wz: 8     # Projectile radius + registration tolerance
+  combat_clear_quiet_seconds: 0.8 # No attackable mob for this long before a combat checkpoint may move
+  # Platform-level controller. It keeps only platform numbers and renders one
+  # temporary in-memory path when the target changes; no full route loop is
+  # generated or saved. Maps absent from `maps` keep the legacy WZ tour.
+  platform_state_machine:
+    enable: true
+    maps:
+      "100040110":
+        # Original Forest Floor loop. P4/P6/P10/P12/P8/P2 are reached as
+        # transit platforms automatically by the live WZ shortest path.
+        sequence: [1, 3, 7, 9, 13, 9, 5, 3]
+        dwell_seconds: 8.0          # n: patrol/shoot at each state platform
+        maximum_dwell_seconds: 24.0 # Escape persistent YOLO false positives
+        combat_quiet_seconds: 0.8   # Clear-first: quiet window before moving
+        travel_combat_budget_seconds: 6.0 # Do not let one detection starve travel forever
+        stable_surface_frames: 2    # Never change state from one airborne frame
+        arrival_tolerance_wz: 14.0
+        blocked_retry_seconds: 1.0
+        maximum_recovery_drop_height_wz: 300 # Deeper upper-map exits must use a rope
+        exclude_portals: true       # Forest Floor loop uses visible geometry
+  learn_motion: true              # Refine the graph from ordinary live movement samples
+  minimum_walk_samples: 12
+  minimum_jump_samples: 2
+  matcher:
+    minimum_inliers: 6
+    minimum_inlier_ratio: 0.55
+    minimum_inlier_gap: 2
+    descriptor_ratio: 0.75
+    minimum_scale: 0.5
+    maximum_scale: 8.0
+    maximum_axis_ratio: 1.2
+    maximum_rotation_degrees: 3.0
+    maximum_shear_cosine: 0.12
+  motion:
+    move_speed_percent: 100.0     # Current Hero Move Speed stat
+    jump_percent: 100.0           # Current Hero Jump stat
+    climb_speed_wz_per_sec: 100.0
+    jump_safety_factor: 0.82
+    character_half_width_wz: 15.0
+    # Positive pixel values override WZ predictions. Zero learns/derives them.
+    walk_speed_px_per_sec: 21.3575
+    jump_height_px: 13.9683
+    jump_distance_px: 11.0251      # Airborne distance after actual takeoff; excludes run-up
 
 watchdog:
   # 🐶 Watchdog
