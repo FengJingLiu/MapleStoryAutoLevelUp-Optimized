@@ -878,11 +878,13 @@ class KeyboardControllerEsp32RoutingTests(unittest.TestCase):
         controller.cmd_action = "none"
         controller._last_source_action = "none"
         controller.is_need_force_heal = False
+        controller.timed_jump_horizontal_hold_ms = 500
         controller.perform_directional_jump = Mock(return_value=True)
         return controller
 
     def test_scheduled_jump_timer_fires_once_without_worker_polling(self):
         controller = self.make_scheduled_jump_controller()
+        controller_module._input_allowed.set()
         timers = []
 
         class FakeTimer:
@@ -922,12 +924,30 @@ class KeyboardControllerEsp32RoutingTests(unittest.TestCase):
             "pending",
         )
 
-        timers[0].fire()
+        with patch.object(controller_module.threading, "Timer", FakeTimer):
+            timers[0].fire()
 
         controller.perform_directional_jump.assert_called_once_with("right")
+        self.assertEqual(len(timers), 2)
+        self.assertTrue(timers[1].started)
+        self.assertGreater(timers[1].delay, 0.45)
+        self.assertLessEqual(timers[1].delay, 0.5)
+        self.assertEqual(
+            controller.scheduled_directional_jump_status(token)["state"],
+            "airborne",
+        )
+        self.assertFalse(controller.cancel_scheduled_directional_jump(token))
+        self.assertFalse(timers[1].cancelled)
+
+        timers[1].fire()
+
+        controller_module._input_client.set_state.assert_called_once_with([])
         self.assertEqual(
             controller.scheduled_directional_jump_status(token)["state"],
             "fired",
+        )
+        self.assertEqual(
+            controller._command_snapshot(), ("none", "none", "none")
         )
 
     def test_scheduled_jump_is_cancelled_when_route_command_changes(self):

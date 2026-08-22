@@ -519,7 +519,7 @@ route:
   # 🧭 Route Following
   # The character follows a pre-defined route image (route*.png) using color-coded commands.
   search_range: 10            # 🔍 Route lookup radius; a nearby magenta stationary-jump marker triggers inside this distance
-  ladder_endpoint_tolerance: 2 # Vertical-route endpoint tolerance in native minimap pixels
+  ladder_endpoint_tolerance: 4 # Vertical-route/WZ destination tolerance in native minimap pixels
   ladder_alignment_tolerance: 2 # Require this x alignment before a ground Up/Down command; prevents nearby portal activation
   jump_down_cooldown: 3.0     # ⏱️ Cooldown (in seconds) for 'jump down' action to prevent continuous descent
   jump_up_settle_delay: 0.6   # 🛑 Seconds to stop horizontal movement before a stationary jump
@@ -531,6 +531,7 @@ route:
   timed_jump_input_lead_ms: 35
   timed_jump_max_lookahead_ms: 1200
   timed_jump_frame_age_limit_ms: 500
+  timed_jump_horizontal_hold_ms: 500 # Release horizontal input before a short landing platform can be overrun
   timed_jump_confirmation_timeout_ms: 450
   # Draw an azure segment manually from the current platform toward the rope.
   # Seeing any part of that segment lets the bot predict its far endpoint as
@@ -551,10 +552,10 @@ route:
   rope_climb_align_nudge_ms: 30    # Duration of each takeoff-position correction pulse
   rope_climb_position_timeout: 0.9 # Switch runway side if backing up makes no x progress
   rope_climb_retry_interval: 0.9   # Retry when an attempt produces no continued upward progress
-  rope_climb_min_progress: 3       # Upward pixels required before an attempt counts as attached
-  rope_climb_attach_x_tolerance: 3 # Maximum x error from the predicted rope while confirming the top
-  rope_climb_finish_stall: 0.6     # Finish after this long stopped above the starting platform
-  rope_climb_landing_tolerance: 2  # Treat a stalled attempt this close to start y as a miss
+  rope_climb_min_progress: 2       # Upward pixels required before an attempt counts as attached
+  rope_climb_attach_x_tolerance: 6 # Coordinate fallback may drift after stepping onto the upper platform
+  rope_climb_finish_stall: 0.25    # Required dwell in the WZ destination band when pose evidence is unavailable
+  rope_climb_landing_tolerance: 3  # Treat a stalled attempt this close to start y as a miss
   rope_climb_max_attempts: 4       # Alternate/recalculate the run-up side up to this many times
   rope_climb_max_duration: 15.0    # Release control after an overall climb timeout
   rope_climb_failure_rearm_delay: 1.5 # Retry the same nearby guide after a bounded failure instead of waiting for watchdog movement

@@ -7917,7 +7917,8 @@ class MapleStoryAutoBot:
         for key in (
                 "started_at", "aligned_since", "mount_request_started_at",
                 "last_progress_at", "last_y_change_at",
-                "position_last_progress_at", "position_brake_started_at"):
+                "position_last_progress_at", "position_brake_started_at",
+                "destination_reached_at"):
             value = state.get(key)
             if value is not None:
                 state[key] = float(value) + paused_for
@@ -8113,6 +8114,7 @@ class MapleStoryAutoBot:
                 "launch_x": None,
                 "trajectory_mount": mount_plan is not None,
                 "destination_y": route_action.get("rope_destination_y"),
+                "destination_reached_at": None,
                 "launch_offset_px": (
                     int(mount_plan.launch_offset_px)
                     if mount_plan is not None else None
@@ -8278,7 +8280,7 @@ class MapleStoryAutoBot:
         self._rope_climb_active = True
         return self._update_active_rope_climb()
 
-    def _finish_rope_climb(self):
+    def _finish_rope_climb(self, evidence="coordinate landing"):
         state = getattr(self, "_rope_climb_state", None)
         if state is None:
             return
@@ -8286,7 +8288,7 @@ class MapleStoryAutoBot:
         position = tuple(map(int, self.loc_player_global))
         logger.info(
             f"[route] Rope climb finished after {state['attempts']} "
-            "attempt(s) and sustained upward progress"
+            f"attempt(s); evidence={evidence}"
         )
         self._reset_rope_climb()
         self._rope_climb_completed_key = key
@@ -8326,6 +8328,7 @@ class MapleStoryAutoBot:
         state["aligned_since"] = None
         state["mount_request_started_at"] = None
         state["mount_kind"] = None
+        state["destination_reached_at"] = None
         state["position_side_switches"] = 0
         logger.info(
             "[route] Rope mount made no upward progress; retry from "
@@ -8625,12 +8628,42 @@ class MapleStoryAutoBot:
                 destination_y is None
                 or player_y <= int(destination_y) + destination_tolerance
             )
+            if destination_y is not None:
+                if reached_destination:
+                    if state.get("destination_reached_at") is None:
+                        state["destination_reached_at"] = now
+                else:
+                    state["destination_reached_at"] = None
+            destination_reached_at = state.get("destination_reached_at")
+            destination_dwell = (
+                now - float(destination_reached_at)
+                if destination_reached_at is not None else 0.0
+            )
+            visual_exit_at_destination = bool(
+                destination_y is not None
+                and state["observed_ladder"]
+                and not ladder_now
+                and reached_destination
+            )
+            coordinate_landing = bool(
+                near_rope_x
+                and reached_destination
+                and (
+                    destination_dwell >= finish_stall
+                    if destination_y is not None
+                    else stationary_for >= finish_stall
+                )
+            )
             if phase == "climbing" and not ladder_now and \
                     upward_progress >= min_progress and \
                     current_elevation > landing_tolerance and \
-                    near_rope_x and reached_destination and \
-                    stationary_for >= finish_stall:
-                self._finish_rope_climb()
+                    (visual_exit_at_destination or coordinate_landing):
+                evidence = (
+                    "visual ladder exit at WZ destination"
+                    if visual_exit_at_destination
+                    else "stable WZ destination coordinates"
+                )
+                self._finish_rope_climb(evidence)
                 return True
 
             retry_interval = max(
@@ -9437,10 +9470,17 @@ class MapleStoryAutoBot:
         if not isinstance(player, (tuple, list)) or len(player) < 2:
             return None
         player_x, player_y = map(float, player[:2])
-        _, top, _, bottom = map(float, bounds[:4])
+        left, top, right, bottom = map(float, bounds[:4])
+        left, right = min(left, right), max(left, right)
         top, bottom = min(top, bottom), max(top, bottom)
         if not top - 2.0 <= player_y <= bottom + 2.0:
             return None
+
+        # The renderer already derives a physically reachable launch band
+        # from the measured airborne distance.  Aim at its midpoint instead
+        # of the WZ foothold edge: using jump_source directly waits until the
+        # last walkable pixel, where HID/vision latency turns Jump into a fall.
+        launch_x = (left + right) / 2.0
 
         edge_ids = tuple(str(item) for item in getattr(leg, "edge_ids", ()))
         generation = int(getattr(navigator, "resource_generation", -1))
@@ -9449,7 +9489,7 @@ class MapleStoryAutoBot:
             route_index,
             edge_ids,
             direction,
-            int(round(jump_x)),
+            int(round(launch_x)),
             int(round(target_x)),
         )
         return {
@@ -9457,7 +9497,7 @@ class MapleStoryAutoBot:
             "route_index": route_index,
             "direction": direction,
             "player_x": player_x,
-            "launch_x": jump_x,
+            "launch_x": launch_x,
         }
 
     def _predict_current_wz_timed_jump(self, descriptor, now=None):
@@ -9524,18 +9564,27 @@ class MapleStoryAutoBot:
         )
 
     def _cancel_wz_timed_directional_jump(self):
+        self._wz_timed_jump_candidate = None
         token = getattr(self, "_wz_timed_jump_token", None)
         cancel = getattr(
             getattr(self, "kb", None),
             "cancel_scheduled_directional_jump",
             None,
         )
+        cancelled = False
         if token is not None and callable(cancel):
-            cancel(token)
-        self._wz_timed_jump_candidate = None
+            cancelled = bool(cancel(token))
+        status = self._wz_timed_jump_status()
+        if isinstance(status, dict) and status.get("state") in {
+                "firing", "airborne", "braking"}:
+            # A Jump TAP that has started cannot be split from its measured
+            # 500 ms horizontal hold and landing brake. Retain the token so
+            # route, combat, and Buff arbitration continue to yield to it.
+            return False
         self._wz_timed_jump_token = None
         self._wz_timed_jump_route_index = None
         self._wz_timed_jump_direction = None
+        return cancelled
 
     def _wz_timed_jump_status(self):
         token = getattr(self, "_wz_timed_jump_token", None)
@@ -9554,7 +9603,7 @@ class MapleStoryAutoBot:
         if not isinstance(status, dict):
             return False
         state = status.get("state")
-        if state in {"pending", "firing"}:
+        if state in {"pending", "firing", "airborne", "braking"}:
             return True
         if state != "fired":
             return False
@@ -9590,17 +9639,29 @@ class MapleStoryAutoBot:
         if token is not None:
             if token != descriptor["token"]:
                 self._cancel_wz_timed_directional_jump()
+                if getattr(self, "_wz_timed_jump_token", None) is not None:
+                    self.cmd_move_x = "none"
+                    self.cmd_move_y = "none"
+                    self.cmd_action = "none"
+                    return True
             else:
                 status = self._wz_timed_jump_status()
-                if isinstance(status, dict) and status.get("state") in {
-                        "pending", "firing"}:
+                timer_state = (
+                    status.get("state") if isinstance(status, dict) else None
+                )
+                if timer_state == "pending":
                     self.cmd_move_x = descriptor["direction"]
                     self.cmd_move_y = "none"
                     self.cmd_action = "none"
                     return True
-                if isinstance(status, dict) and status.get("state") == "fired":
+                if timer_state in {"firing", "airborne", "braking"}:
+                    self.cmd_move_x = "none"
+                    self.cmd_move_y = "none"
+                    self.cmd_action = "none"
+                    return True
+                if timer_state == "fired":
                     if self._wz_timed_jump_owns_input():
-                        self.cmd_move_x = descriptor["direction"]
+                        self.cmd_move_x = "none"
                         self.cmd_move_y = "none"
                         self.cmd_action = "none"
                         return True

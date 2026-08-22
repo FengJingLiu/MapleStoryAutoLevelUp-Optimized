@@ -527,6 +527,7 @@ class AutoBotLifecycleTests(unittest.TestCase):
         bot.cfg = {
             "route": {
                 "search_range": 10,
+                "ladder_endpoint_tolerance": 4,
                 "ladder_alignment_tolerance": 2,
                 "jump_up_settle_delay": 0.6,
                 "portal_sweep_edge_margin": 2,
@@ -546,10 +547,10 @@ class AutoBotLifecycleTests(unittest.TestCase):
                 "rope_climb_running_prediction_margin": 4,
                 "rope_climb_position_timeout": 0.9,
                 "rope_climb_retry_interval": 0.9,
-                "rope_climb_min_progress": 3,
-                "rope_climb_attach_x_tolerance": 3,
-                "rope_climb_finish_stall": 0.6,
-                "rope_climb_landing_tolerance": 2,
+                "rope_climb_min_progress": 2,
+                "rope_climb_attach_x_tolerance": 6,
+                "rope_climb_finish_stall": 0.25,
+                "rope_climb_landing_tolerance": 3,
                 "rope_climb_max_attempts": 4,
                 "rope_climb_max_duration": 15.0,
                 "rope_climb_failure_rearm_delay": 1.5,
@@ -859,11 +860,33 @@ class AutoBotLifecycleTests(unittest.TestCase):
         direction, delay, token = schedule.call_args.args
         self.assertEqual(direction, "right")
         self.assertEqual(token[:2], (7, 0))
+        self.assertEqual(token[-2:], (148, 158))
         # At 2 FPS the next sample is 500 ms away; the independent timer fires
-        # roughly 224 ms later instead of letting Hero cross the 3 px band.
-        self.assertGreater(delay, 0.20)
-        self.assertLess(delay, 0.25)
+        # near the middle of the rendered 147..149 safe launch band instead of
+        # waiting for its outer foothold-edge pixel.
+        self.assertGreater(delay, 0.17)
+        self.assertLess(delay, 0.19)
         self.assertLess(delay, 0.5)
+        self.assertEqual(bot._wz_timed_jump_route_index, 0)
+
+    def test_airborne_timed_jump_keeps_input_ownership_until_brake(self):
+        bot = self._route_color_bot()
+        token = (7, 0, ("jump:p3:p4",), "right", 149, 158)
+        status = {"state": "airborne", "jumped_at": 10.0}
+        cancel = Mock(return_value=False)
+        bot.kb = SimpleNamespace(
+            scheduled_directional_jump_status=Mock(return_value=status),
+            cancel_scheduled_directional_jump=cancel,
+        )
+        bot._wz_timed_jump_token = token
+        bot._wz_timed_jump_route_index = 0
+        bot._wz_timed_jump_direction = "right"
+
+        self.assertTrue(bot._wz_timed_jump_owns_input(now=10.4))
+        self.assertFalse(bot._cancel_wz_timed_directional_jump())
+
+        cancel.assert_called_once_with(token)
+        self.assertEqual(bot._wz_timed_jump_token, token)
         self.assertEqual(bot._wz_timed_jump_route_index, 0)
 
     def test_timed_jump_candidate_is_not_armed_after_combat_overrides_route(self):
@@ -2439,7 +2462,7 @@ class AutoBotLifecycleTests(unittest.TestCase):
         self.assertEqual(bot._rope_climb_completed_key, guide_key)
         self.assertEqual(bot.cmd_move_y, "none")
 
-    def test_wz_rope_climb_ignores_pose_miss_until_upper_platform(self):
+    def test_wz_rope_climb_finishes_on_visual_exit_at_upper_platform(self):
         bot = self._route_color_bot()
         guide_key = (0, (11, 10, 8, 1), ((11, 10), (18, 10)))
         bot._rope_climb_active = True
@@ -2483,11 +2506,51 @@ class AutoBotLifecycleTests(unittest.TestCase):
             return_value=100.8,
         ):
             self.assertTrue(bot._update_active_rope_climb())
-        self.assertEqual(bot.cmd_move_y, "up")
+
+        self.assertFalse(bot._rope_climb_active)
+        self.assertEqual(bot._rope_climb_completed_key, guide_key)
+
+    def test_wz_rope_climb_coordinate_fallback_allows_top_drift(self):
+        bot = self._route_color_bot()
+        guide_key = (0, (11, 10, 8, 1), ((11, 10), (18, 10)))
+        bot._rope_climb_active = True
+        bot._rope_climb_state = {
+            "key": guide_key,
+            "target": (18, 10),
+            "destination_y": 4,
+            "destination_reached_at": None,
+            "phase": "climbing",
+            "started_at": 99.0,
+            "aligned_since": None,
+            "mount_request_started_at": 99.2,
+            "mount_origin_y": 20,
+            "best_y": 3,
+            "last_progress_at": 100.0,
+            "last_y": 4,
+            "last_y_change_at": 100.2,
+            "attempts": 1,
+            "side": "left",
+            "start_x": 14,
+            "observed_ladder": False,
+            "position_side_switches": 0,
+        }
+        bot.loc_player_global = (18, 4)
+        with patch(
+            "src.engine.MapleStoryAutoLevelUp.time.monotonic",
+            return_value=100.0,
+        ):
+            self.assertTrue(bot._update_active_rope_climb())
+
+        self.assertTrue(bot._rope_climb_active)
+        self.assertEqual(bot._rope_climb_state["destination_reached_at"], 100.0)
+
+        # Four pixels of horizontal landing drift is inside the relaxed 6 px
+        # fallback, and small y jitter no longer resets destination dwell.
+        bot.loc_player_global = (22, 5)
 
         with patch(
             "src.engine.MapleStoryAutoLevelUp.time.monotonic",
-            return_value=101.5,
+            return_value=100.3,
         ):
             self.assertTrue(bot._update_active_rope_climb())
 

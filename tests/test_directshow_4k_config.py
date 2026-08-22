@@ -101,7 +101,7 @@ def test_custom_capture_and_absolute_mouse_use_4k_reference():
     assert cfg["game_window"]["capture_profile"] == "capture_card"
     assert cfg["nametag"]["template_reference_size"] == [2160, 3840]
     assert cfg["nametag"]["medal"]["enable"] is False
-    assert cfg["nametag"]["appearance"]["enable"] is False
+    assert cfg["nametag"]["appearance"]["enable"] == "auto"
     assert cfg["nametag"]["overhead_marker"]["enable"] is True
     assert cfg["nametag"]["overhead_marker"]["backend"] == "yolo"
     assert cfg["monster_detect"]["model_path"] == \

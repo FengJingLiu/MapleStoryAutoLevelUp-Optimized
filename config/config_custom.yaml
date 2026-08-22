@@ -1,5 +1,5 @@
 bot:
-  map: forest_floor
+  map: __auto_wz__
 buff_skill:
   cooldown:
   - 600
@@ -31,8 +31,6 @@ monster_detect:
   min_box_height: 40
   min_box_width: 40
 nametag:
-  appearance:
-    enable: false
   name: liu_muning
   pet:
     enable: true

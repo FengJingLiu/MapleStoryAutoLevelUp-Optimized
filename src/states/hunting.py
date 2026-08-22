@@ -65,8 +65,15 @@ class HuntingState(State):
         finalize_timed_jump = getattr(
             self.bot, "finalize_wz_timed_directional_jump", None
         )
-        if callable(finalize_timed_jump):
-            finalize_timed_jump()
+        timed_jump_armed = bool(
+            callable(finalize_timed_jump) and finalize_timed_jump()
+        )
+        timed_jump_owner = getattr(
+            self.bot, "_wz_timed_jump_owns_input", None
+        )
+        timed_jump_owns_input = bool(
+            callable(timed_jump_owner) and timed_jump_owner()
+        )
 
         # A WZ rope approach uses the same two-phase arbitration: route
         # planning reserves a timer candidate, monsters may still cancel it,
@@ -85,10 +92,16 @@ class HuntingState(State):
         )
 
         # send command to keyboard controller
-        # schedule_rope_mount already installs the arbitrated horizontal
-        # state before starting its timer. A zero-delay callback may already
-        # have replaced it with Up, so do not overwrite that result here.
-        if not (rope_timer_armed or rope_timer_owns_input):
+        # Both schedulers install their already-arbitrated input before their
+        # timer starts. A zero-delay Jump may already be airborne, or a rope
+        # callback may already have replaced horizontal movement with Up, so
+        # the final frame command must not overwrite either transaction.
+        if not (
+            timed_jump_armed
+            or timed_jump_owns_input
+            or rope_timer_armed
+            or rope_timer_owns_input
+        ):
             self.bot.kb.set_command(self.bot.cmd_move_x + ' ' + \
                                     self.bot.cmd_move_y + ' ' + \
                                     self.bot.cmd_action)

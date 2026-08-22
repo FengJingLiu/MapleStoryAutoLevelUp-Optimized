@@ -103,8 +103,16 @@ def predict_directional_jump(
     time_to_launch = max(0.0, distance / speed)
     # Registration residual is a spatial error.  Converting it with the same
     # measured speed makes the advance scale correctly when minimap pixels are
-    # small instead of adding another arbitrary pixel margin.
-    effective_lead = input_latency + uncertainty / speed
+    # small instead of adding another arbitrary pixel margin.  A newly changed
+    # direction has no established motion to advance, though: spending either
+    # the latency or uncertainty allowance can collapse a real 2-3 px edge
+    # run-up to zero and make Jump arrive without enough horizontal momentum.
+    motion_established = held_seconds >= max(input_latency, 1e-6)
+    effective_lead = (
+        input_latency + uncertainty / speed
+        if motion_established
+        else 0.0
+    )
     delay = max(0.0, time_to_launch - effective_lead)
     if delay > lookahead:
         return None

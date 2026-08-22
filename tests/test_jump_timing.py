@@ -63,6 +63,26 @@ def test_prediction_is_symmetric_for_left_jump():
     assert prediction.delay_seconds == pytest.approx(0.2241, abs=0.001)
 
 
+def test_new_direction_keeps_real_short_runup_instead_of_spending_uncertainty():
+    prediction = predict_directional_jump(
+        sample_x=241,
+        launch_x=238,
+        direction="left",
+        speed_px_per_second=21.3575,
+        capture_age_seconds=0.16,
+        direction_held_seconds=0.0,
+        input_latency_seconds=0.035,
+        position_uncertainty_px=2.0,
+        lookahead_seconds=0.5,
+        maximum_frame_age_seconds=0.5,
+    )
+
+    assert prediction is not None
+    assert prediction.predicted_x == pytest.approx(241.0)
+    assert prediction.input_lead_seconds == pytest.approx(0.0)
+    assert prediction.delay_seconds == pytest.approx(0.14047, abs=0.001)
+
+
 def test_prediction_rejects_stale_frame_and_far_target():
     common = dict(
         sample_x=100,

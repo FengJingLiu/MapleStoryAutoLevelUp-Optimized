@@ -287,6 +287,27 @@ class RuneDirectShowSafetyTests(unittest.TestCase):
 
         bot.kb.set_command.assert_not_called()
 
+    def test_hunting_does_not_overwrite_airborne_timed_jump_input(self):
+        bot = SimpleNamespace(
+            cmd_move_x="right",
+            cmd_move_y="none",
+            cmd_action="none",
+            kb=SimpleNamespace(set_command=Mock()),
+            update_cmd_by_route=Mock(),
+            check_reach_goal=Mock(),
+            update_cmd_by_mob_detection=Mock(),
+            update_wz_platform_combat_state=Mock(return_value=False),
+            is_player_stuck=Mock(return_value=False),
+            finalize_wz_timed_directional_jump=Mock(return_value=False),
+            _wz_timed_jump_owns_input=Mock(return_value=True),
+            finalize_rope_timed_mount=Mock(return_value=False),
+            _rope_timed_mount_owns_input=Mock(return_value=False),
+        )
+
+        HuntingState("hunting", bot).on_frame()
+
+        bot.kb.set_command.assert_not_called()
+
 
 class MainDirectShowSafetyTests(unittest.TestCase):
     def test_static_fixture_overrides_directshow_safety_classification(self):
