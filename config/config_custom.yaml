@@ -1,5 +1,5 @@
 bot:
-  map: __auto_wz__
+  map: forest_floor
 buff_skill:
   cooldown:
   - 600

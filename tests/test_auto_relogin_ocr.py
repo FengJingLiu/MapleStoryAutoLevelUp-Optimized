@@ -11,6 +11,7 @@ from src.vision.auto_relogin_ocr import (
     RapidOcrTextLocator,
     StableOcrTargetGate,
     is_chinese_ocr_target,
+    matches_ocr_target,
 )
 
 
@@ -83,6 +84,37 @@ class TestRapidOcrTextLocator(unittest.TestCase):
                 min_score=0.85,
             )
         engine.assert_not_called()
+
+    def test_partial_world_target_accepts_4_or_one_chinese_character(self):
+        target = ("4.漂漂猪",)
+        assert matches_ocr_target("4", target, "partial")
+        assert matches_ocr_target("漂", target, "partial")
+        assert matches_ocr_target("猪", target, "partial")
+        assert matches_ocr_target("4.漂画猪", target, "partial")
+        assert not matches_ocr_target(".", target, "partial")
+        assert not matches_ocr_target("5", target, "partial")
+
+        frame = np.zeros((100, 200, 3), dtype=np.uint8)
+        box = np.array([
+            [20.0, 20.0], [60.0, 20.0], [60.0, 50.0], [20.0, 50.0]
+        ])
+        for fragment in ("4", "漂", "猪"):
+            with self.subTest(fragment=fragment):
+                engine = Mock(return_value=_ocr_output(
+                    boxes=np.array([box]),
+                    texts=(fragment,),
+                    scores=(0.98,),
+                ))
+                match = RapidOcrTextLocator(engine=engine).locate(
+                    frame,
+                    (0, 0, 200, 100),
+                    target,
+                    min_score=0.85,
+                    match_mode="partial",
+                )
+                assert match is not None
+                assert match.normalized_text == fragment
+                assert match.center == (40, 35)
 
     def test_roi_box_is_returned_in_full_capture_coordinates(self):
         frame = np.zeros((FRAME_HEIGHT, FRAME_WIDTH, 3), dtype=np.uint8)

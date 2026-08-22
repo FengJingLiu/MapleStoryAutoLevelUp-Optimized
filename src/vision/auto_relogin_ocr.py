@@ -52,9 +52,31 @@ def is_chinese_ocr_target(value: str) -> bool:
     return has_han and not has_hangul_or_kana
 
 
+def matches_ocr_target(
+        text: str, targets: Sequence[str], match_mode: str) -> bool:
+    """Match normalized OCR text, including a safe unique partial mode."""
+    if match_mode == "exact":
+        return text in targets
+    if match_mode == "contains":
+        return any(target in text for target in targets)
+    if match_mode == "partial":
+        # Recognition can lose characters hidden by the mouse cursor.  Accept
+        # any shared meaningful character, including just ``4``, ``漂``, or
+        # ``猪``.  This also covers corrupted output such as ``4.漂画猪``.
+        # Punctuation alone is never enough, and the caller still requires
+        # exactly one spatial candidate.
+        return any(
+            target in text or any(
+                char.isalnum() and char in text for char in target
+            )
+            for target in targets
+        )
+    return False
+
+
 @dataclass(frozen=True)
 class OcrTextMatch:
-    """One unique OCR target expressed in current full-frame coordinates."""
+    """One OCR result expressed in current full-frame coordinates."""
 
     text: str
     normalized_text: str
@@ -151,9 +173,7 @@ class RapidOcrTextLocator:
     @staticmethod
     def _matches_target(
             text: str, targets: Sequence[str], match_mode: str) -> bool:
-        if match_mode == "exact":
-            return text in targets
-        return any(target in text for target in targets)
+        return matches_ocr_target(text, targets, match_mode)
 
     @staticmethod
     def _validated_thresholds(min_score, box_threshold) -> Tuple[float, float]:
@@ -180,7 +200,7 @@ class RapidOcrTextLocator:
         min_score: float,
         box_threshold: float = 0.3,
     ) -> Optional[Tuple[OcrTextMatch, ...]]:
-        """Recognize validated Chinese text once inside a bounded frame ROI."""
+        """Recognize validated text once inside a bounded frame ROI."""
         checked_region = self._validated_region(frame, region)
         checked_min_score, checked_box_threshold = \
             self._validated_thresholds(min_score, box_threshold)
@@ -229,7 +249,10 @@ class RapidOcrTextLocator:
                 return None
             text = str(raw_text)
             normalized_text = normalize_ocr_text(text)
-            if not is_chinese_ocr_target(normalized_text):
+            # Keep numeric fragments such as the ``4`` in ``4.漂漂猪``.  Click
+            # targets themselves remain Chinese-validated, so unrelated Latin
+            # or numeric OCR results cannot authorize an action.
+            if not normalized_text:
                 continue
             if score < checked_min_score:
                 continue
@@ -272,8 +295,10 @@ class RapidOcrTextLocator:
                 "OCR targets must contain Chinese Han text and no Hangul/kana"
             )
         checked_mode = str(match_mode).strip().lower()
-        if checked_mode not in {"exact", "contains"}:
-            raise ValueError("OCR match_mode must be exact or contains")
+        if checked_mode not in {"exact", "contains", "partial"}:
+            raise ValueError(
+                "OCR match_mode must be exact, contains, or partial"
+            )
 
         recognized = self.recognize(
             frame,

@@ -62,9 +62,10 @@ appearance/overhead/medal/pet，且 `nametag.enable` 仍为 `False`，避免任�
 - `misc/auto_relogin_cursor_cn.png`
 - `misc/auto_relogin_cursor_small_cn.png`
 
-同时重校 5 个 `page_search_regions`、`page_anchor_points.channel`、20 个
-`channel_points`、两种 cursor hotspot、搜索半径和阈值。掉线与连接页使用
-`Enter`，不需要鼠标确认坐标；世界与角色页点击各自模板的匹配中心。保持
+同时重校各 OCR `search_region`、两种 cursor hotspot、搜索半径和阈值。世界页
+直接点击当前帧中“4.漂漂猪”的 OCR 框中心；频道弹窗出现后，再从当前帧 OCR
+结果中选择一个“频道N”框中心双击，不记录 `channel_points`。掉线与连接页使用
+`Enter`，不需要鼠标确认坐标。保持
 `flow_template_reference_size: [2160, 3840]`；完成前不要把
 `auto_relogin.enable` 改回 `True`。
 

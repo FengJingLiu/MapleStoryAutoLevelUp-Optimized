@@ -72,6 +72,7 @@ from src.engine.FiniteStateMachine import FiniteStateMachine
 from src.vision.YoloMonsterDetector import YoloMonsterDetector
 from src.vision.auto_relogin_ocr import (
     is_chinese_ocr_target,
+    matches_ocr_target,
     normalize_ocr_text,
     RapidOcrError,
     RapidOcrTextLocator,
@@ -199,7 +200,6 @@ class MapleStoryAutoBot:
         self._auto_relogin_has_attempted_input = False
         self._auto_relogin_action_attempts = {}
         self._auto_relogin_step_started_at = None
-        self._auto_relogin_channel_candidates = []
         self._auto_relogin_health_was_enabled = False
         self._auto_relogin_confirm_started_at = None
         self._auto_relogin_last_confirm_frame_token = None
@@ -904,7 +904,6 @@ class MapleStoryAutoBot:
         self._auto_relogin_has_attempted_input = False
         self._auto_relogin_action_attempts = {}
         self._auto_relogin_step_started_at = None
-        self._auto_relogin_channel_candidates = []
         self._auto_relogin_health_was_enabled = False
         self._auto_relogin_confirm_started_at = None
         self._auto_relogin_last_confirm_frame_token = None
@@ -986,7 +985,6 @@ class MapleStoryAutoBot:
         self._auto_relogin_last_action_page = None
         self._auto_relogin_has_attempted_input = False
         self._auto_relogin_step_started_at = time.monotonic()
-        self._auto_relogin_channel_candidates = []
         self._auto_relogin_failure_logged = False
         self._auto_relogin_started_at = time.monotonic()
         self._reset_auto_relogin_ocr_gate()
@@ -1168,8 +1166,8 @@ class MapleStoryAutoBot:
         self._auto_relogin_ocr_page_scan_matches = matches
         return matches
 
-    def _match_auto_relogin_page(self, page):
-        """Return one unique Chinese OCR marker for a recovery page."""
+    def _auto_relogin_ocr_target_match(self, page):
+        """Return one unique configured OCR target from the current scan."""
         frame = getattr(self, "img_frame", None)
         target_cfg = self._auto_relogin_ocr_target_config(page)
         if frame is None or target_cfg is None:
@@ -1195,17 +1193,20 @@ class MapleStoryAutoBot:
             center_x, center_y = match.center
             if not (x0 <= center_x < x1 and y0 <= center_y < y1):
                 continue
-            if match_mode == "exact":
-                accepted = match.normalized_text in targets
-            else:
-                accepted = any(
-                    target in match.normalized_text for target in targets
-                )
+            accepted = matches_ocr_target(
+                match.normalized_text, targets, match_mode
+            )
             if accepted:
                 candidates.append(match)
         if len(candidates) != 1:
             return None
-        match = candidates[0]
+        return candidates[0]
+
+    def _match_auto_relogin_page(self, page):
+        """Return one unique Chinese OCR marker for a recovery page."""
+        match = self._auto_relogin_ocr_target_match(page)
+        if match is None:
+            return None
         self._auto_relogin_ocr_page_matches[page] = match
         logger.debug(
             f"[auto_relogin] OCR classified {page}: text={match.text!r}, "
@@ -1403,46 +1404,46 @@ class MapleStoryAutoBot:
                 return False
         return True
 
-    def _next_auto_relogin_channel_point(self):
-        candidates = getattr(self, "_auto_relogin_channel_candidates", None)
-        if not candidates:
-            configured = self._auto_relogin_config().get("channel_points", [])
-            candidates = [tuple(point) for point in configured]
-            random.shuffle(candidates)
-            self._auto_relogin_channel_candidates = candidates
-        if not candidates:
-            return None
-        return self._auto_relogin_scale_point(candidates.pop())
+    def _auto_relogin_channel_click_point(self):
+        """Return one recognized channel-label center from the current popup.
 
-    def _auto_relogin_anchor_adjusted_point(
-            self, page, point, page_location):
-        """Translate a recorded fixed point with its matched page anchor."""
-        if point is None or page_location is None:
+        Channel geometry is deliberately not recorded. RapidOCR finds all
+        visible ``频道N`` labels in the same scan that confirmed the popup,
+        and the highest visible channel number is preferred deterministically.
+        """
+        matches = self._auto_relogin_ocr_page_scan()
+        if matches is None:
             return None
-        default_anchors = {
-            "disconnect": (1737, 857),
-            "channel": (1565, 875),
-        }
-        configured = self._auto_relogin_config().get(
-            "page_anchor_points", {}
+        candidates = {}
+        duplicate_numbers = set()
+        for match in matches:
+            text = normalize_ocr_text(match.normalized_text)
+            if not text.startswith("频道"):
+                continue
+            number_text = text[2:]
+            if not number_text.isascii() or not number_text.isdecimal():
+                continue
+            number = int(number_text)
+            if not 1 <= number <= 20 or number in duplicate_numbers:
+                continue
+            if number in candidates:
+                duplicate_numbers.add(number)
+                del candidates[number]
+                continue
+            candidates[number] = match
+        if not candidates:
+            logger.warning(
+                "[auto_relogin] Channel popup was confirmed but no unique "
+                "频道N OCR target was available"
+            )
+            return None
+        number = max(candidates)
+        match = candidates[number]
+        logger.info(
+            f"[auto_relogin] Dynamic channel target text={match.text!r}, "
+            f"score={match.score:.4f}, capture={match.center}"
         )
-        if not isinstance(configured, dict):
-            return None
-        anchor = configured.get(page, default_anchors.get(page))
-        scaled_anchor = self._auto_relogin_scale_point(anchor)
-        if scaled_anchor is None:
-            return None
-        adjusted = (
-            int(point[0]) + int(page_location[0]) - int(scaled_anchor[0]),
-            int(point[1]) + int(page_location[1]) - int(scaled_anchor[1]),
-        )
-        frame = getattr(self, "img_frame", None)
-        if frame is None:
-            return None
-        frame_h, frame_w = frame.shape[:2]
-        if not 0 <= adjusted[0] < frame_w or not 0 <= adjusted[1] < frame_h:
-            return None
-        return adjusted
+        return tuple(map(int, match.center))
 
     def _begin_auto_relogin_pointer_action(
             self, page, target, action, now):
@@ -2309,7 +2310,7 @@ class MapleStoryAutoBot:
                 click_count = max(
                     1,
                     int(round(self._auto_relogin_number(
-                        "channel_click_count", 1, minimum=1
+                        "channel_click_count", 2, minimum=1
                     ))),
                 )
                 click_interval = self._auto_relogin_number(
@@ -2522,8 +2523,6 @@ class MapleStoryAutoBot:
         uses_ocr_enter = uses_ocr_target and ocr_action == "enter"
         uses_ocr_focus_next_enter = uses_ocr_target and \
             ocr_action == "focus_next_enter"
-        uses_ocr_fixed_click = uses_ocr_target and \
-            ocr_action == "fixed_click"
         uses_ocr_wait = uses_ocr_target and ocr_action == "wait"
         if not uses_ocr_target:
             self._fail_auto_relogin(
@@ -2544,25 +2543,29 @@ class MapleStoryAutoBot:
             return self._begin_auto_relogin_queue_wait(now)
         if uses_ocr_click:
             point = semantic_point
+            if page == "channel":
+                point = self._auto_relogin_channel_click_point()
+                if point is None:
+                    return False
             action = {
                 "connect": "auto_relogin_connect",
                 "world": "auto_relogin_select_world",
+                "channel": "auto_relogin_select_channel",
                 "character": "auto_relogin_start_game",
             }.get(page, f"auto_relogin_{page}")
-        elif uses_ocr_fixed_click and page == "channel":
-            point = self._next_auto_relogin_channel_point()
-            action = "auto_relogin_select_channel"
+        elif not uses_ocr_enter and not uses_ocr_focus_next_enter:
+            return False
+
+        if page == "channel" and uses_ocr_click:
             click_count = max(
                 1,
                 int(round(self._auto_relogin_number(
-                    "channel_click_count", 1, minimum=1
+                    "channel_click_count", 2, minimum=1
                 ))),
             )
             click_interval = self._auto_relogin_number(
                 "channel_double_click_interval", 0.08, minimum=0.0
             )
-        elif not uses_ocr_enter and not uses_ocr_focus_next_enter:
-            return False
 
         if point is not None:
             click_label = "double-click" if click_count == 2 else \
@@ -3832,7 +3835,7 @@ class MapleStoryAutoBot:
                     "[load_config] auto_relogin.mouse_probe_delta must be <= 127"
                 )
                 return -1
-            if int(auto_relogin_cfg.get("channel_click_count", 1)) > 2:
+            if int(auto_relogin_cfg.get("channel_click_count", 2)) > 2:
                 logger.error(
                     "[load_config] auto_relogin.channel_click_count must be "
                     "1 or 2"
@@ -3866,15 +3869,6 @@ class MapleStoryAutoBot:
                 "flow_template_reference_size", (2160, 3840)
             )
             reference_h, reference_w = flow_reference
-
-            def valid_flow_point(value):
-                return isinstance(value, (list, tuple)) and len(value) == 2 \
-                    and all(
-                        not isinstance(coord, bool)
-                        and isinstance(coord, int)
-                        for coord in value
-                    ) and 0 <= value[0] < reference_w \
-                    and 0 <= value[1] < reference_h
 
             if auto_relogin_cfg.get("enable", False):
                 ocr_cfg = auto_relogin_cfg.get("ocr", {})
@@ -4030,25 +4024,26 @@ class MapleStoryAutoBot:
                             )
                             return -1
                         if str(target_cfg.get(
-                                "match_mode", "exact"
-                                )).strip().lower() not in {
-                                    "exact", "contains"
-                                }:
+                                 "match_mode", "exact"
+                                 )).strip().lower() not in {
+                                     "exact", "contains", "partial"
+                                 }:
                             logger.error(
                                 "[load_config] auto_relogin.ocr.targets."
-                                f"{page}.match_mode must be exact or contains"
+                                f"{page}.match_mode must be exact, contains, "
+                                "or partial"
                             )
                             return -1
                         target_action = str(target_cfg.get(
                             "action", "click"
                         )).strip().lower()
                         if target_action not in {
-                                "click", "enter", "fixed_click",
+                                "click", "enter",
                                 "focus_next_enter", "wait"}:
                             logger.error(
                                 "[load_config] auto_relogin.ocr.targets."
                                 f"{page}.action must be click, enter, "
-                                "fixed_click, focus_next_enter, or wait"
+                                "focus_next_enter, or wait"
                             )
                             return -1
                         allowed_actions = {
@@ -4057,7 +4052,7 @@ class MapleStoryAutoBot:
                                 "click", "enter", "focus_next_enter"
                             },
                             "world": {"click"},
-                            "channel": {"fixed_click"},
+                            "channel": {"click"},
                             "queue": {"wait"},
                             "character": {"click"},
                         }[page]
@@ -4068,15 +4063,10 @@ class MapleStoryAutoBot:
                                 f"{sorted(allowed_actions)}"
                             )
                             return -1
-                channel_points = auto_relogin_cfg.get("channel_points")
-                if not isinstance(channel_points, (list, tuple)) or \
-                        not channel_points or any(
-                            not valid_flow_point(point)
-                            for point in channel_points
-                        ):
+                if "channel_points" in auto_relogin_cfg:
                     logger.error(
-                        "[load_config] auto_relogin.channel_points must be a "
-                        "non-empty list of [x, y] points inside the flow frame"
+                        "[load_config] auto_relogin.channel_points is obsolete; "
+                        "the channel action clicks a live 频道N OCR target"
                     )
                     return -1
                 if remote_mouse_mode == "visual_relative":

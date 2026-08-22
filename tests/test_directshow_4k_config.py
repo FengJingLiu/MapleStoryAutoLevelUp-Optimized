@@ -33,7 +33,7 @@ def test_default_capture_source_is_gc573_directshow_rgb24_4k60():
     }
     assert cfg["esp32_hid"]["absolute_desktop_rect"] == [0, 0, 3840, 2160]
     assert cfg["esp32_hid"]["capture_frame_is_desktop"] is False
-    assert cfg["esp32_hid"]["magpie_source_rect"] == [1235, 721, 1366, 768]
+    assert cfg["esp32_hid"]["magpie_source_rect"] == [1235, 710, 1366, 768]
     assert cfg["auto_relogin"]["remote_mouse_mode"] == "absolute"
 
 
@@ -59,15 +59,15 @@ def test_native_relogin_uses_ocr_only_by_default():
         assert 0 <= x0 < x1 <= width
         assert 0 <= y0 < y1 <= height
         assert target["region_source"] == "configured"
-    for point in cfg["channel_points"]:
-        assert 0 <= point[0] < width
-        assert 0 <= point[1] < height
     assert cfg["channel_click_count"] == 2
     assert cfg["connect_enter_retry_delay"] == 1.0
     assert cfg["connect_enter_max_attempts"] == 30
     assert targets["connect"]["action"] == "enter"
     assert "focus_switch_keys" not in cfg
-    assert len(cfg["channel_points"]) == 20
+    assert targets["world"]["match_mode"] == "partial"
+    assert targets["channel"]["texts"] == ["漂漂猪"]
+    assert targets["channel"]["match_mode"] == "exact"
+    assert "channel_points" not in cfg
 
 
 def test_default_uses_shared_hero_and_mob_yolo():
@@ -122,7 +122,12 @@ def test_custom_capture_and_absolute_mouse_use_4k_reference():
     assert cfg["esp32_hid"]["capture_frame_is_desktop"] is False
     assert capture_point_to_absolute_hid(
         cfg, 2100, 1120, 3840, 2160
-    ) == (16917, 16983)
+    ) == (16917, 16816)
+    # Live Magpie calibration: the OCR center of 4.漂漂猪 at (2265, 462)
+    # rendered its cursor hotspot at (2265, 463), within one capture pixel.
+    assert capture_point_to_absolute_hid(
+        cfg, 2265, 462, 3840, 2160
+    ) == (17412, 13265)
     assert cfg["auto_relogin"]["enable"] is True
     assert cfg["auto_relogin"]["remote_mouse_mode"] == "absolute"
 

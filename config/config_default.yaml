@@ -45,7 +45,7 @@ esp32_hid:
   # rectangle before normalizing them to absolute HID coordinates.
   capture_frame_is_desktop: false
   absolute_desktop_rect: [0, 0, 3840, 2160]
-  magpie_source_rect: [1235, 721, 1366, 768]
+  magpie_source_rect: [1235, 710, 1366, 768]
 
 auto_relogin:
   # Recover an already authenticated Chinese Artale session with RapidOCR.
@@ -69,7 +69,7 @@ auto_relogin:
   max_step_attempts: 5
   game_ready_confirm_frames: 2
   mouse_click_duration: 0.10     # Slightly longer BLE click for remote game UI reliability.
-  channel_click_count: 2         # Enter a displayed channel with a real double-click.
+  channel_click_count: 2         # Select a recognized channel with a real double-click.
   channel_double_click_interval: 0.08 # Delay between the two channel clicks.
   # Remote game-UI clicks use calibrated absolute HID. visual_relative is an
   # explicit compatibility mode only and is not selected by shipped profiles.
@@ -152,15 +152,18 @@ auto_relogin:
       world:
         texts: ["4.漂漂猪"]
         region_source: configured
-        search_region: [1931, 322, 2629, 590]
-        match_mode: exact
+        search_region: [800, 250, 3200, 900]
+        match_mode: partial       # Cursor may leave only 4, 漂, or 猪 visible.
         action: click
       channel:
         texts: ["漂漂猪"]
         region_source: configured
-        search_region: [1288, 751, 2092, 1127]
+        # Include the popup title and all visible channel labels in the one
+        # OCR scan. The title confirms the popup; the action dynamically
+        # selects a recognized "频道N" box center.
+        search_region: [1200, 700, 2700, 1550]
         match_mode: exact
-        action: fixed_click
+        action: click
       queue:
         texts: ["正在排队进入游戏"]
         region_source: configured
@@ -173,31 +176,9 @@ auto_relogin:
         search_region: [2468, 537, 3165, 1019]
         match_mode: exact
         action: click
-  # The initial server grid contains only "4.漂漂猪" and blank wooden rows.
-  # Clicking that world opens a separate panel whose OCR marker is the exact
-  # unnumbered "漂漂猪" above 20 channel cells. Only then choose a cell and
-  # double-click it.
-  channel_points:
-    - [1545, 1057]
-    - [1786, 1057]
-    - [2039, 1057]
-    - [2291, 1057]
-    - [1545, 1148]
-    - [1786, 1148]
-    - [2039, 1148]
-    - [2291, 1148]
-    - [1545, 1239]
-    - [1786, 1239]
-    - [2039, 1239]
-    - [2291, 1239]
-    - [1545, 1331]
-    - [1786, 1331]
-    - [2039, 1331]
-    - [2291, 1331]
-    - [1545, 1422]
-    - [1786, 1422]
-    - [2039, 1422]
-    - [2291, 1422]
+  # First click the current OCR box for "4.漂漂猪". Once its popup appears,
+  # use OCR again to double-click a visible "频道N" box. No recorded channel
+  # coordinates are used.
 
 key:
   # 🎮 Keyboard Mapping

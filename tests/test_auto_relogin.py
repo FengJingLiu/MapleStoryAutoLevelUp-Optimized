@@ -75,11 +75,6 @@ class AutoReloginTests(unittest.TestCase):
                 "disconnect_confirm_point": list(
                     cls.DISCONNECT_CONFIRM_POINT
                 ),
-                "channel_points": [list(cls.CHANNEL_POINT)],
-                "page_anchor_points": {
-                    "disconnect": list(cls.PAGE_LOCATIONS["disconnect"]),
-                    "channel": list(cls.PAGE_LOCATIONS["channel"]),
-                },
                 "ocr": {
                     "enable": True,
                     "idle_scan_interval": 1.0,
@@ -118,7 +113,7 @@ class AutoReloginTests(unittest.TestCase):
                             "region_source": "configured",
                             "search_region": [0, 0, 400, 200],
                             "match_mode": "exact",
-                            "action": "fixed_click",
+                            "action": "click",
                         },
                         "queue": {
                             "texts": ["正在排队进入游戏"],
@@ -217,6 +212,9 @@ class AutoReloginTests(unittest.TestCase):
         )
         bot.fsm = SimpleNamespace(set_init_state=Mock())
         bot._reset_auto_relogin_runtime()
+        bot._auto_relogin_channel_click_point = Mock(
+            return_value=cls.CHANNEL_POINT
+        )
         return bot
 
     @classmethod
@@ -451,18 +449,30 @@ class AutoReloginTests(unittest.TestCase):
         bot.kb.click_session_recovery_mouse.assert_not_called()
         bot.kb.click_session_recovery_point.assert_not_called()
 
-    def test_fixed_click_point_tracks_the_current_page_anchor(self):
+    def test_dynamic_channel_click_uses_highest_recognized_channel_center(self):
         bot = self.make_bot()
-        base = self.CHANNEL_POINT
-        recorded_anchor = self.PAGE_LOCATIONS["channel"]
+        def match(text, center):
+            x, y = center
+            return OcrTextMatch(
+                text=text,
+                normalized_text=text,
+                score=0.98,
+                box=((x - 9, y - 5), (x + 9, y - 5),
+                     (x + 9, y + 5), (x - 9, y + 5)),
+                center=center,
+            )
+        bot._auto_relogin_ocr_page_scan = Mock(return_value=(
+            match("漂漂猪", (1671, 935)),
+            match("频道3", (2033, 1062)),
+            match("频道20", (2302, 1410)),
+            match("选择频道", (171, 154)),
+        ))
 
-        adjusted = bot._auto_relogin_anchor_adjusted_point(
-            "channel",
-            base,
-            (recorded_anchor[0] + 17, recorded_anchor[1] - 9),
+        point = MapleStoryAutoBot._auto_relogin_channel_click_point(
+            bot
         )
 
-        self.assertEqual(adjusted, (base[0] + 17, base[1] - 9))
+        self.assertEqual(point, (2302, 1410))
 
     def test_five_pages_require_fresh_frames_and_send_actions_in_order(self):
         bot = self.make_bot(remote=True)
@@ -1687,11 +1697,15 @@ class AutoReloginTests(unittest.TestCase):
         self.assertEqual(auto_relogin["connect_enter_max_attempts"], 30)
         self.assertNotIn("focus_switch_keys", auto_relogin)
         self.assertEqual(targets["world"]["texts"], ["4.漂漂猪"])
-        self.assertEqual(targets["channel"]["action"], "fixed_click")
+        self.assertEqual(targets["world"]["match_mode"], "partial")
+        self.assertEqual(targets["channel"]["action"], "click")
         self.assertEqual(targets["channel"]["texts"], ["漂漂猪"])
+        self.assertEqual(
+            targets["channel"]["search_region"], [1200, 700, 2700, 1550]
+        )
         self.assertEqual(targets["channel"]["match_mode"], "exact")
         self.assertEqual(auto_relogin["channel_click_count"], 2)
-        self.assertEqual(len(auto_relogin["channel_points"]), 20)
+        self.assertNotIn("channel_points", auto_relogin)
         self.assertEqual(targets["queue"]["action"], "wait")
         self.assertEqual(targets["queue"]["match_mode"], "contains")
         self.assertEqual(targets["character"]["action"], "click")
@@ -1702,7 +1716,6 @@ class AutoReloginTests(unittest.TestCase):
             "confirm_frames": 2,
             "cancel_confirm_misses": 2,
             "flow_template_reference_size": [100, 200],
-            "channel_points": [[50, 50]],
             "ocr": {
                 "enable": True,
                 "idle_scan_interval": 1.0,
@@ -1730,7 +1743,7 @@ class AutoReloginTests(unittest.TestCase):
                         "texts": ["4.漂漂猪"],
                         "region_source": "configured",
                         "search_region": [0, 0, 100, 100],
-                        "match_mode": "exact",
+                        "match_mode": "partial",
                         "action": "click",
                     },
                     "channel": {
@@ -1738,7 +1751,7 @@ class AutoReloginTests(unittest.TestCase):
                         "region_source": "configured",
                         "search_region": [0, 0, 100, 100],
                         "match_mode": "exact",
-                        "action": "fixed_click",
+                        "action": "click",
                     },
                     "character": {
                         "texts": ["开始游戏"],

@@ -65,11 +65,6 @@ def make_bot(*, click_results=True):
             "channel_double_click_interval": 0.0,
             "remote_mouse_mode": "absolute",
             "remote_confirm_key": "enter",
-            "channel_points": [list(CHANNEL_POINT)],
-            "page_anchor_points": {
-                "disconnect": list(PAGE_LOCATIONS["disconnect"]),
-                "channel": list(PAGE_LOCATIONS["channel"]),
-            },
             "ocr": {
                 "enable": True,
                 "min_score": 0.85,
@@ -100,7 +95,7 @@ def make_bot(*, click_results=True):
                         "texts": ["漂漂猪"],
                         "search_region": target_region,
                         "match_mode": "exact",
-                        "action": "fixed_click",
+                        "action": "click",
                     },
                     "queue": {
                         "texts": ["正在排队进入游戏"],
@@ -173,6 +168,7 @@ def make_bot(*, click_results=True):
     bot._auto_relogin_ocr_gate = None
     bot._auto_relogin_ocr_gate_signature = None
     bot._reset_auto_relogin_runtime()
+    bot._auto_relogin_channel_click_point = Mock(return_value=CHANNEL_POINT)
     return bot
 
 
@@ -280,6 +276,18 @@ def test_queue_overlay_has_priority_over_channel_text_behind_it():
 
     assert bot._find_known_auto_relogin_page() == (
         "queue", PAGE_LOCATIONS["queue"]
+    )
+
+
+def test_channel_title_has_priority_over_numbered_world_label_behind_it():
+    bot = make_bot()
+    bot.cfg["auto_relogin"]["reactive_pages"] = True
+    bot._match_auto_relogin_page.side_effect = lambda page: (
+        PAGE_LOCATIONS[page] if page in {"channel", "world"} else None
+    )
+
+    assert bot._find_known_auto_relogin_page() == (
+        "channel", PAGE_LOCATIONS["channel"]
     )
 
 
