@@ -71,6 +71,20 @@ class DirectionalAoeDecisionTests(unittest.TestCase):
         bot.get_monsters_in_range = Mock(return_value=list(monsters))
         return bot
 
+    def test_combat_disabled_blocks_detector_and_periodic_attack_input(self):
+        bot = self.make_bot([make_monster(150)])
+        bot.cfg["bot"]["combat_enabled"] = False
+        bot.monsters = [make_monster(150)]
+        bot.cmd_action = "attack"
+
+        bot.update_cmd_by_mob_detection()
+
+        self.assertEqual(bot.monsters, [])
+        self.assertEqual(bot.cmd_action, "none")
+        self.assertTrue(bot._suppress_periodic_attack)
+        self.assertTrue(bot._wz_combat_observation_valid)
+        bot.get_monsters_in_range.assert_not_called()
+
     def test_exact_threshold_uses_aoe_on_the_crowded_side(self):
         bot = self.make_bot([
             make_monster(90),
@@ -189,6 +203,32 @@ class DirectionalAoeDecisionTests(unittest.TestCase):
         self.assertTrue(bot._suppress_periodic_attack)
         self.assertFalse(bot._wz_route_jump_atomic_pending)
         self.assertIsNone(bot._wz_route_jump_atomic_route_index)
+        bot.get_monsters_in_range.assert_called_once()
+
+    def test_timed_wz_jump_is_cancelled_before_hid_when_monster_appears(self):
+        bot = self.make_bot([make_monster(150)])
+        bot.cfg["directional_aoe"]["enable"] = False
+        bot.wz_navigation = SimpleNamespace(
+            patrol_strategy="ranged_safe_platforms",
+            plan=SimpleNamespace(combat_checkpoints=(object(),)),
+        )
+        bot.idx_routes = 2
+        bot.cmd_move_x = "right"
+        bot.cmd_move_y = "none"
+        bot.cmd_action = "none"
+        bot._wz_timed_jump_candidate = {
+            "route_index": 2,
+            "direction": "right",
+            "send_at": 10.1,
+        }
+
+        bot.update_cmd_by_mob_detection()
+
+        self.assertEqual(
+            (bot.cmd_move_x, bot.cmd_move_y, bot.cmd_action),
+            ("left", "none", "attack"),
+        )
+        self.assertIsNone(bot._wz_timed_jump_candidate)
         bot.get_monsters_in_range.assert_called_once()
 
     def test_reserved_stationary_wz_jump_yields_to_attackable_monster(self):

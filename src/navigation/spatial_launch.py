@@ -17,6 +17,20 @@ class SpatialLaunchPoint:
     speed_ratio: float
 
 
+@dataclass(frozen=True, slots=True)
+class TimedPlatformJump:
+    """One latency-compensated directional Jump schedule."""
+
+    send_at: float
+    delay_seconds: float
+    takeoff_x: float
+    edge_x: float
+    remaining_px: float
+    speed_px_per_sec: float
+    input_latency_seconds: float
+    latency_compensation_px: float
+
+
 class HeroVelocityTracker:
     """Estimate current horizontal speed from a short minimap sample window."""
 
@@ -139,6 +153,142 @@ def platform_launch_point(
         cruise_speed_px_per_sec=max(0.0, float(cruise_speed_px_per_sec)),
         speed_ratio=ratio,
     )
+
+
+def timed_platform_jump(
+    bounds: tuple[float, float, float, float],
+    direction: str,
+    player_x: float,
+    sampled_at: float,
+    now: float,
+    current_speed_px_per_sec: float,
+    cruise_speed_px_per_sec: float,
+    input_latency_seconds: float,
+    takeoff_edge_margin_px: float,
+    *,
+    minimum_speed_ratio: float = 0.75,
+) -> TimedPlatformJump | None:
+    """Schedule Alt so game-side takeoff occurs just inside an edge.
+
+    ``input_latency_seconds`` is the measured end-to-end interval from the
+    host sending Alt until the capture pipeline first observes upward Hero
+    motion.  Subtracting it from the predicted edge-arrival time compensates
+    both remote HID/game input and capture feedback latency.
+    """
+    if direction not in {"left", "right"}:
+        raise ValueError("jump direction must be left or right")
+    values = (
+        player_x,
+        sampled_at,
+        now,
+        current_speed_px_per_sec,
+        cruise_speed_px_per_sec,
+        input_latency_seconds,
+        takeoff_edge_margin_px,
+        minimum_speed_ratio,
+    )
+    if not all(math.isfinite(float(value)) for value in values):
+        raise ValueError("timed jump values must be finite")
+    if cruise_speed_px_per_sec <= 0 or input_latency_seconds < 0 or \
+            takeoff_edge_margin_px < 0 or not 0 < minimum_speed_ratio <= 1:
+        raise ValueError("invalid timed jump calibration")
+
+    ratio = speed_ratio(current_speed_px_per_sec, cruise_speed_px_per_sec)
+    if ratio < minimum_speed_ratio:
+        return None
+    speed = min(
+        float(cruise_speed_px_per_sec),
+        max(0.0, float(current_speed_px_per_sec)),
+    )
+    if speed <= 0:
+        return None
+
+    left, _, right, _ = map(float, bounds)
+    left, right = min(left, right), max(left, right)
+    edge_x = right if direction == "right" else left
+    platform_width = max(0.0, right - left)
+    margin = min(float(takeoff_edge_margin_px), platform_width)
+    takeoff_x = edge_x - margin if direction == "right" else edge_x + margin
+    remaining = (
+        edge_x - float(player_x)
+        if direction == "right"
+        else float(player_x) - edge_x
+    )
+    distance_to_takeoff = (
+        takeoff_x - float(player_x)
+        if direction == "right"
+        else float(player_x) - takeoff_x
+    )
+    travel_seconds = max(0.0, distance_to_takeoff / speed)
+    send_at = (
+        float(sampled_at)
+        + travel_seconds
+        - float(input_latency_seconds)
+    )
+    return TimedPlatformJump(
+        send_at=send_at,
+        delay_seconds=max(0.0, send_at - float(now)),
+        takeoff_x=takeoff_x,
+        edge_x=edge_x,
+        remaining_px=remaining,
+        speed_px_per_sec=speed,
+        input_latency_seconds=float(input_latency_seconds),
+        latency_compensation_px=speed * float(input_latency_seconds),
+    )
+
+
+def reachable_takeoff_edge_margin(
+    jump_source: tuple[float, float],
+    target: tuple[float, float],
+    jump_height_px: float,
+    jump_distance_px: float,
+    requested_margin_px: float,
+    *,
+    landing_reserve_px: float = 1.0,
+) -> float:
+    """Cap an interior takeoff margin by the descending jump arc.
+
+    ``jump_distance_px`` is the same-height airborne distance.  A higher
+    destination intersects the descending arc sooner, so consuming too much
+    of that distance inside the source platform can make an otherwise valid
+    edge unreachable.  The small landing reserve keeps the Hero center past
+    the destination edge instead of merely touching it.
+    """
+    source_x, source_y = map(float, jump_source[:2])
+    target_x, target_y = map(float, target[:2])
+    values = (
+        source_x,
+        source_y,
+        target_x,
+        target_y,
+        jump_height_px,
+        jump_distance_px,
+        requested_margin_px,
+        landing_reserve_px,
+    )
+    if not all(math.isfinite(float(value)) for value in values):
+        raise ValueError("jump reach values must be finite")
+    jump_height_px = float(jump_height_px)
+    jump_distance_px = float(jump_distance_px)
+    requested_margin_px = float(requested_margin_px)
+    landing_reserve_px = float(landing_reserve_px)
+    if jump_height_px <= 0 or jump_distance_px <= 0 or \
+            requested_margin_px < 0 or landing_reserve_px < 0:
+        raise ValueError("invalid jump reach calibration")
+
+    rise_px = source_y - target_y
+    if rise_px >= jump_height_px:
+        return 0.0
+    descending_fraction = (
+        1.0 + math.sqrt(max(0.0, 1.0 - rise_px / jump_height_px))
+    ) / 2.0
+    reachable_distance = jump_distance_px * descending_fraction
+    edge_gap = abs(target_x - source_x)
+    reachable_margin = max(
+        0.0,
+        reachable_distance - edge_gap - landing_reserve_px,
+    )
+    return min(requested_margin_px, reachable_margin)
 
 
 def rope_launch_distance(

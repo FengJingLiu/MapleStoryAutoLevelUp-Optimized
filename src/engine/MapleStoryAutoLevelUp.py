@@ -87,8 +87,9 @@ from src.navigation import WzNavigationRuntime
 from src.navigation.minimap_viewport import DynamicMinimapLocator
 from src.navigation.spatial_launch import (
     HeroVelocityTracker,
-    platform_launch_point,
+    reachable_takeoff_edge_margin,
     rope_launch_distance,
+    timed_platform_jump,
 )
 from src.navigation.wz_catalog import WzMapRecognitionError
 from src.navigation.wz_geometry import Point
@@ -302,8 +303,10 @@ class MapleStoryAutoBot:
         self._wz_combat_checkpoint_clear_since = None
         self._wz_combat_checkpoint_cleared_route_index = None
         self._wz_combat_checkpoint_jump_alignment_direction = None
+        self._wz_timed_jump_candidate = None
         self._wz_route_jump_atomic_pending = False
         self._wz_route_jump_atomic_route_index = None
+        self._wz_player_navigation_raw = None
         self._wz_edge_jump_alignment_route_index = None
         self._wz_launch_velocity = HeroVelocityTracker()
         self._wz_current_speed_px_per_sec = 0.0
@@ -3565,6 +3568,13 @@ class MapleStoryAutoBot:
         )
         if update is None:
             self._wz_jump_move_x = "none"
+            self._wz_player_navigation_raw = None
+            self._wz_timed_jump_candidate = None
+            cancel_timed_jump = getattr(
+                self.kb, "cancel_scheduled_directional_jump", None
+            ) if self.kb is not None else None
+            if callable(cancel_timed_jump):
+                cancel_timed_jump()
             self.cmd_move_x = "none"
             self.cmd_move_y = "none"
             self.cmd_action = "none"
@@ -3582,6 +3592,9 @@ class MapleStoryAutoBot:
             update.player_navigation,
             navigation_sample_at,
             previous_command,
+        )
+        self._wz_player_navigation_raw = tuple(
+            map(float, update.player_navigation_raw)
         )
         self.loc_player_global = tuple(
             int(round(value)) for value in update.player_navigation
@@ -5813,9 +5826,14 @@ class MapleStoryAutoBot:
                 "appearance", {}
             ).get("enable", False)
             snapshot = getattr(self, "_current_vision_snapshot", None)
+            rope_pose_required = bool(
+                not getattr(self, "_wz_navigation_enabled", False)
+                or getattr(self, "_rope_climb_active", False)
+                or getattr(self, "is_on_ladder", False)
+            )
             return bool(
                 appearance_enabled
-                and not getattr(self, "_wz_navigation_enabled", False)
+                and rope_pose_required
                 and snapshot is not None
                 and int(snapshot.generation) != getattr(
                     self, "_last_yolo_hero_snapshot_generation", None
@@ -6085,10 +6103,16 @@ class MapleStoryAutoBot:
             thickness=2,
             text_height=0.45,
         )
-        if not getattr(self, "_wz_navigation_enabled", False):
-            # WZ rope state is derived from high-rate minimap elevation and
-            # the explicit mount transaction. Running 4K hood templates here
-            # would put slow screen vision back into the navigation loop.
+        if (
+            not getattr(self, "_wz_navigation_enabled", False)
+            or getattr(self, "_rope_climb_active", False)
+            or getattr(self, "is_on_ladder", False)
+        ):
+            # WZ coordinates can guide the mount and ascent, but they cannot
+            # distinguish hanging at the rope top from standing on the upper
+            # platform. Keep the local hood-template check off the ordinary
+            # 4K navigation path, then enable it for the complete rope
+            # transaction (including the climbing -> ground exit frame).
             self._update_ladder_state_from_smile_pose(best_match["player"])
         return best_match["player"]
 
@@ -6497,6 +6521,17 @@ class MapleStoryAutoBot:
         if appearance_cfg.get("enable", False) is False or not templates:
             return None
 
+        # The YOLO backend normally prepares grayscale only when a fresh
+        # appearance consumer is expected. Keep this local guard because the
+        # accepted Hero snapshot and the navigation state can change between
+        # scheduling that decision and consuming it (notably on the first WZ
+        # rope frame).
+        if getattr(self, "img_frame_gray", None) is None:
+            frame = getattr(self, "img_frame", None)
+            if frame is None:
+                return None
+            self.img_frame_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+
         camera_h = min(
             int(self.cfg["ui_coords"]["ui_y_start"]),
             self.img_frame_gray.shape[0],
@@ -6601,7 +6636,13 @@ class MapleStoryAutoBot:
                     appearance_cfg.get("validation_distance", 30)
                 )
                 max_distance = validation_distance
-                if pose == "climbing" and not strict_anchor:
+                if pose == "climbing":
+                    # YOLO anchors the centre of the full Hero box, while the
+                    # climbing template contains only the tiger hood. Their
+                    # vertical anchors differ by about 70 px at native 4K.
+                    # The match is already restricted to the fresh local Hero
+                    # region, so use the dedicated hood distance even for a
+                    # strict anchor instead of discarding an exact template.
                     max_distance = int(appearance_cfg.get(
                         "climb_validation_distance", validation_distance
                     ))
@@ -7864,17 +7905,14 @@ class MapleStoryAutoBot:
         return plan
 
     def _get_active_wz_rope_mount_calibration(self):
-        """Return a validated manual launch window for the active WZ map."""
+        """Return the global, symmetric launch window for WZ rope mounts."""
         navigator = getattr(self, "wz_navigation", None)
         if navigator is None or not getattr(navigator, "active", False):
             return None
         calibration = self.cfg.get("wz_navigation", {}).get(
             "rope_mount_calibration"
         )
-        if not isinstance(calibration, dict) or \
-                str(calibration.get("map_id", "")) != str(
-                    getattr(navigator, "map_id", "")
-                ):
+        if not isinstance(calibration, dict):
             return None
         try:
             launch_window = calibration["launch_window_px"]
@@ -7883,18 +7921,11 @@ class MapleStoryAutoBot:
                 raise ValueError("launch_window_px must contain two values")
             window_min, window_max = map(int, launch_window)
             staging_offset = int(calibration["staging_offset_px"])
-            approach_direction = str(
-                calibration.get("approach_direction", "right")
-            ).strip().lower()
             if window_min <= 0 or window_max < window_min:
                 raise ValueError("launch window must be positive and ordered")
             if staging_offset <= window_max:
                 raise ValueError(
                     "staging_offset_px must be beyond the launch window"
-                )
-            if approach_direction not in {"left", "right"}:
-                raise ValueError(
-                    "approach_direction must be left or right"
                 )
         except (KeyError, TypeError, ValueError) as exc:
             logger.warning(
@@ -7902,7 +7933,6 @@ class MapleStoryAutoBot:
             )
             return None
         return {
-            "approach_direction": approach_direction,
             "launch_window_px": (window_min, window_max),
             "staging_offset_px": staging_offset,
         }
@@ -8047,7 +8077,7 @@ class MapleStoryAutoBot:
                 "started_at", "aligned_since", "mount_request_started_at",
                 "last_progress_at", "last_y_change_at",
                 "position_last_progress_at", "position_brake_started_at",
-                "destination_reached_at"):
+                "destination_reached_at", "ladder_exit_started_at"):
             value = state.get(key)
             if value is not None:
                 state[key] = float(value) + paused_for
@@ -8126,12 +8156,6 @@ class MapleStoryAutoBot:
         recorded_approach = state.get("rope_mount_approach_direction")
         if side is None and recorded_approach in {"left", "right"}:
             side = "left" if recorded_approach == "right" else "right"
-        elif side is None and calibration is not None:
-            side = (
-                "left"
-                if calibration.get("approach_direction") == "right"
-                else "right"
-            )
         side = side or self._choose_rope_runup_side(target_x)
         fallback_distance = max(
             0,
@@ -8143,15 +8167,8 @@ class MapleStoryAutoBot:
         if configured_staging is None:
             configured_staging = fallback_distance
         base_staging_distance = max(0, int(configured_staging))
-        def staging_for(runup_side):
-            approach_direction = (
-                "right" if runup_side == "left" else "left"
-            )
-            applies = bool(
-                calibration is not None
-                and calibration.get("approach_direction")
-                == approach_direction
-            )
+        def staging_for():
+            applies = calibration is not None
             distance = base_staging_distance
             if applies:
                 distance = max(
@@ -8160,7 +8177,7 @@ class MapleStoryAutoBot:
                 )
             return distance, applies
 
-        staging_distance, calibration_applies = staging_for(side)
+        staging_distance, calibration_applies = staging_for()
         configured_launch = state.get("launch_offset_px")
         if configured_launch is None:
             configured_launch = staging_distance
@@ -8169,11 +8186,11 @@ class MapleStoryAutoBot:
         width = self.img_route.shape[1] if self.img_route is not None else 0
         if side == "left" and target_x - staging_distance < 0:
             side = "right"
-            staging_distance, calibration_applies = staging_for(side)
+            staging_distance, calibration_applies = staging_for()
         elif width > 0 and side == "right" and \
                 target_x + staging_distance >= width:
             side = "left"
-            staging_distance, calibration_applies = staging_for(side)
+            staging_distance, calibration_applies = staging_for()
         staging_distance = max(staging_distance, launch_distance)
         offset_sign = -1 if side == "left" else 1
         state["side"] = side
@@ -8206,6 +8223,32 @@ class MapleStoryAutoBot:
         else:
             remaining = int(player_x) - target_x
         return remaining > int(launch_window[1])
+
+    @staticmethod
+    def _has_trajectory_rope_runway(state, player_x):
+        """Return whether Hero already has enough same-side takeoff room.
+
+        A WZ mount plan describes a minimum staging distance, not one exact
+        minimap x-coordinate.  Treat every point at least that far from the
+        rope on the selected side as a valid runway so coarse minimap samples
+        cannot make Hero chase one staging pixel and falsely report a block.
+        Recorded launch windows remain authoritative when present.
+        """
+        if not state.get("trajectory_mount", False):
+            return False
+        launch_window = state.get("active_launch_window_px")
+        target_x = int(state["target"][0])
+        if state.get("side") == "left":
+            remaining = target_x - int(player_x)
+        else:
+            remaining = int(player_x) - target_x
+        if launch_window is not None:
+            return remaining > int(launch_window[1])
+        staging_distance = max(
+            int(state.get("launch_offset_px") or 0),
+            int(state.get("staging_offset_px") or 0),
+        )
+        return remaining >= staging_distance
 
     def _start_rope_climb(self, route_action):
         """Create a climb state from one predicted rope guide endpoint."""
@@ -8243,6 +8286,7 @@ class MapleStoryAutoBot:
                 "trajectory_mount": mount_plan is not None,
                 "destination_y": route_action.get("rope_destination_y"),
                 "destination_reached_at": None,
+                "ladder_exit_started_at": None,
                 "launch_offset_px": (
                     int(mount_plan.launch_offset_px)
                     if mount_plan is not None else None
@@ -8324,16 +8368,8 @@ class MapleStoryAutoBot:
                     "cmd_left_right_last",
                     None,
                 )
-                calibration = state.get("rope_mount_calibration")
-                calibrated_direction = (
-                    calibration.get("approach_direction")
-                    if calibration is not None else None
-                )
                 if approach_side is not None and \
-                        held_direction == approach_direction and (
-                        calibrated_direction is None
-                        or approach_direction == calibrated_direction
-                ):
+                        held_direction == approach_direction:
                     self._set_rope_runup_side(
                         state, side=approach_side
                     )
@@ -8435,23 +8471,14 @@ class MapleStoryAutoBot:
     def _prepare_rope_climb_retry(self, state):
         self._rope_spatial_mount_candidate = None
         previous_side = state.get("side")
-        calibration = state.get("rope_mount_calibration")
-        calibrated_direction = (
-            calibration.get("approach_direction")
-            if calibration is not None else None
-        )
-        if calibrated_direction in {"left", "right"}:
-            next_side = (
-                "left" if calibrated_direction == "right" else "right"
-            )
-        else:
-            next_side = "right" if previous_side == "left" else "left"
+        next_side = "right" if previous_side == "left" else "left"
         self._set_rope_runup_side(state, side=next_side)
         state["phase"] = "position"
         state["aligned_since"] = None
         state["mount_request_started_at"] = None
         state["mount_kind"] = None
         state["destination_reached_at"] = None
+        state["ladder_exit_started_at"] = None
         state["position_side_switches"] = 0
         logger.info(
             "[route] Rope mount made no upward progress; retry from "
@@ -8512,7 +8539,7 @@ class MapleStoryAutoBot:
         return True
 
     def finalize_rope_spatial_mount(self):
-        """Publish Up + Jump now if combat kept the live spatial trigger."""
+        """Publish Jump-then-Up now if combat kept the spatial trigger."""
         candidate = getattr(self, "_rope_spatial_mount_candidate", None)
         self._rope_spatial_mount_candidate = None
         if not isinstance(candidate, dict):
@@ -8538,7 +8565,7 @@ class MapleStoryAutoBot:
         decision = candidate["decision"]
         logger.info(
             "[spatial-rope] Hero reached live launch point; "
-            f"{direction} Up+Jump now: "
+            f"{direction} Jump-then-Up now: "
             f"remaining={candidate['rope_remaining']:.2f}px, "
             f"trigger={decision.trigger_x:.2f}px, "
             f"speed={decision.current_speed_px_per_sec:.2f}/"
@@ -8588,19 +8615,36 @@ class MapleStoryAutoBot:
             stationary = state.get("mount_kind") == "stationary"
             if stationary:
                 direction = "none"
+                request_complete = (
+                    now - state["mount_request_started_at"] >= 0.20
+                )
             else:
                 side = state["side"]
                 direction = "right" if side == "left" else "left"
-            # Keep Up visible briefly after the immediate TAP while waiting
-            # for minimap ascent; this does not delay or reschedule takeoff.
-            request_hold = 0.20
-            if now - state["mount_request_started_at"] < request_hold:
+                target_x = int(state["target"][0])
+                reached_rope_x = (
+                    player_x >= target_x
+                    if direction == "right"
+                    else player_x <= target_x
+                )
+                horizontal_timeout = max(
+                    0.1,
+                    float(route_cfg.get(
+                        "rope_climb_horizontal_timeout_ms", 700
+                    )) / 1000.0,
+                )
+                request_complete = bool(
+                    reached_rope_x
+                    or now - state["mount_request_started_at"]
+                    >= horizontal_timeout
+                )
+            if not request_complete:
                 self.cmd_move_x = direction
                 self.cmd_move_y = "up"
-                self.cmd_action = (
-                    "rope_mount_stationary"
-                    if stationary else f"rope_mount_{direction}"
-                )
+                # The Jump TAP was a one-shot in _request_rope_mount. Keep
+                # only the held state visible on later vision frames so the
+                # keyboard worker cannot issue a second airborne Jump.
+                self.cmd_action = "rope_hold"
                 return True
             state["phase"] = "mounting"
             phase = "mounting"
@@ -8667,34 +8711,39 @@ class MapleStoryAutoBot:
                         state["destination_reached_at"] = now
                 else:
                     state["destination_reached_at"] = None
-            destination_reached_at = state.get("destination_reached_at")
-            destination_dwell = (
-                now - float(destination_reached_at)
-                if destination_reached_at is not None else 0.0
+            if destination_y is not None and reached_destination and \
+                    state["observed_ladder"] and not ladder_now:
+                if state.get("ladder_exit_started_at") is None:
+                    state["ladder_exit_started_at"] = now
+            else:
+                state["ladder_exit_started_at"] = None
+            ladder_exit_started_at = state.get("ladder_exit_started_at")
+            ladder_exit_dwell = (
+                now - float(ladder_exit_started_at)
+                if ladder_exit_started_at is not None else 0.0
             )
-            visual_exit_at_destination = bool(
+            top_exit_hold = max(
+                finish_stall,
+                float(route_cfg.get("rope_climb_top_exit_hold", 1.0)),
+            )
+            verified_wz_exit = bool(
                 destination_y is not None
-                and state["observed_ladder"]
-                and not ladder_now
-                and reached_destination
+                and ladder_exit_dwell >= top_exit_hold
             )
-            coordinate_landing = bool(
-                near_rope_x
+            legacy_coordinate_landing = bool(
+                destination_y is None
+                and near_rope_x
                 and reached_destination
-                and (
-                    destination_dwell >= finish_stall
-                    if destination_y is not None
-                    else stationary_for >= finish_stall
-                )
+                and stationary_for >= finish_stall
             )
             if phase == "climbing" and not ladder_now and \
                     upward_progress >= min_progress and \
                     current_elevation > landing_tolerance and \
-                    (visual_exit_at_destination or coordinate_landing):
+                    (verified_wz_exit or legacy_coordinate_landing):
                 evidence = (
-                    "visual ladder exit at WZ destination"
-                    if visual_exit_at_destination
-                    else "stable WZ destination coordinates"
+                    "sustained climbing-template exit at WZ destination"
+                    if verified_wz_exit
+                    else "legacy sustained elevated landing"
                 )
                 self._finish_rope_climb(evidence)
                 return True
@@ -8752,6 +8801,10 @@ class MapleStoryAutoBot:
 
         if phase == "running_approach":
             direction = "right" if state["side"] == "left" else "left"
+            # A runway is pure horizontal navigation.  Keep the logical
+            # action neutral so the live velocity tracker can retain these
+            # samples instead of resetting on the internal rope_hold marker.
+            self.cmd_action = "none"
             launch_x = int(state.get("launch_x", state["start_x"]))
             launch_window = state.get("active_launch_window_px")
             tolerance = max(
@@ -8850,17 +8903,17 @@ class MapleStoryAutoBot:
         tolerance = max(
             0, int(route_cfg.get("rope_climb_align_tolerance", 1))
         )
-        # A recorded trajectory defines a valid launch window, not one exact
-        # staging pixel. Once Hero has backed beyond that window, the HID
-        # transaction can build the remaining measured momentum while running
-        # at the rope. This avoids oscillating or declaring the runway blocked
-        # merely because x=77 was skipped by a coarse minimap sample.
-        calibrated_runway_ready = self._has_calibrated_rope_runway(
+        # A trajectory defines a minimum same-side runway, not one exact
+        # staging pixel. Once Hero has enough room, the HID transaction can
+        # build momentum while running at the rope. This avoids oscillating or
+        # declaring the runway blocked when a coarse minimap sample skips the
+        # generated staging x-coordinate.
+        trajectory_runway_ready = self._has_trajectory_rope_runway(
             state, player_x
         )
         dx = (
             0
-            if calibrated_runway_ready
+            if trajectory_runway_ready
             else int(state["start_x"]) - player_x
         )
         distance = abs(dx)
@@ -8984,6 +9037,7 @@ class MapleStoryAutoBot:
             state["position_last_progress_at"] = now
             state["approach_last_x"] = player_x
             self.cmd_move_x = direction
+            self.cmd_action = "none"
             logger.info(
                 "[route] Rope staging complete; build measured momentum "
                 + (
@@ -9374,7 +9428,9 @@ class MapleStoryAutoBot:
         else:
             return None
 
-        player = getattr(self, "loc_player_global", None)
+        player = getattr(self, "_wz_player_navigation_raw", None)
+        if player is None:
+            player = getattr(self, "loc_player_global", None)
         if not isinstance(player, (tuple, list)) or len(player) < 2:
             return None
         player_x, player_y = map(float, player[:2])
@@ -9389,10 +9445,12 @@ class MapleStoryAutoBot:
             "direction": direction,
             "player_x": player_x,
             "bounds": (left, top, right, bottom),
+            "jump_source": tuple(map(float, jump_source[:2])),
+            "target": tuple(map(float, target[:2])),
         }
 
     def _apply_wz_spatial_directional_jump(self):
-        """Run toward a speed-adjusted X and Jump on the current Hero frame."""
+        """Arm one latency-compensated horizontal Jump near a platform edge."""
         descriptor = self._current_wz_spatial_jump_descriptor()
         if descriptor is None:
             return False
@@ -9413,44 +9471,141 @@ class MapleStoryAutoBot:
             float(getattr(self, "_wz_current_speed_px_per_sec", 0.0)),
         )
         cruise_speed = self._wz_walk_speed_px_per_second()
-        decision = platform_launch_point(
-            descriptor["bounds"],
-            direction,
-            current_speed,
-            cruise_speed,
-        )
         left, _, right, _ = descriptor["bounds"]
         player_x = descriptor["player_x"]
-        inside_band = left <= player_x <= right
-        reached = (
-            player_x >= decision.trigger_x
+        edge_x = right if direction == "right" else left
+        remaining = (
+            edge_x - player_x
             if direction == "right"
-            else player_x <= decision.trigger_x
+            else player_x - edge_x
         )
-        passed_band = player_x > right if direction == "right" else \
-            player_x < left
 
         self.cmd_move_x = direction
         self.cmd_move_y = "none"
         self.cmd_action = "none"
-        if inside_band and reached:
-            command = f"{direction} none jump"
-            self.cmd_move_x, self.cmd_move_y, self.cmd_action = command.split()
-            self._reserve_wz_route_jump_atomic(command)
-            self._wz_jump_move_x = direction
-            self._wz_edge_jump_alignment_route_index = None
-            logger.info(
-                f"[spatial-jump] Hero reached route{route_index + 1} "
-                f"launch_x={decision.trigger_x:.2f}px; Jump now: "
-                f"x={player_x:.2f}px, "
-                f"speed={decision.current_speed_px_per_sec:.2f}/"
-                f"{decision.cruise_speed_px_per_sec:.2f}px/s, "
-                f"ratio={decision.speed_ratio:.2f}, "
-                f"band={left:.0f}..{right:.0f}"
-            )
-        elif passed_band:
+        if remaining < 0:
             # Never renew movement toward empty space after a missed frame.
             self.cmd_move_x = "none"
+            self._wz_timed_jump_candidate = None
+            return True
+
+        motion_cfg = self.cfg["wz_navigation"]["motion"]
+        input_latency_seconds = float(
+            motion_cfg["jump_input_latency_ms"]
+        ) / 1000.0
+        edge_margin = float(
+            motion_cfg["jump_takeoff_edge_margin_px"]
+        )
+        registration = getattr(
+            getattr(self, "wz_navigation", None), "registration", None
+        )
+        registration_margin = self._positive_finite_number(
+            getattr(registration, "residual_p95_px", None)
+        )
+        requested_edge_margin = edge_margin + registration_margin
+        jump_height = self._positive_finite_number(
+            motion_cfg.get("jump_height_px")
+        )
+        jump_distance = self._positive_finite_number(
+            motion_cfg.get("jump_distance_px")
+        )
+        if jump_height > 0 and jump_distance > 0:
+            edge_margin = reachable_takeoff_edge_margin(
+                descriptor["jump_source"],
+                descriptor["target"],
+                jump_height,
+                jump_distance,
+                requested_edge_margin,
+            )
+        else:
+            edge_margin = requested_edge_margin
+        arm_distance = float(
+            motion_cfg["jump_timing_arm_distance_px"]
+        )
+        values = (input_latency_seconds, edge_margin, arm_distance)
+        if not all(math.isfinite(value) for value in values) or \
+                input_latency_seconds < 0 or edge_margin < 0 or \
+                arm_distance <= edge_margin:
+            raise ValueError("invalid WZ timed jump calibration")
+        if remaining > arm_distance:
+            return True
+
+        sampled_at = getattr(self, "_wz_navigation_sample_at", None)
+        if sampled_at is None:
+            return True
+        now = time.monotonic()
+        decision = timed_platform_jump(
+            descriptor["bounds"],
+            direction,
+            player_x,
+            float(sampled_at),
+            now,
+            current_speed,
+            cruise_speed,
+            input_latency_seconds,
+            edge_margin,
+        )
+        if decision is None:
+            return True
+
+        self._wz_timed_jump_candidate = {
+            "route_index": route_index,
+            "direction": direction,
+            "send_at": decision.send_at,
+            "player_x": player_x,
+            "remaining_px": decision.remaining_px,
+            "takeoff_x": decision.takeoff_x,
+            "speed_px_per_sec": decision.speed_px_per_sec,
+            "latency_compensation_px": (
+                decision.latency_compensation_px
+            ),
+            "edge_margin_px": edge_margin,
+            "requested_edge_margin_px": requested_edge_margin,
+            "delay_seconds": decision.delay_seconds,
+        }
+        self._wz_jump_move_x = direction
+        self._wz_edge_jump_alignment_route_index = None
+        return True
+
+    def finalize_wz_timed_directional_jump(self):
+        """Commit an armed Jump only after this frame stays combat-clear."""
+        candidate = getattr(self, "_wz_timed_jump_candidate", None)
+        self._wz_timed_jump_candidate = None
+        if not isinstance(candidate, dict):
+            return False
+        direction = candidate["direction"]
+        route_index = int(candidate["route_index"])
+        if self.cmd_move_x != direction or self.cmd_move_y not in {
+                "none", "stop"} or self.cmd_action not in {"none", "stop"}:
+            return False
+        keyboard_controller = getattr(self, "kb", None)
+        schedule = getattr(
+            keyboard_controller, "schedule_directional_jump", None
+        )
+        if not callable(schedule):
+            return False
+        buff_recovery = getattr(
+            keyboard_controller, "is_buff_recovery_active", None
+        )
+        if callable(buff_recovery) and buff_recovery():
+            return False
+        if not schedule(direction, candidate["send_at"]):
+            return False
+
+        self._wz_route_jump_atomic_route_index = route_index
+        self._wz_route_jump_atomic_pending = False
+        logger.info(
+            f"[spatial-jump] Scheduled route{route_index + 1} Alt: "
+            f"direction={direction}, x={candidate['player_x']:.2f}px, "
+            f"edgeRemaining={candidate['remaining_px']:.2f}px, "
+            f"takeoffX={candidate['takeoff_x']:.2f}px, "
+            f"speed={candidate['speed_px_per_sec']:.2f}px/s, "
+            f"latencyLead={candidate['latency_compensation_px']:.2f}px, "
+            f"edgeMargin={candidate['edge_margin_px']:.2f}px, "
+            f"requestedMargin="
+            f"{candidate['requested_edge_margin_px']:.2f}px, "
+            f"sendIn={candidate['delay_seconds'] * 1000.0:.1f}ms"
+        )
         return True
 
     def _clear_wz_route_jump_atomic_if_departed(self):
@@ -9461,6 +9616,14 @@ class MapleStoryAutoBot:
         if reserved_index is None or int(getattr(
                 self, "idx_routes", -1)) == int(reserved_index):
             return
+        cancel = getattr(
+            getattr(self, "kb", None),
+            "cancel_scheduled_directional_jump",
+            None,
+        )
+        if callable(cancel):
+            cancel()
+        self._wz_timed_jump_candidate = None
         self._wz_route_jump_atomic_pending = False
         self._wz_route_jump_atomic_route_index = None
 
@@ -11817,6 +11980,7 @@ class MapleStoryAutoBot:
         self.cmd_move_x = "none"
         self.cmd_move_y = "none"
         self.cmd_action = "none"
+        self._wz_timed_jump_candidate = None
         self._rope_spatial_mount_candidate = None
         self._clear_wz_route_jump_atomic_if_departed()
         self._clear_rope_climb_locks_if_departed()
@@ -12150,6 +12314,16 @@ class MapleStoryAutoBot:
         if self.cmd_action == "jump" or bool(getattr(
                 self, "_stationary_jump_proximity_active", False)):
             return False
+        if isinstance(getattr(
+                self, "_wz_timed_jump_candidate", None), dict):
+            return False
+        scheduled_jump = getattr(
+            getattr(self, "kb", None),
+            "has_scheduled_directional_jump",
+            None,
+        )
+        if callable(scheduled_jump) and scheduled_jump():
+            return False
         rope_state = getattr(self, "_rope_climb_state", None)
         rope_pre_mount = bool(
             getattr(self, "_rope_climb_active", False)
@@ -12185,6 +12359,14 @@ class MapleStoryAutoBot:
         self._wz_combat_checkpoint_clear_since = None
         self._wz_combat_checkpoint_cleared_route_index = None
         self._wz_combat_checkpoint_jump_alignment_direction = None
+        self._wz_timed_jump_candidate = None
+        cancel = getattr(
+            getattr(self, "kb", None),
+            "cancel_scheduled_directional_jump",
+            None,
+        )
+        if callable(cancel):
+            cancel()
         self._wz_route_jump_atomic_pending = False
         self._wz_route_jump_atomic_route_index = None
         self._wz_edge_jump_alignment_route_index = None
@@ -12348,8 +12530,27 @@ class MapleStoryAutoBot:
         self._wz_attackable_monster_this_frame = False
         self._wz_combat_observation_valid = False
         combat_actions = {"attack", "directional_aoe", "power_knockback"}
+        if not bool(getattr(self, "cfg", {}).get(
+                "bot", {}).get("combat_enabled", True)):
+            # Route validation must exercise navigation without allowing a
+            # detector result or the periodic patrol fallback to emit combat
+            # input. Publish a valid quiet observation so an FSM dwell cannot
+            # stall merely because combat was intentionally disabled.
+            self.monsters = []
+            if self.cmd_action in combat_actions:
+                self.cmd_action = "none"
+            self._suppress_periodic_attack = True
+            self._wz_combat_observation_valid = True
+            if getattr(self, "_rope_climb_active", False):
+                self._set_rope_climb_combat_deferred(False)
+            return
         clear_before_move = self._clears_monsters_before_moving()
-        route_jump_pending = self.cmd_action == "jump"
+        timed_route_jump_pending = isinstance(
+            getattr(self, "_wz_timed_jump_candidate", None), dict
+        )
+        route_jump_pending = bool(
+            self.cmd_action == "jump" or timed_route_jump_pending
+        )
         atomic_wz_jump_pending = bool(getattr(
             self, "_wz_route_jump_atomic_pending", False
         ))
@@ -12429,6 +12630,7 @@ class MapleStoryAutoBot:
             """Release a pending route jump while a nearby monster has priority."""
             if not route_jump_pending:
                 return
+            self._wz_timed_jump_candidate = None
             self.cmd_move_x = "none"
             self.cmd_move_y = "none"
             self.cmd_action = "none"

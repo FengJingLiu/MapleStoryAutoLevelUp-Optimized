@@ -7,6 +7,7 @@ bot:
   # 🔁 Bot Settings
   mode: "normal"        # Options: "normal" "aux" "patrol" "debug"
   attack: "directional" # Options: "aoe_skill" "directional"
+  combat_enabled: true  # Set false for movement-only route validation.
   map: "" # Please refer to config/config_data.yaml
 
 capture:
@@ -520,12 +521,15 @@ route:
   rope_climb_align_crossing_tolerance: 3 # Accept a small overshoot instead of reversing into oscillation
   rope_climb_settle_delay: 0.15    # Reposition-only pause; skipped when already running toward the rope
   rope_climb_runup_ms: 180         # Physics-only runway length used when drawing the spatial approach
+  rope_climb_jump_to_up_delay_ms: 100 # Calibrated directional mount: Jump first, then add Up in the air
+  rope_climb_horizontal_timeout_ms: 700 # Safety cap; normally release direction when live x reaches the rope
   rope_climb_align_nudge_ms: 30    # Duration of each takeoff-position correction pulse
   rope_climb_position_timeout: 0.9 # Switch runway side if backing up makes no x progress
   rope_climb_retry_interval: 0.9   # Retry when an attempt produces no continued upward progress
   rope_climb_min_progress: 2       # Upward pixels required before an attempt counts as attached
   rope_climb_attach_x_tolerance: 6 # Coordinate fallback may drift after stepping onto the upper platform
   rope_climb_finish_stall: 0.25    # Required dwell in the WZ destination band when pose evidence is unavailable
+  rope_climb_top_exit_hold: 1.0    # Keep Up after climbing-template exit so Hero actually steps onto the upper platform
   rope_climb_landing_tolerance: 3  # Treat a stalled attempt this close to start y as a miss
   rope_climb_max_attempts: 4       # Alternate/recalculate the run-up side up to this many times
   rope_climb_max_duration: 15.0    # Release control after an overall climb timeout
@@ -581,6 +585,11 @@ wz_navigation:
   spawn_snap_distance_wz: 140
   portal_snap_distance_wz: 160
   rope_attach_tolerance_wz: 90
+  # Hero/capture calibration shared by every WZ map and both approach sides.
+  # Distance is measured from Hero to rope in native navigation pixels.
+  rope_mount_calibration:
+    launch_window_px: [8, 14]
+    staging_offset_px: 15
   platform_edge_margin_wz: 18
   jump_launch_margin_wz: 2       # Hero center may approach this close to a platform edge before takeoff
   jump_landing_margin_wz: 15     # Keep one character half-width on the landing platform
@@ -636,6 +645,11 @@ wz_navigation:
     walk_speed_px_per_sec: 21.3575
     jump_height_px: 13.9683
     jump_distance_px: 11.0251      # Airborne distance after actual takeoff; excludes run-up
+    # Live calibration: actual Alt dispatch -> first captured rise was about
+    # 109-156 ms across stationary and running trials. Use 157 ms to cover it.
+    jump_input_latency_ms: 157
+    jump_takeoff_edge_margin_px: 1.0
+    jump_timing_arm_distance_px: 10.0
 
 watchdog:
   # 🐶 Watchdog

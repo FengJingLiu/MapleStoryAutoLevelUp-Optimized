@@ -93,7 +93,12 @@ def _route_config():
     }
 
 
-def _state_machine(sequence=(1, 3, 7, 9, 13, 9, 5, 3)):
+def _state_machine(
+    sequence=(1, 3, 7, 9, 13, 9, 5, 3),
+    *,
+    allowed_platforms=None,
+    patrol_enabled=True,
+):
     _, profile, graph, platforms, anchors = _forest_floor_navigation()
     return PlatformPatrolStateMachine(
         graph,
@@ -106,7 +111,103 @@ def _state_machine(sequence=(1, 3, 7, 9, 13, 9, 5, 3)):
         maximum_dwell_seconds=24.0,
         stable_surface_frames=1,
         exclude_portals=True,
+        patrol_enabled=patrol_enabled,
+        allowed_platforms=(
+            None
+            if allowed_platforms is None
+            else frozenset(allowed_platforms)
+        ),
     )
+
+
+def test_stationary_platform_dwell_never_generates_patrol_path():
+    state_machine = _state_machine(
+        sequence=(14,),
+        allowed_platforms=(11, 14),
+        patrol_enabled=False,
+    )
+    p14 = state_machine.platforms[14]
+
+    state_machine.observe_position(
+        p14, _platform_center(p14), 0.0, grounded=True
+    )
+    state_machine.observe_position(
+        p14, _platform_center(p14), 1.0, grounded=True
+    )
+
+    assert state_machine.phase is PlatformPhase.DWELLING
+    assert state_machine.current_platform == 14
+    assert state_machine.active_path is None
+
+
+def test_forest_floor_p14_is_the_upper_rope_landing_above_p11():
+    _, _, graph, platforms, _ = _forest_floor_navigation()
+    node_by_id = graph.node_by_id
+
+    assert set(range(1, 15)).issubset(platforms)
+    upward_climbs = [
+        edge
+        for edge in graph.edges
+        if edge.action is Action.CLIMB
+        and node_by_id[edge.source].surface_id == platforms[11].id
+        and node_by_id[edge.target].surface_id == platforms[14].id
+        and node_by_id[edge.target].y < node_by_id[edge.source].y
+    ]
+
+    assert len(upward_climbs) == 1
+
+
+def test_platform_fsm_can_render_p11_to_upper_rope_landing():
+    state_machine = _state_machine(
+        sequence=(14,), allowed_platforms=(11, 14)
+    )
+    p11 = state_machine.platforms[11]
+    state_machine.observe_position(
+        p11, _platform_center(p11), 0.0, grounded=True
+    )
+
+    assert state_machine.phase is PlatformPhase.TRAVELING
+    assert state_machine.target_platform == 14
+    assert state_machine.active_path is not None
+    actions = [
+        state_machine.active_path.graph.edge_by_id[edge_id].action
+        for edge_id in state_machine.active_path.edge_ids
+    ]
+    assert Action.CLIMB in actions
+
+
+def test_restricted_rope_test_never_recovers_from_another_platform():
+    state_machine = _state_machine(
+        sequence=(14,), allowed_platforms=(11, 14)
+    )
+    p1 = state_machine.platforms[1]
+    state_machine.observe_position(
+        p1, _platform_center(p1), 0.0, grounded=True
+    )
+
+    assert state_machine.phase is PlatformPhase.BLOCKED
+    assert state_machine.active_path is None
+    assert "No configured platform state" in state_machine.blocked_reason
+
+
+def test_restricted_rope_test_stops_after_falling_off_p11():
+    state_machine = _state_machine(
+        sequence=(14,), allowed_platforms=(11, 14)
+    )
+    p11 = state_machine.platforms[11]
+    state_machine.observe_position(
+        p11, _platform_center(p11), 0.0, grounded=True
+    )
+    assert state_machine.active_path is not None
+
+    p8 = state_machine.platforms[8]
+    state_machine.observe_position(
+        p8, _platform_center(p8), 0.1, grounded=True
+    )
+
+    assert state_machine.phase is PlatformPhase.BLOCKED
+    assert state_machine.active_path is None
+    assert "No WZ path" in state_machine.blocked_reason
 
 
 def test_platform_fsm_starts_on_detected_platform_and_plans_only_next_target():
@@ -336,6 +437,11 @@ def test_platform_fsm_temporary_path_uses_recorded_jump_and_rope_x():
     )
     image = cv2.imread(str(map_path), cv2.IMREAD_COLOR)
     runtime.bootstrap(image)
+    recorded = runtime.summary()["recordedXAnchors"]
+    if recorded["jumps"] < 7 or recorded["climbs"] < 3:
+        pytest.skip(
+            "Complete local Forest Floor route calibration is not installed"
+        )
     state_machine = runtime.platform_state_machine
     assert state_machine is not None
     p3 = state_machine.platforms[3]

@@ -867,6 +867,47 @@ class KeyboardControllerEsp32RoutingTests(unittest.TestCase):
         self.assertIsNone(controller.cached_facing)
         self.assertIsNone(controller.direction_held_since)
 
+    def test_scheduled_directional_jump_waits_on_worker_clock_and_blocks_buff(self):
+        controller_module._input_allowed.set()
+        controller = self.make_directional_jump_controller()
+        controller._scheduled_directional_jump = None
+        controller._scheduled_directional_jump_generation = 0
+
+        self.assertTrue(controller.schedule_directional_jump("right", 10.0))
+        self.assertTrue(controller.has_scheduled_directional_jump())
+        self.assertFalse(controller._scheduled_buff_is_safe(
+            ("right", "none", "none")
+        ))
+        pending = controller._scheduled_directional_jump_snapshot()
+
+        with patch.object(
+            controller, "_automation_input_active", return_value=True
+        ), patch.object(
+            controller, "update_movement_state", return_value=True
+        ) as movement, patch.object(
+            controller, "perform_directional_jump", return_value=True
+        ) as jump, patch.object(
+            controller_module.time, "monotonic", return_value=10.0
+        ), patch.object(controller_module.time, "sleep") as sleep:
+            self.assertTrue(
+                controller.perform_scheduled_directional_jump(pending)
+            )
+
+        movement.assert_called_once_with("right", "none")
+        jump.assert_called_once_with("right")
+        sleep.assert_not_called()
+
+    def test_release_all_cancels_scheduled_directional_jump(self):
+        controller = self.make_directional_jump_controller()
+        controller._scheduled_directional_jump = None
+        controller._scheduled_directional_jump_generation = 0
+        self.assertTrue(controller.schedule_directional_jump("left", 20.0))
+
+        controller.release_all_key()
+
+        self.assertFalse(controller.has_scheduled_directional_jump())
+        controller_module._input_client.release_all.assert_called_once_with()
+
     @staticmethod
     def make_stationary_jump_controller():
         controller = controller_module.KeyBoardController.__new__(
@@ -892,6 +933,7 @@ class KeyboardControllerEsp32RoutingTests(unittest.TestCase):
         controller.direction_held_since = None
         controller.direction_held_generation = None
         controller.rope_climb_runup_ms = 180
+        controller.rope_climb_jump_to_up_delay_ms = 100
         controller.rope_climb_align_nudge_ms = 30
         controller.cfg = {"key": {"jump": "space"}}
         return controller
@@ -1113,7 +1155,7 @@ class KeyboardControllerEsp32RoutingTests(unittest.TestCase):
         )
         self.assertIsNone(controller.cached_facing)
 
-    def test_rope_mount_adds_up_and_jumps_without_host_delay(self):
+    def test_rope_mount_jumps_then_adds_up_after_calibrated_air_delay(self):
         controller_module._input_allowed.set()
         controller = self.make_rope_controller()
 
@@ -1123,17 +1165,16 @@ class KeyboardControllerEsp32RoutingTests(unittest.TestCase):
         ) as sleep:
             self.assertTrue(controller.perform_rope_mount("left"))
 
-        sleep.assert_not_called()
+        sleep.assert_called_once_with(0.05)
         self.assertEqual(
             controller_module._input_client.method_calls,
             [
                 call.set_state(["left"]),
-                call.set_state(["left", "up"]),
                 call.tap("space", 50),
-                call.set_state(["up"]),
+                call.set_state(["left", "up"]),
             ],
         )
-        self.assertEqual(controller.cmd_left_right_last, "none")
+        self.assertEqual(controller.cmd_left_right_last, "left")
         self.assertEqual(controller.cmd_up_down_last, "up")
         self.assertEqual(controller.cached_facing, "left")
 
@@ -1156,7 +1197,7 @@ class KeyboardControllerEsp32RoutingTests(unittest.TestCase):
         self.assertEqual(controller.cmd_left_right_last, "none")
         self.assertEqual(controller.cmd_up_down_last, "up")
 
-    def test_rope_mount_keeps_existing_same_direction_run_without_pause(self):
+    def test_rope_mount_keeps_existing_same_direction_run_through_takeoff(self):
         controller_module._input_allowed.set()
         controller = self.make_rope_controller()
         controller.cmd_left_right_last = "right"
@@ -1167,17 +1208,16 @@ class KeyboardControllerEsp32RoutingTests(unittest.TestCase):
         ), patch.object(controller_module.time, "sleep") as sleep:
             self.assertTrue(controller.perform_rope_mount("right"))
 
-        sleep.assert_not_called()
+        sleep.assert_called_once_with(0.05)
         self.assertEqual(
             controller_module._input_client.method_calls,
             [
                 call.set_state(["right"]),
-                call.set_state(["right", "up"]),
                 call.tap("space", 50),
-                call.set_state(["up"]),
+                call.set_state(["right", "up"]),
             ],
         )
-        self.assertIsNone(controller.direction_held_since)
+        self.assertEqual(controller.direction_held_since, 99.0)
 
 
 
@@ -1198,7 +1238,6 @@ class KeyboardControllerEsp32RoutingTests(unittest.TestCase):
             controller_module._input_client.method_calls,
             [
                 call.set_state(["right"]),
-                call.set_state(["right", "up"]),
                 call.tap("space", 50),
             ],
         )
@@ -1207,7 +1246,7 @@ class KeyboardControllerEsp32RoutingTests(unittest.TestCase):
         self.assertIsNone(controller.direction_held_generation)
 
 
-    def test_pause_during_rope_up_state_prevents_late_jump(self):
+    def test_pause_during_rope_up_state_stops_mount_transaction(self):
         controller_module._input_allowed.set()
         controller = self.make_rope_controller()
 
@@ -1225,22 +1264,22 @@ class KeyboardControllerEsp32RoutingTests(unittest.TestCase):
             controller_module._input_client.method_calls,
             [
                 call.set_state(["left"]),
+                call.tap("space", 50),
                 call.set_state(["left", "up"]),
             ],
         )
-        controller_module._input_client.tap.assert_not_called()
         self.assertIsNone(controller.cached_facing)
 
-    def test_rope_mount_invalidates_when_final_up_state_fails(self):
+    def test_rope_mount_invalidates_when_airborne_up_state_fails(self):
         controller_module._input_allowed.set()
         controller = self.make_rope_controller()
 
-        def fail_final_up_state(keys):
-            if keys == ["up"]:
+        def fail_airborne_up_state(keys):
+            if keys == ["right", "up"]:
                 raise RuntimeError("serial disconnected")
 
         controller_module._input_client.set_state.side_effect = \
-            fail_final_up_state
+            fail_airborne_up_state
 
         with patch.object(controller_module.time, "sleep"):
             self.assertFalse(controller.perform_rope_mount("right"))
@@ -1249,9 +1288,8 @@ class KeyboardControllerEsp32RoutingTests(unittest.TestCase):
             controller_module._input_client.method_calls,
             [
                 call.set_state(["right"]),
-                call.set_state(["right", "up"]),
                 call.tap("space", 50),
-                call.set_state(["up"]),
+                call.set_state(["right", "up"]),
             ],
         )
         self.assertIsNone(controller.cached_facing)

@@ -372,10 +372,12 @@ class KeyBoardController():
         self.command_lock = threading.RLock()
         self.cached_facing = None
         # Monotonic timestamp for the currently held horizontal direction.
-        # Live minimap motion consumes this only as observable state; launch
-        # commands themselves are now frame-driven and immediate.
+        # Live minimap motion consumes this as observable state; WZ platform
+        # jumps may additionally queue one precise monotonic Alt deadline.
         self.direction_held_since = None
         self.direction_held_generation = None
+        self._scheduled_directional_jump = None
+        self._scheduled_directional_jump_generation = 0
         self.window_title = cfg["game_window"]["title"]
         self.fps = 0 # Frame per seconds
         # Timer
@@ -426,6 +428,12 @@ class KeyBoardController():
         self.rope_climb_runup_ms = max(
             0,
             int(cfg.get("route", {}).get("rope_climb_runup_ms", 180)),
+        )
+        self.rope_climb_jump_to_up_delay_ms = max(
+            50,
+            int(cfg.get("route", {}).get(
+                "rope_climb_jump_to_up_delay_ms", 100
+            )),
         )
         self.rope_climb_align_nudge_ms = max(
             1,
@@ -606,6 +614,7 @@ class KeyBoardController():
                 getattr(self, "is_terminated", False) or \
                 not self.is_game_window_active():
             return False
+        self.cancel_scheduled_directional_jump()
         self.game_ui_active = True
         _input_allowed.clear()
         with _input_transaction_lock:
@@ -706,6 +715,7 @@ class KeyBoardController():
         """
         # Signal in-flight multi-step actions to abort at their next regular
         # permission check, then serialize the final state clear and release.
+        self.cancel_scheduled_directional_jump()
         self.session_recovery_active = True
         _input_allowed.clear()
         with _input_transaction_lock:
@@ -1000,6 +1010,7 @@ class KeyBoardController():
             or str(cmd_action).startswith("jump_")
             # Rope mounting includes the Jump TAP used to catch the rope.
             or str(cmd_action).startswith("rope_mount_")
+            or self._scheduled_directional_jump_snapshot() is not None
         )
         if jump_transaction:
             return False
@@ -1099,6 +1110,7 @@ class KeyBoardController():
         '''
         Release all key
         '''
+        self.cancel_scheduled_directional_jump()
         release_all_keys()
         self._invalidate_facing_cache()
 
@@ -1113,6 +1125,88 @@ class KeyBoardController():
             self.cmd_up_down_last = ""
             self.direction_held_since = None
             self.direction_held_generation = None
+
+    def schedule_directional_jump(self, direction, due_at):
+        """Queue one precise running Jump on the keyboard worker clock."""
+        if direction not in {"left", "right"}:
+            raise ValueError("scheduled jump direction must be left or right")
+        due_at = float(due_at)
+        if not math.isfinite(due_at):
+            raise ValueError("scheduled jump time must be finite")
+        with self._ensure_command_lock():
+            if getattr(self, "_scheduled_directional_jump", None) is not None:
+                return False
+            self._scheduled_directional_jump_generation = int(getattr(
+                self, "_scheduled_directional_jump_generation", 0
+            )) + 1
+            self._scheduled_directional_jump = {
+                "generation": self._scheduled_directional_jump_generation,
+                "direction": direction,
+                "due_at": due_at,
+            }
+            return True
+
+    def cancel_scheduled_directional_jump(self):
+        """Cancel an Alt TAP that has not yet reached the HID transaction."""
+        with self._ensure_command_lock():
+            pending = getattr(self, "_scheduled_directional_jump", None)
+            self._scheduled_directional_jump = None
+            return pending is not None
+
+    def _scheduled_directional_jump_snapshot(self):
+        with self._ensure_command_lock():
+            pending = getattr(self, "_scheduled_directional_jump", None)
+            return None if pending is None else dict(pending)
+
+    def has_scheduled_directional_jump(self):
+        return self._scheduled_directional_jump_snapshot() is not None
+
+    def _scheduled_directional_jump_is_current(self, pending):
+        with self._ensure_command_lock():
+            current = getattr(self, "_scheduled_directional_jump", None)
+            return bool(
+                isinstance(current, dict)
+                and current.get("generation") == pending.get("generation")
+            )
+
+    def _finish_scheduled_directional_jump(self, pending):
+        with self._ensure_command_lock():
+            current = getattr(self, "_scheduled_directional_jump", None)
+            if isinstance(current, dict) and current.get(
+                    "generation") == pending.get("generation"):
+                self._scheduled_directional_jump = None
+
+    def perform_scheduled_directional_jump(self, pending):
+        """Hold direction, wait on the monotonic clock, then TAP Jump once."""
+        if not isinstance(pending, dict):
+            return False
+        direction = pending.get("direction")
+        due_at = float(pending.get("due_at", float("nan")))
+        if direction not in {"left", "right"} or not math.isfinite(due_at):
+            return False
+        if not self._scheduled_directional_jump_is_current(pending) or \
+                not self._automation_input_active():
+            return False
+        if not self.update_movement_state(direction, "none"):
+            return False
+
+        while True:
+            if not self._scheduled_directional_jump_is_current(pending) or \
+                    not self._automation_input_active():
+                return False
+            remaining = due_at - time.monotonic()
+            if remaining <= 0:
+                break
+            time.sleep(min(remaining, 0.005))
+
+        if not self._scheduled_directional_jump_is_current(pending) or \
+                not self._automation_input_active():
+            return False
+        logger.info(
+            f"[directional-jump] Timed Alt dispatch: direction={direction}, "
+            f"late={max(0.0, time.monotonic() - due_at) * 1000.0:.1f}ms"
+        )
+        return self.perform_directional_jump(direction)
 
     def _record_horizontal_motion(
             self, direction, *, now=None, generation=None):
@@ -1429,7 +1523,7 @@ class KeyBoardController():
             return True
 
     def perform_rope_mount(self, direction):
-        """Keep/build a sideways run, add Up, and jump onto the rope."""
+        """Jump toward the rope, then add Up while retaining momentum."""
         if direction not in {"left", "right"}:
             return False
 
@@ -1457,22 +1551,9 @@ class KeyBoardController():
                 self._invalidate_facing_cache()
                 return False
 
-            success, _ = _invoke_input(
-                "set_state", [direction, "up"]
-            )
-            if not success:
-                self._invalidate_facing_cache()
-                return False
-            with self._ensure_command_lock():
-                self.cmd_left_right_last = direction
-                self.cmd_up_down_last = "up"
-
-            # STATE may block on the ESP32 acknowledgement. Recheck so a pause
-            # during that request cannot be followed by a late jump.
-            if not _regular_input_allowed():
-                self._invalidate_facing_cache()
-                return False
-
+            # Successful 60 Hz calibration trials all pressed Jump before Up.
+            # Adding Up on the ground can suppress takeoff, while releasing
+            # direction immediately after Jump cannot carry Hero to the rope.
             success, _ = _invoke_input(
                 "tap", self.cfg["key"]["jump"], 50
             )
@@ -1480,21 +1561,32 @@ class KeyBoardController():
                 self._invalidate_facing_cache()
                 return False
 
-            # The lateral key is only for mounting momentum. Release it as
-            # soon as the jump has been issued so the character does not pass
-            # through the rope; Up remains held for the climb.
+            remaining_up_delay = max(
+                0.0,
+                (float(self.rope_climb_jump_to_up_delay_ms) - 50.0)
+                / 1000.0,
+            )
+            if remaining_up_delay > 0.0:
+                time.sleep(remaining_up_delay)
+
+            # Pause/capture loss may occur during the calibrated air delay.
+            # Never add a delayed Up after automation input was suspended.
             if not _regular_input_allowed():
                 self._invalidate_facing_cache()
                 return False
-            success, _ = _invoke_input("set_state", ["up"])
+
+            success, _ = _invoke_input(
+                "set_state", [direction, "up"]
+            )
             if not success:
                 self._invalidate_facing_cache()
                 return False
+            if not _regular_input_allowed():
+                self._invalidate_facing_cache()
+                return False
             with self._ensure_command_lock():
-                self.cmd_left_right_last = "none"
+                self.cmd_left_right_last = direction
                 self.cmd_up_down_last = "up"
-                self.direction_held_since = None
-                self.direction_held_generation = None
             return True
 
     def perform_stationary_rope_mount(self):
@@ -1664,6 +1756,7 @@ class KeyBoardController():
 
                 # Forced healing takes precedence over the current command.
                 if self.is_need_force_heal:
+                    self.cancel_scheduled_directional_jump()
                     cmd_action = "add_hp"
                     with self._ensure_command_lock():
                         self.cmd_action = cmd_action
@@ -1674,6 +1767,22 @@ class KeyBoardController():
                 if not self.is_need_force_heal and \
                         self._buff_recovery_active():
                     self.update_movement_state("none", "none")
+                    self.limit_fps()
+                    continue
+
+                # A latency-compensated WZ jump is committed only after
+                # combat arbitration. Once queued it owns direction and the
+                # exact monotonic deadline, independently of main/Yolo FPS.
+                scheduled_jump = self._scheduled_directional_jump_snapshot()
+                if scheduled_jump is not None:
+                    try:
+                        self.perform_scheduled_directional_jump(
+                            scheduled_jump
+                        )
+                    finally:
+                        self._finish_scheduled_directional_jump(
+                            scheduled_jump
+                        )
                     self.limit_fps()
                     continue
 

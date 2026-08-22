@@ -509,6 +509,14 @@ class WzNavigationRuntime:
         maximum_recovery_drop_height = float(
             map_config.get("maximum_recovery_drop_height_wz", 300.0)
         )
+        raw_allowed_platforms = map_config.get("allowed_platforms")
+        allowed_platforms = (
+            None
+            if raw_allowed_platforms is None
+            else frozenset(self._platform_sequence({
+                "sequence": raw_allowed_platforms
+            }))
+        )
         existing = self.platform_state_machine
         if existing is not None and existing.sequence == sequence:
             existing.dwell_seconds = dwell_seconds
@@ -527,6 +535,10 @@ class WzNavigationRuntime:
             existing.maximum_recovery_drop_height_wz = (
                 maximum_recovery_drop_height
             )
+            existing.patrol_enabled = bool(
+                map_config.get("patrol_enabled", True)
+            )
+            existing.allowed_platforms = allowed_platforms
             existing.excluded_actions = (
                 frozenset({Action.PORTAL})
                 if map_config.get("exclude_portals", True) is True
@@ -560,6 +572,8 @@ class WzNavigationRuntime:
             ),
             maximum_recovery_drop_height_wz=maximum_recovery_drop_height,
             exclude_portals=(map_config.get("exclude_portals", True) is True),
+            patrol_enabled=bool(map_config.get("patrol_enabled", True)),
+            allowed_platforms=allowed_platforms,
             log=self._log,
         )
 

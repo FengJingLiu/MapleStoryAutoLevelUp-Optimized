@@ -357,6 +357,41 @@ class YoloMonsterEngineIntegrationTests(unittest.TestCase):
         self.assertEqual(bot.get_player_location_by_yolo(), (53, 42))
         self.assertEqual(bot.last_overhead_marker_match["status"], "local")
 
+    def test_wz_rope_uses_hero_anchored_climbing_template(self):
+        bot = self._make_yolo_hero_bot([self._hero((40, 20), 0.9)])
+        bot.cfg["nametag"]["overhead_marker"]["global_confirm_frames"] = 1
+        bot._wz_navigation_enabled = True
+        bot._rope_climb_active = True
+        bot._update_ladder_state_from_smile_pose = Mock(return_value=True)
+
+        self.assertEqual(bot.get_player_location_by_yolo(), (50, 40))
+        bot._update_ladder_state_from_smile_pose.assert_called_once_with(
+            (50, 40)
+        )
+
+    def test_wz_navigation_skips_climbing_template_outside_rope_action(self):
+        bot = self._make_yolo_hero_bot([self._hero((40, 20), 0.9)])
+        bot.cfg["nametag"]["overhead_marker"]["global_confirm_frames"] = 1
+        bot._wz_navigation_enabled = True
+        bot._rope_climb_active = False
+        bot._update_ladder_state_from_smile_pose = Mock(return_value=False)
+
+        self.assertEqual(bot.get_player_location_by_yolo(), (50, 40))
+        bot._update_ladder_state_from_smile_pose.assert_not_called()
+
+    def test_wz_rope_requests_grayscale_for_fresh_yolo_pose_frame(self):
+        bot = self._make_yolo_hero_bot([])
+        bot.cfg["nametag"]["appearance"]["enable"] = True
+        bot._wz_navigation_enabled = True
+        bot._rope_climb_active = True
+        bot._current_vision_snapshot = SimpleNamespace(generation=7)
+        bot._last_yolo_hero_snapshot_generation = 6
+
+        self.assertTrue(bot._frame_grayscale_required())
+
+        bot._rope_climb_active = False
+        self.assertFalse(bot._frame_grayscale_required())
+
     def test_yolo_hero_unlimited_cache_survives_repeated_misses(self):
         hero = self._hero((40, 20), 0.9)
         bot = self._make_yolo_hero_bot([hero])

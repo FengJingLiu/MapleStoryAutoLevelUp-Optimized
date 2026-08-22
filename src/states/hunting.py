@@ -60,13 +60,20 @@ class HuntingState(State):
                 self.bot.update_cmd_by_random()
 
         # A rope launch is committed only after the current mob snapshot has
-        # kept the 60 Hz spatial trigger. It publishes Up + Jump immediately;
-        # no host timer or latency projection remains in this path.
+        # kept the 60 Hz spatial trigger.
         finalize_spatial_rope = getattr(
             self.bot, "finalize_rope_spatial_mount", None
         )
         if callable(finalize_spatial_rope):
             finalize_spatial_rope()
+
+        # Horizontal platform jumps use the measured Alt/capture latency and
+        # are handed to the keyboard worker only after monster arbitration.
+        finalize_timed_jump = getattr(
+            self.bot, "finalize_wz_timed_directional_jump", None
+        )
+        if callable(finalize_timed_jump):
+            finalize_timed_jump()
 
         # Send the one fully arbitrated frame command to the keyboard worker.
         self.bot.kb.set_command(self.bot.cmd_move_x + ' ' + \

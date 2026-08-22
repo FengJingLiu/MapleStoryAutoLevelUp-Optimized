@@ -1156,12 +1156,15 @@ def number_forest_floor_platforms(
     wz_map: WzMap,
     graph: NavigationGraph,
 ) -> dict[int, Surface]:
-    """Recover the visible P1-P13 labels from Forest Floor geometry.
+    """Recover Forest Floor's numbered platforms from WZ geometry.
 
     Platform numbers are recovered from geometry instead of foothold IDs:
     P1 is the wide ground platform, then each row is numbered left-to-right
-    from bottom to top. This keeps the route tied to the visible map layout
-    while still failing loudly if the WZ export no longer has that layout.
+    from bottom to top. P14 is the isolated upper landing reached by the rope
+    directly above P11. It is not part of the normal hunting loop, but naming
+    it lets main execute and validate that otherwise recovery-only climb.
+    This keeps routes tied to the visible map layout while still failing
+    loudly if the WZ export no longer has that layout.
     """
     if wz_map.map_id != "100040110":
         raise ValueError(
@@ -1232,6 +1235,30 @@ def number_forest_floor_platforms(
         platform_list.extend(row)
     if len(platform_list) != 13:
         raise ValueError("Forest Floor patrol platform numbering failed")
+
+    p11 = platform_list[10]
+    node_by_id = graph.node_by_id
+    upper_landing_ids = {
+        node_by_id[edge.target].surface_id
+        for edge in graph.edges
+        if edge.action is Action.CLIMB
+        and node_by_id[edge.source].surface_id == p11.id
+        and node_by_id[edge.target].y < node_by_id[edge.source].y - EPSILON
+    }
+    upper_landings = sorted(
+        (
+            surfaces[surface_id]
+            for surface_id in upper_landing_ids
+            if surface_id in surfaces
+        ),
+        key=lambda surface: (level_y(surface), surface.min_x, surface.id),
+    )
+    if len(upper_landings) != 1:
+        raise ValueError(
+            "Forest Floor expected one upper rope landing above P11, "
+            f"found {len(upper_landings)}"
+        )
+    platform_list.append(upper_landings[0])
     return {
         number: surface for number, surface in enumerate(platform_list, 1)
     }

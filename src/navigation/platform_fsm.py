@@ -84,6 +84,8 @@ class PlatformPatrolStateMachine:
         blocked_retry_seconds: float = 1.0,
         maximum_recovery_drop_height_wz: float = 300.0,
         exclude_portals: bool = True,
+        patrol_enabled: bool = True,
+        allowed_platforms: frozenset[int] | None = None,
         log: Callable[[str], None] | None = None,
     ):
         if not sequence:
@@ -93,6 +95,26 @@ class PlatformPatrolStateMachine:
             raise ValueError(
                 f"platform state machine references unknown platforms: {missing}"
             )
+        normalized_allowed = (
+            None
+            if allowed_platforms is None
+            else frozenset(int(value) for value in allowed_platforms)
+        )
+        if normalized_allowed is not None:
+            missing_allowed = sorted(normalized_allowed.difference(platforms))
+            if missing_allowed:
+                raise ValueError(
+                    "platform state machine allowed_platforms references "
+                    f"unknown platforms: {missing_allowed}"
+                )
+            excluded_targets = sorted(
+                set(sequence).difference(normalized_allowed)
+            )
+            if excluded_targets:
+                raise ValueError(
+                    "platform state targets must be included in "
+                    f"allowed_platforms: {excluded_targets}"
+                )
         numeric_values = (
             dwell_seconds,
             combat_quiet_seconds,
@@ -121,6 +143,7 @@ class PlatformPatrolStateMachine:
         self.graph = graph
         self.motion_profile = motion_profile
         self.platforms = dict(platforms)
+        self.allowed_platforms = normalized_allowed
         self.patrol_anchors = dict(patrol_anchors or {})
         self.sequence = tuple(int(value) for value in sequence)
         self.dwell_seconds = float(dwell_seconds)
@@ -135,6 +158,7 @@ class PlatformPatrolStateMachine:
         self.maximum_recovery_drop_height_wz = float(
             maximum_recovery_drop_height_wz
         )
+        self.patrol_enabled = bool(patrol_enabled)
         self.excluded_actions = (
             frozenset({Action.PORTAL}) if exclude_portals else frozenset()
         )
@@ -242,6 +266,15 @@ class PlatformPatrolStateMachine:
             raise ValueError(
                 f"rebuilt graph lost platform definitions: {missing}"
             )
+        if self.allowed_platforms is not None:
+            missing_allowed = sorted(
+                self.allowed_platforms.difference(platforms)
+            )
+            if missing_allowed:
+                raise ValueError(
+                    "rebuilt graph lost allowed platform definitions: "
+                    f"{missing_allowed}"
+                )
         self.graph = graph
         self.motion_profile = motion_profile
         self.platforms = dict(platforms)
@@ -383,6 +416,29 @@ class PlatformPatrolStateMachine:
             source_surface,
             self._last_point,
         )
+        if self.allowed_platforms is not None:
+            allowed_surface_ids = {
+                self.platforms[number].id
+                for number in self.allowed_platforms
+            }
+            if source_surface.id not in allowed_surface_ids:
+                return None
+            node_by_id = execution_graph.node_by_id
+            restricted_edges = tuple(
+                edge for edge in execution_graph.edges
+                if node_by_id[edge.source].surface_id in allowed_surface_ids
+                and node_by_id[edge.target].surface_id in allowed_surface_ids
+            )
+            execution_graph = NavigationGraph(
+                nodes=execution_graph.nodes,
+                edges=restricted_edges,
+                coverage_targets=execution_graph.coverage_targets,
+                monster_surface_ids=execution_graph.monster_surface_ids,
+                safe_firing_targets=execution_graph.safe_firing_targets,
+                safe_covered_monster_surface_ids=(
+                    execution_graph.safe_covered_monster_surface_ids
+                ),
+            )
         if purpose is PlatformPathPurpose.RECOVERY:
             # A down+jump is reliable between adjacent hunting tiers, but the
             # isolated upper platforms must descend on their WZ rope instead.
@@ -513,6 +569,9 @@ class PlatformPatrolStateMachine:
         return ordered[0], ordered[-1]
 
     def _plan_patrol(self, timestamp: float) -> None:
+        if not self.patrol_enabled:
+            self._replace_path(None)
+            return
         platform_number = self.target_platform
         if platform_number is None or self.current_platform != platform_number:
             return
@@ -587,8 +646,9 @@ class PlatformPatrolStateMachine:
         self._travel_combat_exhausted = False
         self._patrol_target_node_id = None
         self._replace_path(None)
+        dwell_action = "patrol/shoot" if self.patrol_enabled else "hold"
         self._log(
-            f"Enter P{platform_number}; patrol/shoot for at least "
+            f"Enter P{platform_number}; {dwell_action} for at least "
             f"{self.dwell_seconds:g}s (hard limit "
             f"{self.maximum_dwell_seconds:g}s)"
         )

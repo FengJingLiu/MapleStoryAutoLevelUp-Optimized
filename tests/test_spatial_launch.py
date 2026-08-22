@@ -3,7 +3,9 @@ import pytest
 from src.navigation.spatial_launch import (
     HeroVelocityTracker,
     platform_launch_point,
+    reachable_takeoff_edge_margin,
     rope_launch_distance,
+    timed_platform_jump,
 )
 
 
@@ -50,3 +52,78 @@ def test_rope_trigger_moves_farther_from_rope_as_speed_rises():
     assert slow.trigger_x == 1
     assert half.trigger_x == 3.5
     assert fast.trigger_x == 6
+
+
+def test_timed_jump_subtracts_measured_alt_feedback_latency():
+    decision = timed_platform_jump(
+        (50, 18, 55, 22),
+        "right",
+        player_x=49.5,
+        sampled_at=100.0,
+        now=100.0,
+        current_speed_px_per_sec=21.3575,
+        cruise_speed_px_per_sec=21.3575,
+        input_latency_seconds=0.157,
+        takeoff_edge_margin_px=1.0,
+    )
+
+    assert decision is not None
+    assert decision.takeoff_x == 54
+    assert decision.latency_compensation_px == pytest.approx(3.3531, rel=1e-4)
+    assert decision.send_at == pytest.approx(
+        100.0 + (54.0 - 49.5) / 21.3575 - 0.157
+    )
+    assert decision.delay_seconds == pytest.approx(
+        (54.0 - 49.5) / 21.3575 - 0.157
+    )
+
+
+def test_timed_jump_is_symmetric_and_waits_for_running_speed():
+    assert timed_platform_jump(
+        (61, 73, 66, 77),
+        "left",
+        player_x=70,
+        sampled_at=10.0,
+        now=10.0,
+        current_speed_px_per_sec=10.0,
+        cruise_speed_px_per_sec=20.0,
+        input_latency_seconds=0.157,
+        takeoff_edge_margin_px=1.0,
+    ) is None
+
+    decision = timed_platform_jump(
+        (61, 73, 66, 77),
+        "left",
+        player_x=68,
+        sampled_at=10.0,
+        now=10.0,
+        current_speed_px_per_sec=20.0,
+        cruise_speed_px_per_sec=20.0,
+        input_latency_seconds=0.157,
+        takeoff_edge_margin_px=1.0,
+    )
+
+    assert decision is not None
+    assert decision.edge_x == 61
+    assert decision.takeoff_x == 62
+    assert decision.remaining_px == 7
+
+
+def test_takeoff_margin_is_capped_by_higher_platform_landing_arc():
+    p15_to_p16 = reachable_takeoff_edge_margin(
+        (87, 75),
+        (92, 64),
+        13.9683,
+        11.0251,
+        2.22,
+    )
+    p17_to_p16 = reachable_takeoff_edge_margin(
+        (124, 75),
+        (118, 64),
+        13.9683,
+        11.0251,
+        2.22,
+    )
+
+    assert p15_to_p16 == pytest.approx(2.0537, abs=1e-4)
+    assert p17_to_p16 == pytest.approx(1.0537, abs=1e-4)

@@ -137,3 +137,7 @@ def test_only_rope_mount_has_a_configured_runup():
 
     assert "directional_jump_runup_ms" not in cfg["route"]
     assert cfg["route"]["rope_climb_runup_ms"] == 180
+    assert cfg["wz_navigation"]["rope_mount_calibration"] == {
+        "launch_window_px": [8, 14],
+        "staging_offset_px": 15,
+    }

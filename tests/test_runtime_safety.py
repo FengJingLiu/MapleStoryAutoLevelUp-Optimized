@@ -700,12 +700,20 @@ class AutoBotLifecycleTests(unittest.TestCase):
         )
         bot.cfg["system"] = {"fps_limit_main": 10}
         bot.cfg["wz_navigation"] = {
-            "motion": {"walk_speed_px_per_sec": 21.3575},
+            "motion": {
+                "walk_speed_px_per_sec": 21.3575,
+                "jump_input_latency_ms": 157,
+                "jump_takeoff_edge_margin_px": 1.0,
+                "jump_timing_arm_distance_px": 10.0,
+            },
         }
         bot.color_code[(0, 255, 128)] = "right none jump"
         bot.img_route[10, 10] = (0, 255, 128)
         bot._wz_navigation_enabled = True
         bot._wz_current_speed_px_per_sec = 21.3575
+        bot._wz_navigation_sample_at = 100.0
+        bot.kb.schedule_directional_jump = Mock(return_value=True)
+        bot.kb.is_buff_recovery_active = Mock(return_value=False)
         bot._wz_combat_checkpoint_route_index = None
         bot._wz_combat_checkpoint_clear_since = None
         bot._wz_combat_checkpoint_cleared_route_index = None
@@ -731,14 +739,21 @@ class AutoBotLifecycleTests(unittest.TestCase):
         self.assertEqual(bot._wz_combat_checkpoint_route_index, 0)
 
         bot._wz_combat_checkpoint_cleared_route_index = 0
-        bot.update_cmd_by_route()
+        with patch(
+            "src.engine.MapleStoryAutoLevelUp.time.monotonic",
+            return_value=100.0,
+        ):
+            bot.update_cmd_by_route()
 
         self.assertEqual(bot.idx_routes, 0)
         self.assertEqual(
             (bot.cmd_move_x, bot.cmd_move_y, bot.cmd_action),
-            ("right", "none", "jump"),
+            ("right", "none", "none"),
         )
-        self.assertTrue(bot._wz_route_jump_atomic_pending)
+        self.assertIsInstance(bot._wz_timed_jump_candidate, dict)
+        self.assertTrue(bot.finalize_wz_timed_directional_jump())
+        bot.kb.schedule_directional_jump.assert_called_once()
+        self.assertFalse(bot._wz_route_jump_atomic_pending)
 
 
     def test_wz_navigation_sample_tracks_real_cadence_and_horizontal_step(self):
@@ -768,11 +783,17 @@ class AutoBotLifecycleTests(unittest.TestCase):
         bot = self._route_color_bot()
         bot._wz_navigation_enabled = True
         bot.cfg["wz_navigation"] = {
-            "motion": {"walk_speed_px_per_sec": 20.0},
+            "motion": {
+                "walk_speed_px_per_sec": 20.0,
+                "jump_input_latency_ms": 157,
+                "jump_takeoff_edge_margin_px": 1.0,
+                "jump_timing_arm_distance_px": 10.0,
+            },
         }
         bot.wz_navigation = SimpleNamespace(
             active=True,
             jump_active=False,
+            registration=SimpleNamespace(residual_p95_px=1.208),
             route_legs=(SimpleNamespace(
                 action="JUMP",
                 jump_source=(106, 20),
@@ -781,6 +802,9 @@ class AutoBotLifecycleTests(unittest.TestCase):
             ),),
         )
         bot.loc_player_global = (102, 20)
+        bot._wz_navigation_sample_at = 100.0
+        bot.kb.schedule_directional_jump = Mock(return_value=True)
+        bot.kb.is_buff_recovery_active = Mock(return_value=False)
 
         bot._wz_current_speed_px_per_sec = 0.0
         self.assertTrue(bot._apply_wz_spatial_directional_jump())
@@ -790,12 +814,65 @@ class AutoBotLifecycleTests(unittest.TestCase):
         )
 
         bot._wz_current_speed_px_per_sec = 20.0
-        self.assertTrue(bot._apply_wz_spatial_directional_jump())
+        with patch(
+            "src.engine.MapleStoryAutoLevelUp.time.monotonic",
+            return_value=100.0,
+        ):
+            self.assertTrue(bot._apply_wz_spatial_directional_jump())
         self.assertEqual(
             (bot.cmd_move_x, bot.cmd_move_y, bot.cmd_action),
-            ("right", "none", "jump"),
+            ("right", "none", "none"),
         )
-        self.assertTrue(bot._wz_route_jump_atomic_pending)
+        self.assertAlmostEqual(
+            bot._wz_timed_jump_candidate["takeoff_x"], 103.792
+        )
+        self.assertAlmostEqual(
+            bot._wz_timed_jump_candidate["edge_margin_px"], 2.208
+        )
+        self.assertTrue(bot.finalize_wz_timed_directional_jump())
+        self.assertFalse(bot._wz_route_jump_atomic_pending)
+
+
+    def test_spatial_jump_caps_margin_to_higher_platform_reach(self):
+        bot = self._route_color_bot()
+        bot._wz_navigation_enabled = True
+        bot.cfg["wz_navigation"] = {
+            "motion": {
+                "walk_speed_px_per_sec": 21.3575,
+                "jump_height_px": 13.9683,
+                "jump_distance_px": 11.0251,
+                "jump_input_latency_ms": 157,
+                "jump_takeoff_edge_margin_px": 1.0,
+                "jump_timing_arm_distance_px": 10.0,
+            },
+        }
+        bot.wz_navigation = SimpleNamespace(
+            active=True,
+            jump_active=False,
+            registration=SimpleNamespace(residual_p95_px=1.22),
+            route_legs=(SimpleNamespace(
+                action="JUMP",
+                jump_source=(124, 75),
+                target=(118, 64),
+                jump_trigger_bounds=(124, 72, 129, 78),
+            ),),
+        )
+        bot.loc_player_global = (128, 75)
+        bot._wz_navigation_sample_at = 100.0
+        bot._wz_current_speed_px_per_sec = 21.3575
+
+        with patch(
+            "src.engine.MapleStoryAutoLevelUp.time.monotonic",
+            return_value=100.0,
+        ):
+            self.assertTrue(bot._apply_wz_spatial_directional_jump())
+
+        candidate = bot._wz_timed_jump_candidate
+        self.assertAlmostEqual(candidate["requested_edge_margin_px"], 2.22)
+        self.assertAlmostEqual(
+            candidate["edge_margin_px"], 1.0537255068471
+        )
+        self.assertAlmostEqual(candidate["takeoff_x"], 125.0537255068471)
 
 
     def test_ground_ladder_route_aligns_x_before_pressing_up(self):
@@ -926,8 +1003,16 @@ class AutoBotLifecycleTests(unittest.TestCase):
         bot._wz_navigation_enabled = True
         bot._wz_current_speed_px_per_sec = 20.0
         bot.cfg["wz_navigation"] = {
-            "motion": {"walk_speed_px_per_sec": 20.0},
+            "motion": {
+                "walk_speed_px_per_sec": 20.0,
+                "jump_input_latency_ms": 157,
+                "jump_takeoff_edge_margin_px": 1.0,
+                "jump_timing_arm_distance_px": 10.0,
+            },
         }
+        bot._wz_navigation_sample_at = 100.0
+        bot.kb.schedule_directional_jump = Mock(return_value=True)
+        bot.kb.is_buff_recovery_active = Mock(return_value=False)
         route1 = bot.img_route
         route1[10, 10] = (255, 255, 0)
         route2 = np.zeros_like(route1)
@@ -958,12 +1043,18 @@ class AutoBotLifecycleTests(unittest.TestCase):
         )
         # The newly selected route is evaluated from the next fresh minimap
         # frame instead of dispatching a stale previous-frame jump.
-        bot.update_cmd_by_route()
+        with patch(
+            "src.engine.MapleStoryAutoLevelUp.time.monotonic",
+            return_value=100.0,
+        ):
+            bot.update_cmd_by_route()
         self.assertEqual(
             (bot.cmd_move_x, bot.cmd_move_y, bot.cmd_action),
-            ("left", "none", "jump"),
+            ("left", "none", "none"),
         )
-        self.assertTrue(bot._wz_route_jump_atomic_pending)
+        self.assertIsInstance(bot._wz_timed_jump_candidate, dict)
+        self.assertTrue(bot.finalize_wz_timed_directional_jump())
+        self.assertFalse(bot._wz_route_jump_atomic_pending)
         self.assertEqual(bot._wz_route_jump_atomic_route_index, 1)
 
     def test_directly_selected_wz_jump_is_atomic_and_not_rearmed_in_place(self):
@@ -1522,7 +1613,7 @@ class AutoBotLifecycleTests(unittest.TestCase):
             bot._rope_climb_state["phase"], "running_approach"
         )
         self.assertEqual(bot.cmd_move_x, "right")
-        self.assertEqual(bot.cmd_action, "rope_hold")
+        self.assertEqual(bot.cmd_action, "none")
         self.assertIsNone(bot._rope_climb_state["aligned_since"])
 
         bot.loc_player_global = (14, 10)
@@ -1546,7 +1637,7 @@ class AutoBotLifecycleTests(unittest.TestCase):
         self.assertEqual(bot.cmd_action, "rope_mount_right")
 
 
-    def test_rope_runway_settles_then_keeps_mount_request_visible(self):
+    def test_rope_runway_settles_then_keeps_one_shot_mount_held(self):
         bot = self._route_color_bot()
         bot.loc_player_global = (14, 10)
         self._draw_rope_guide(bot, start=(11, 10), end=(18, 10))
@@ -1572,7 +1663,7 @@ class AutoBotLifecycleTests(unittest.TestCase):
             return_value=100.20,
         ):
             bot.update_cmd_by_route()
-        self.assertEqual(bot.cmd_action, "rope_mount_right")
+        self.assertEqual(bot.cmd_action, "rope_hold")
 
         with patch(
             "src.engine.MapleStoryAutoLevelUp.time.monotonic",
@@ -1615,7 +1706,6 @@ class AutoBotLifecycleTests(unittest.TestCase):
 
     def test_wz_rope_mount_runs_from_physics_staging_to_launch(self):
         bot = self._route_color_bot()
-        bot._wz_current_speed_px_per_sec = 20.0
         bot.cfg["wz_navigation"] = {
             "motion": {"walk_speed_px_per_sec": 20.0},
         }
@@ -1666,7 +1756,22 @@ class AutoBotLifecycleTests(unittest.TestCase):
             bot._rope_climb_state["phase"], "running_approach"
         )
         self.assertEqual(bot.cmd_move_x, "right")
-        self.assertEqual(bot.cmd_action, "rope_hold")
+        self.assertEqual(bot.cmd_action, "none")
+
+        approach_command = (
+            bot.cmd_move_x,
+            bot.cmd_move_y,
+            bot.cmd_action,
+        )
+        bot._record_wz_navigation_sample(
+            (11, 10), 100.16, approach_command
+        )
+        bot._record_wz_navigation_sample(
+            (13.1, 10), 100.26, approach_command
+        )
+        self.assertGreaterEqual(
+            bot._wz_current_speed_px_per_sec, 20.0
+        )
 
         bot.loc_player_global = (15, 10)
         with patch(
@@ -1689,9 +1794,58 @@ class AutoBotLifecycleTests(unittest.TestCase):
         self.assertEqual(bot.cmd_move_y, "up")
         self.assertEqual(bot.cmd_action, "rope_mount_right")
 
+    def test_wz_rope_mount_accepts_extra_same_side_runway(self):
+        bot = self._route_color_bot()
+        mount_plan = SimpleNamespace(
+            contact=(18, 10),
+            vertical_gap_px=4.0,
+            jump_height_px=14.0,
+            jump_distance_px=11.0,
+            launch_offset_px=3,
+            staging_offset_px=7,
+            predicted_contact_height_px=10.0,
+            contact_clearance_px=6.0,
+            reachable_at_contact=True,
+        )
+        bot.wz_navigation = SimpleNamespace(
+            active=True,
+            jump_active=False,
+            walk_target_crossed=Mock(return_value=False),
+            route_legs=(SimpleNamespace(
+                rope_mount=mount_plan,
+                target=(18, 3),
+            ),),
+        )
+        # The generated staging point is x=11, but x=8 has even more valid
+        # left-side runway and must not walk back toward that single pixel.
+        bot.loc_player_global = (8, 10)
+        self._draw_rope_guide(bot, start=(8, 10), end=(18, 10))
+        bot.img_route[10, 18] = (0, 191, 255)
+
+        with patch(
+            "src.engine.MapleStoryAutoLevelUp.time.monotonic",
+            return_value=100.0,
+        ):
+            bot.update_cmd_by_route()
+
+        state = bot._rope_climb_state
+        self.assertEqual(state["start_x"], 11)
+        self.assertEqual(state["phase"], "settle")
+        self.assertEqual(bot.cmd_move_x, "none")
+
+        with patch(
+            "src.engine.MapleStoryAutoLevelUp.time.monotonic",
+            return_value=100.16,
+        ):
+            bot.update_cmd_by_route()
+
+        self.assertEqual(state["phase"], "running_approach")
+        self.assertEqual(bot.cmd_move_x, "right")
+        self.assertEqual(bot.cmd_action, "none")
 
 
-    def test_calibrated_wz_rope_mount_runs_through_launch_window(self):
+
+    def test_global_wz_rope_mount_runs_through_launch_window(self):
         bot = self._route_color_bot()
         bot._wz_current_speed_px_per_sec = 20.0
         bot.img_route = np.zeros((21, 80, 3), dtype=np.uint8)
@@ -1699,8 +1853,6 @@ class AutoBotLifecycleTests(unittest.TestCase):
         bot.cfg["wz_navigation"] = {
             "motion": {"walk_speed_px_per_sec": 20.0},
             "rope_mount_calibration": {
-                "map_id": "100040110",
-                "approach_direction": "right",
                 "launch_window_px": [8, 14],
                 "staging_offset_px": 25,
             }
@@ -1718,7 +1870,7 @@ class AutoBotLifecycleTests(unittest.TestCase):
         )
         bot.wz_navigation = SimpleNamespace(
             active=True,
-            map_id="100040110",
+            map_id="910000000",
             jump_active=False,
             walk_target_crossed=Mock(return_value=False),
             route_legs=(SimpleNamespace(
@@ -1768,6 +1920,41 @@ class AutoBotLifecycleTests(unittest.TestCase):
         self.assertEqual(bot.cmd_move_y, "up")
         self.assertEqual(bot.cmd_action, "rope_mount_right")
 
+    def test_global_wz_rope_window_is_symmetric_for_both_runup_sides(self):
+        bot = self._route_color_bot()
+        bot.img_route = np.zeros((21, 101, 3), dtype=np.uint8)
+        bot.cfg["wz_navigation"] = {
+            "rope_mount_calibration": {
+                "launch_window_px": [8, 14],
+                "staging_offset_px": 15,
+            }
+        }
+        bot.wz_navigation = SimpleNamespace(
+            active=True,
+            map_id="999999999",
+        )
+        calibration = bot._get_active_wz_rope_mount_calibration()
+        self.assertEqual(calibration, {
+            "launch_window_px": (8, 14),
+            "staging_offset_px": 15,
+        })
+
+        state = {
+            "target": (50, 10),
+            "launch_offset_px": 8,
+            "staging_offset_px": 12,
+            "rope_mount_calibration": calibration,
+            "rope_mount_approach_direction": None,
+        }
+        for side, start_x in (("left", 35), ("right", 65)):
+            with self.subTest(side=side):
+                bot._set_rope_runup_side(state, side=side)
+                self.assertEqual(state["side"], side)
+                self.assertEqual(state["start_x"], start_x)
+                self.assertEqual(
+                    state["active_launch_window_px"], (8, 14)
+                )
+
     def test_calibrated_wz_rope_mount_prefers_recorded_approach_side(self):
         bot = self._route_color_bot()
         bot.img_route = np.zeros((21, 80, 3), dtype=np.uint8)
@@ -1775,8 +1962,6 @@ class AutoBotLifecycleTests(unittest.TestCase):
         bot.cfg["wz_navigation"] = {
             "motion": {"walk_speed_px_per_sec": 20.0},
             "rope_mount_calibration": {
-                "map_id": "100040110",
-                "approach_direction": "right",
                 "launch_window_px": [8, 14],
                 "staging_offset_px": 25,
             }
@@ -1791,6 +1976,7 @@ class AutoBotLifecycleTests(unittest.TestCase):
             predicted_contact_height_px=10.0,
             contact_clearance_px=6.0,
             reachable_at_contact=True,
+            approach_direction="right",
         )
         bot.wz_navigation = SimpleNamespace(
             active=True,
@@ -1802,8 +1988,8 @@ class AutoBotLifecycleTests(unittest.TestCase):
                 target=(50, 3),
             ),),
         )
-        # Even when currently right of the rope, a stationary Hero returns to
-        # the recorded left-side runway rather than using an unmeasured jump.
+        # Recorded route evidence still chooses the preferred side even though
+        # the calibrated launch window itself is symmetric.
         bot.loc_player_global = (55, 10)
         self._draw_rope_guide(bot, start=(25, 10), end=(50, 10))
         bot.img_route[10, 50] = (0, 191, 255)
@@ -1843,7 +2029,6 @@ class AutoBotLifecycleTests(unittest.TestCase):
             "launch_offset_px": 8,
             "staging_offset_px": 12,
             "rope_mount_calibration": {
-                "approach_direction": "right",
                 "launch_window_px": (8, 14),
                 "staging_offset_px": 25,
             },
@@ -1866,7 +2051,7 @@ class AutoBotLifecycleTests(unittest.TestCase):
         self.assertEqual(bot._rope_climb_state["phase"], "position")
         self.assertEqual(bot._rope_climb_state["side"], "left")
         self.assertEqual(bot._rope_climb_state["start_x"], 25)
-        self.assertEqual(bot.cmd_action, "rope_hold")
+        self.assertEqual(bot.cmd_action, "none")
 
     def test_calibrated_rope_recovers_late_acquisition_from_dynamic_runway(self):
         bot = self._route_color_bot()
@@ -1876,8 +2061,6 @@ class AutoBotLifecycleTests(unittest.TestCase):
         bot.cfg["wz_navigation"] = {
             "motion": {"walk_speed_px_per_sec": 20.0},
             "rope_mount_calibration": {
-                "map_id": "100040110",
-                "approach_direction": "right",
                 "launch_window_px": [8, 14],
                 "staging_offset_px": 25,
             }
@@ -1921,8 +2104,8 @@ class AutoBotLifecycleTests(unittest.TestCase):
         self.assertEqual(state["side"], "left")
         self.assertEqual(bot.cmd_move_x, "left")
 
-        # One unchanged 0.9 s sample retries the recorded side rather than
-        # immediately abandoning it for an uncalibrated right-side approach.
+        # One unchanged 0.9 s sample retries the selected side before changing
+        # runways; both eventual directions use the same calibrated window.
         with patch(
             "src.engine.MapleStoryAutoLevelUp.time.monotonic",
             return_value=101.0,
@@ -1997,7 +2180,6 @@ class AutoBotLifecycleTests(unittest.TestCase):
             "launch_offset_px": 8,
             "staging_offset_px": 12,
             "rope_mount_calibration": {
-                "approach_direction": "right",
                 "launch_window_px": (8, 14),
                 "staging_offset_px": 25,
             },
@@ -2090,7 +2272,6 @@ class AutoBotLifecycleTests(unittest.TestCase):
             "launch_offset_px": 4,
             "staging_offset_px": 4,
             "rope_mount_calibration": {
-                "approach_direction": "right",
                 "launch_window_px": (8, 14),
                 "staging_offset_px": 4,
             },
@@ -2111,8 +2292,8 @@ class AutoBotLifecycleTests(unittest.TestCase):
 
         state = bot._rope_climb_state
         self.assertEqual(state["phase"], "position")
-        self.assertEqual(state["side"], "left")
-        self.assertEqual(state["start_x"], 14)
+        self.assertEqual(state["side"], "right")
+        self.assertEqual(state["start_x"], 22)
         self.assertEqual(bot.cmd_action, "rope_hold")
 
     def test_rope_climb_finishes_after_sustained_elevated_stall(self):
@@ -2193,10 +2374,22 @@ class AutoBotLifecycleTests(unittest.TestCase):
         ):
             self.assertTrue(bot._update_active_rope_climb())
 
+        self.assertTrue(bot._rope_climb_active)
+        self.assertEqual(
+            bot._rope_climb_state["ladder_exit_started_at"], 100.8
+        )
+        self.assertEqual(bot.cmd_move_y, "up")
+
+        with patch(
+            "src.engine.MapleStoryAutoLevelUp.time.monotonic",
+            return_value=101.81,
+        ):
+            self.assertTrue(bot._update_active_rope_climb())
+
         self.assertFalse(bot._rope_climb_active)
         self.assertEqual(bot._rope_climb_completed_key, guide_key)
 
-    def test_wz_rope_climb_coordinate_fallback_allows_top_drift(self):
+    def test_wz_rope_climb_never_finishes_without_climb_template(self):
         bot = self._route_color_bot()
         guide_key = (0, (11, 10, 8, 1), ((11, 10), (18, 10)))
         bot._rope_climb_active = True
@@ -2230,8 +2423,8 @@ class AutoBotLifecycleTests(unittest.TestCase):
         self.assertTrue(bot._rope_climb_active)
         self.assertEqual(bot._rope_climb_state["destination_reached_at"], 100.0)
 
-        # Four pixels of horizontal landing drift is inside the relaxed 6 px
-        # fallback, and small y jitter no longer resets destination dwell.
+        # Coordinates alone cannot distinguish standing on the platform from
+        # hanging at the rope endpoint, even with only small x/y drift.
         bot.loc_player_global = (22, 5)
 
         with patch(
@@ -2240,8 +2433,11 @@ class AutoBotLifecycleTests(unittest.TestCase):
         ):
             self.assertTrue(bot._update_active_rope_climb())
 
-        self.assertFalse(bot._rope_climb_active)
-        self.assertEqual(bot._rope_climb_completed_key, guide_key)
+        self.assertTrue(bot._rope_climb_active)
+        self.assertIsNone(
+            getattr(bot, "_rope_climb_completed_key", None)
+        )
+        self.assertEqual(bot.cmd_move_y, "up")
 
     def test_confirmed_rope_ascent_survives_navigation_pose_miss(self):
         bot = self._route_color_bot()
@@ -2255,6 +2451,7 @@ class AutoBotLifecycleTests(unittest.TestCase):
         bot._portal_sweep_active = False
         navigation_update = SimpleNamespace(
             player_navigation=(18.2, 7.8),
+            player_navigation_raw=(18.2, 7.8),
         )
         navigator = SimpleNamespace(
             active=True,
@@ -2285,6 +2482,7 @@ class AutoBotLifecycleTests(unittest.TestCase):
         bot._portal_sweep_active = False
         navigation_update = SimpleNamespace(
             player_navigation=(18.2, 16.8),
+            player_navigation_raw=(18.2, 16.8),
         )
         navigator = SimpleNamespace(
             active=True,
@@ -2913,6 +3111,20 @@ class AutoBotLifecycleTests(unittest.TestCase):
         location = bot.get_player_location_by_appearance(
             expected_player=(55, 47),
             allow_global=False,
+        )
+
+        self.assertEqual(location, (55, 47))
+        self.assertEqual(bot.last_appearance_match["pose"], "climbing")
+
+    def test_strict_yolo_anchor_accepts_exact_climb_hood_offset(self):
+        bot = self._make_appearance_bot("appearance_climb.png")
+
+        # Production YOLO reports the full Hero-box centre, roughly 46 px
+        # right and 70 px below the hood template's inferred player point.
+        location = bot.get_player_location_by_appearance(
+            expected_player=(101, 117),
+            allow_global=False,
+            strict_anchor=True,
         )
 
         self.assertEqual(location, (55, 47))
